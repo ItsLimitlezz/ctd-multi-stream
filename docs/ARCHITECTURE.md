@@ -192,7 +192,7 @@ The web UI is port-forwarded to the internet, so security is a core requirement,
 
 ## 9. Deployment (TrueNAS)
 
-- Image: `ghcr.io/<owner>/ctd-multi-stream:<version>`.
+- Image: `ghcr.io/itslimitlezz/ctd-multi-stream:<version>`.
 - Volume: `/data` (database, browser profiles, certificates, logs) on a TrueNAS dataset.
 - Ports: `443` web (forwarded), `80` optional for HTTP-01 (forwarded), `1935` RTMP (LAN only).
 - Install: TrueNAS → Apps → Discover → **Install via YAML** with the compose file from the repo. Later: submit to the TrueNAS community app catalog.

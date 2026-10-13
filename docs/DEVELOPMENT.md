@@ -90,7 +90,7 @@ Set `DATA_DIR`, `MEDIAMTX_BIN`, `FFMPEG_BIN` and `WEB_DIR` as needed. The image 
 ```bash
 docker build -t ctd-multi-stream .
 docker compose up -d --build                  # build from this checkout and run (see docker-compose.yml)
-docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<owner>/ctd-multi-stream .
+docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/itslimitlezz/ctd-multi-stream .
 ```
 
 The `Dockerfile` is multi-stage: build on the host's architecture, install production dependencies and Playwright Chromium for the target architecture, and download the pinned MediaMTX/FFmpeg builds with `scripts/setup-tools.mjs`. The runtime image runs as uid/gid 568 with `tini` as PID 1, and its health check is `scripts/healthcheck.mjs`.
@@ -99,7 +99,7 @@ The `Dockerfile` is multi-stage: build on the host's architecture, install produ
 
 1. Bump `version` in `package.json` (the app reports it in **Settings → About** and `/healthz`).
 2. Tag the commit `vX.Y.Z` and push the tag.
-3. `.github/workflows/docker.yml` builds `linux/amd64` and `linux/arm64` and pushes `ghcr.io/<owner>/ctd-multi-stream:X.Y.Z`, `:X.Y` and `:latest`. Every push to `main` publishes `:main` and `:sha-<commit>`.
+3. `.github/workflows/docker.yml` builds `linux/amd64` and `linux/arm64` and pushes `ghcr.io/itslimitlezz/ctd-multi-stream:X.Y.Z`, `:X.Y` and `:latest`. Every push to `main` publishes `:main` and `:sha-<commit>`.
 
 The first time the workflow publishes, GitHub creates the package as **private**. Make it public (the package's **Package settings → Change visibility**) so TrueNAS and Docker hosts can pull it without logging in.
 

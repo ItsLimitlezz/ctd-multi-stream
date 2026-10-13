@@ -4,7 +4,7 @@
 # and Playwright Chromium (browser-driven platforms). Requires BuildKit (default since Docker 23).
 #
 #   docker build -t ctd-multi-stream .
-#   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<owner>/ctd-multi-stream .
+#   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/itslimitlezz/ctd-multi-stream .
 #
 # Node >= 24.7 is required (node:sqlite, crypto.argon2). Bump the tag below for Node security releases:
 # https://hub.docker.com/_/node/tags?name=24-bookworm-slim

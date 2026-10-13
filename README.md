@@ -42,8 +42,8 @@ Follow **[docs/INSTALL-TRUENAS.md](docs/INSTALL-TRUENAS.md)**. In short: create 
 ### Docker Compose (any Linux host)
 
 ```bash
-git clone <this repository> ctd-multi-stream && cd ctd-multi-stream
-cp .env.example .env                           # set CTD_IMAGE=ghcr.io/<owner>/ctd-multi-stream:latest,
+git clone https://github.com/ItsLimitlezz/ctd-multi-stream.git && cd ctd-multi-stream
+cp .env.example .env                           # set CTD_IMAGE=ghcr.io/itslimitlezz/ctd-multi-stream:latest,
                                                # or leave it unset to build from source
 mkdir -p data && sudo chown 568:568 data       # the container runs as uid/gid 568
 docker compose up -d
@@ -51,8 +51,6 @@ docker compose logs | grep setupCode           # one-time code to create the adm
 ```
 
 Open `https://<server-ip>` (accept the self-signed certificate on first start), enter the setup code and create your admin account. Forward public TCP 443 → server 443 and 80 → server 80 for remote access and an automatic Let's Encrypt certificate. **Never forward 1935.**
-
-`<owner>` stands for the GitHub user or organization that publishes the image.
 
 Forgot a password or lost your 2FA authenticator, and no other admin can reset it in **Settings → Users**? Run the recovery command inside the container. It prints a new password once, turns off 2FA and signs the user out everywhere; then change the password under **Profile**:
 

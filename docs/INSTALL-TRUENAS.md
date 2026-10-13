@@ -26,10 +26,9 @@ The full path will be `/mnt/<pool>/apps/ctd-multi-stream`.
 ## 2. Install the app
 
 1. Open [`deploy/truenas/ctd-multi-stream.yaml`](../deploy/truenas/ctd-multi-stream.yaml) and copy it into a text editor.
-2. Replace `<pool>` with your pool name.
-3. Replace `<owner>` with the GitHub user or organization that publishes CTD Multi-Stream, in lowercase. The image is `ghcr.io/<owner>/ctd-multi-stream`.
-4. In TrueNAS: **Apps** → **Discover Apps** → the **⋮** menu → **Install via YAML**.
-5. **Name:** `ctd-multi-stream`. Paste the edited YAML into the editor and click **Save**.
+2. Replace `<pool>` with your pool name. (The image is `ghcr.io/itslimitlezz/ctd-multi-stream`; nothing to change there.)
+3. In TrueNAS: **Apps** → **Discover Apps** → the **⋮** menu → **Install via YAML**.
+4. **Name:** `ctd-multi-stream`. Paste the edited YAML into the editor and click **Save**.
 
 TrueNAS pulls the image (about 1 GB) and starts the container. Wait until the app shows **Running**.
 
@@ -117,7 +116,7 @@ To restore: stop the app, roll back the snapshot or copy the files back into the
 
 Update when you're not streaming: the container restarts, which ends any running session.
 
-- **On `latest`:** if TrueNAS shows **Update** for the app, use it. Otherwise pull the new image under **Apps** → **Configuration** → **Manage Container Images** → **Pull Image** (`ghcr.io/<owner>/ctd-multi-stream`, tag `latest`), then stop and start the app.
+- **On `latest`:** if TrueNAS shows **Update** for the app, use it. Otherwise pull the new image under **Apps** → **Configuration** → **Manage Container Images** → **Pull Image** (`ghcr.io/itslimitlezz/ctd-multi-stream`, tag `latest`), then stop and start the app.
 - **On a pinned version:** **Edit** the app, change the tag in `image:`, and **Save**.
 
 The database schema migrates automatically on start. Downgrades are not supported, so snapshot the dataset before upgrading.

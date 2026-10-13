@@ -16,9 +16,8 @@ name: ctd-multi-stream
 
 services:
   ctd-multi-stream:
-    # Prebuilt multi-arch image (amd64 + arm64) from GitHub Container Registry. "<owner>" is a placeholder
-    # for the GitHub user/organization that publishes CTD Multi-Stream (lowercase), so set the real name
-    # in .env:  CTD_IMAGE=ghcr.io/<owner>/ctd-multi-stream:latest
+    # Prebuilt multi-arch image (amd64 + arm64) from GitHub Container Registry. To use it, set in .env:
+    #   CTD_IMAGE=ghcr.io/itslimitlezz/ctd-multi-stream:latest
     # Without CTD_IMAGE, Compose builds the image from this checkout (`build: .`).
     image: ${CTD_IMAGE:-ctd-multi-stream:local}
     build: .
