@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["server/src", "shared", "scripts/*.ts"],
+  "exclude": ["node_modules", "dist", "web"]
+}

@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Browser automation tests drive a real headless Chromium.
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # A project whose include glob matches nothing passes silently, so fail if either one collects no files.
+      - name: Check every Vitest project finds tests
+        run: |
+          for project in server web; do
+            count=$(npx vitest list --project "$project" --filesOnly | grep -c "^\[$project\]" || true)
+            echo "$project: $count test files"
+            if [ "$count" -eq 0 ]; then echo "::error::Vitest project '$project' collected no test files"; exit 1; fi
+          done
+
+      # Runs the server (server/src, shared, scripts) and web (web/src) projects from vitest.config.ts.
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build

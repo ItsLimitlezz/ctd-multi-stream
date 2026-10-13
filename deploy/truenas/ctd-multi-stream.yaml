@@ -1,0 +1,49 @@
+# CTD Multi-Stream for TrueNAS (24.10 "Electric Eel" or newer: Docker-based apps).
+# Full guide: docs/INSTALL-TRUENAS.md
+#
+# Before installing:
+#   1. Datasets -> create  <pool>/apps/ctd-multi-stream  and give the "apps" user (uid 568) Modify
+#      permission on it (Edit Permissions -> ACL, or set owner user/group to apps).
+#   2. In this file, replace  <pool>  with your pool name and  <owner>  with the GitHub user/organization
+#      that publishes CTD Multi-Stream (lowercase).
+# Install: Apps -> Discover Apps -> (three-dot menu) -> Install via YAML -> Name: ctd-multi-stream ->
+#   paste this file -> Save.
+# Setup code for the first login: Apps -> Installed -> ctd-multi-stream -> Workloads -> View Logs,
+#   look for "setupCode".
+#
+# Router: forward public TCP 443 -> NAS 30443 and public TCP 80 -> NAS 30080 (Let's Encrypt).
+#   Do NOT forward 1935, and never forward to the NAS's own 80/443 (that is the TrueNAS admin UI).
+
+services:
+  ctd-multi-stream:
+    # latest = newest release. Pin a version (e.g. :0.1.0) to control upgrades.
+    image: ghcr.io/<owner>/ctd-multi-stream:latest
+    # TrueNAS "apps" user. Must be able to write the dataset below.
+    user: "568:568"
+    restart: unless-stopped
+    init: true
+    # Chromium (browser-driven platforms) needs more shared memory than Docker's 64 MB default.
+    shm_size: 1gb
+    # Time to end lives cleanly on every platform when the app stops.
+    stop_grace_period: 30s
+    ports:
+      # TrueNAS's own web UI uses 80/443, so the app uses 30443/30080 on the NAS.
+      - "30443:8443" # web UI (HTTPS): https://<NAS-IP>:30443 on your LAN
+      - "30080:8080" # Let's Encrypt HTTP-01 + redirect to HTTPS
+      - "1935:1935" # RTMP from OBS (LAN only, never port-forward)
+    environment:
+      # Port the router forwards to 30443 (used in links and redirects).
+      PUBLIC_PORT: "443"
+      TLS_MODE: auto
+      # Optional, uncomment as needed (see docs/INSTALL-TRUENAS.md):
+      # ACME_EMAIL: you@example.com
+      # PUBLIC_HOST: stream.example.com
+    volumes:
+      # Database, master.key (decrypts your stored keys/tokens), certificates. Back up this dataset.
+      - type: bind
+        source: /mnt/<pool>/apps/ctd-multi-stream
+        target: /data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

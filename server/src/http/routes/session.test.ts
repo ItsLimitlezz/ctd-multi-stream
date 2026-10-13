@@ -1,0 +1,152 @@
+import Fastify, { type FastifyInstance } from 'fastify';
+import pino from 'pino';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { TitleResponse } from '../../../../shared/api.js';
+import type { SessionState, TitleResult, User } from '../../../../shared/types.js';
+import { EventBus } from '../../events.js';
+import type { AppServices, Orchestrator } from '../../services.js';
+import sessionRoutes from './session.js';
+
+function fakeOrchestrator() {
+  const state: SessionState = {
+    status: 'offline',
+    sessionId: null,
+    startedAt: null,
+    title: '',
+    autoGoLive: true,
+    feeds: [],
+    destinations: [],
+  };
+  const results: TitleResult[] = [{ destinationId: 'd1', ok: true }];
+  const orch = {
+    init: vi.fn(async () => {}),
+    state: vi.fn(() => ({ ...state })),
+    start: vi.fn(async () => {
+      state.status = 'live';
+    }),
+    stop: vi.fn(async () => {
+      state.status = 'offline';
+    }),
+    setTitle: vi.fn(async (t: string) => {
+      state.title = t.trim();
+      return results;
+    }),
+    setAutoGoLive: vi.fn((v: boolean) => {
+      state.autoGoLive = v;
+    }),
+    destinationChanged: vi.fn(async () => {}),
+    destinationRemoved: vi.fn(async () => {}),
+    retryDestination: vi.fn(async () => {}),
+    shutdown: vi.fn(async () => {}),
+  } satisfies Orchestrator;
+  return orch;
+}
+
+const USER: User = {
+  id: 'u1',
+  username: 'alice',
+  role: 'operator',
+  totpEnabled: false,
+  createdAt: '2026-01-01T00:00:00.000Z',
+  lastLoginAt: null,
+};
+
+let app: FastifyInstance | null = null;
+
+async function build() {
+  const orchestrator = fakeOrchestrator();
+  const audits: { action: string; detail?: string | null; userId: string | null }[] = [];
+  const services = {
+    log: pino({ level: 'silent' }),
+    bus: new EventBus(),
+    orchestrator,
+    repos: { audit: { log: (e: (typeof audits)[number]) => void audits.push(e) } },
+  } as unknown as AppServices;
+
+  const instance = Fastify();
+  instance.decorateRequest('user', null);
+  instance.decorateRequest('authSession', null);
+  // Stand-in for the auth plugin: header `x-test-user: 1` logs the request in.
+  instance.addHook('onRequest', async (req) => {
+    req.user = req.headers['x-test-user'] ? USER : null;
+  });
+  await instance.register(sessionRoutes, { services });
+  await instance.ready();
+  app = instance;
+  return { app: instance, orchestrator, audits };
+}
+
+afterEach(async () => {
+  await app?.close();
+  app = null;
+});
+
+const auth = { 'x-test-user': '1' };
+
+describe('session routes', () => {
+  it('require a logged-in user', async () => {
+    const { app } = await build();
+    for (const [method, url] of [
+      ['GET', '/api/session'],
+      ['POST', '/api/session/start'],
+      ['POST', '/api/session/stop'],
+      ['PUT', '/api/session/title'],
+      ['PUT', '/api/session/auto'],
+    ] as const) {
+      const res = await app.inject({ method, url });
+      expect(res.statusCode, `${method} ${url}`).toBe(401);
+    }
+  });
+
+  it('GET /api/session returns the state', async () => {
+    const { app } = await build();
+    const res = await app.inject({ method: 'GET', url: '/api/session', headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<SessionState>().status).toBe('offline');
+  });
+
+  it('start and stop call the orchestrator and audit', async () => {
+    const { app, orchestrator, audits } = await build();
+    const started = await app.inject({ method: 'POST', url: '/api/session/start', headers: auth });
+    expect(started.statusCode).toBe(200);
+    expect(started.json<SessionState>().status).toBe('live');
+    expect(orchestrator.start).toHaveBeenCalledWith('manual');
+
+    const stopped = await app.inject({ method: 'POST', url: '/api/session/stop', headers: auth });
+    expect(stopped.json<SessionState>().status).toBe('offline');
+    expect(orchestrator.stop).toHaveBeenCalledWith('manual');
+    expect(audits.map((a) => a.action)).toEqual(['session.start', 'session.stop']);
+    expect(audits[0]?.userId).toBe('u1');
+  });
+
+  it('PUT /api/session/title validates, trims and returns results', async () => {
+    const { app, orchestrator, audits } = await build();
+    const tooLong = await app.inject({ method: 'PUT', url: '/api/session/title', headers: auth, payload: { title: 'x'.repeat(141) } });
+    expect(tooLong.statusCode).toBe(400);
+    expect(tooLong.json<{ code: string }>().code).toBe('invalid');
+    const missing = await app.inject({ method: 'PUT', url: '/api/session/title', headers: auth, payload: {} });
+    expect(missing.statusCode).toBe(400);
+    expect(orchestrator.setTitle).not.toHaveBeenCalled();
+
+    // 140 emoji = 280 UTF-16 units, still 140 characters.
+    const emoji = await app.inject({ method: 'PUT', url: '/api/session/title', headers: auth, payload: { title: '😀'.repeat(140) } });
+    expect(emoji.statusCode).toBe(200);
+
+    const ok = await app.inject({ method: 'PUT', url: '/api/session/title', headers: auth, payload: { title: '  Friday stream  ' } });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json<TitleResponse>()).toEqual({ title: 'Friday stream', results: [{ destinationId: 'd1', ok: true }] });
+    expect(orchestrator.setTitle).toHaveBeenLastCalledWith('Friday stream');
+    expect(audits.at(-1)).toMatchObject({ action: 'session.title', detail: 'Friday stream' });
+  });
+
+  it('PUT /api/session/auto toggles auto go-live', async () => {
+    const { app, orchestrator, audits } = await build();
+    const bad = await app.inject({ method: 'PUT', url: '/api/session/auto', headers: auth, payload: { autoGoLive: 'yes' } });
+    expect(bad.statusCode).toBe(400);
+    const res = await app.inject({ method: 'PUT', url: '/api/session/auto', headers: auth, payload: { autoGoLive: false } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<SessionState>().autoGoLive).toBe(false);
+    expect(orchestrator.setAutoGoLive).toHaveBeenCalledWith(false);
+    expect(audits.at(-1)).toMatchObject({ action: 'session.auto', detail: 'off' });
+  });
+});

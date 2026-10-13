@@ -1,0 +1,138 @@
+/* BrowserViewer: remote-controlled browser page (login viewer). */
+
+.browser-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bv-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+.bv-toolbar .icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.bv-toolbar .icon-btn.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.bv-address {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.bv-address .input {
+  min-height: 36px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.bv-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+.bv-status .dot {
+  width: 8px;
+  height: 8px;
+}
+
+.bv-type {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.bv-type .input {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.bv-title {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.bv-screen {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  cursor: default;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.bv-screen:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  box-shadow: none;
+}
+.bv-screen.is-empty {
+  aspect-ratio: 16 / 10;
+  min-height: 220px;
+}
+.bv-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.bv-screen.is-empty .bv-canvas {
+  display: none;
+}
+
+.bv-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+  background: color-mix(in srgb, var(--bg-sunken) 82%, transparent);
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  text-align: center;
+}
+.bv-overlay.is-closed {
+  color: var(--text);
+}
+
+.bv-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.bv-notice .icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.bv-hint {
+  color: var(--text-faint);
+  font-size: 0.8rem;
+}
+
+/* A modal holding the viewer gets as much width as the window allows. */
+.modal-lg:has(.browser-viewer) {
+  width: min(1180px, calc(100vw - 2 * var(--gutter)));
+}
+@media (max-width: 480px) {
+  .modal:has(.browser-viewer) .modal-body {
+    padding: 12px;
+  }
+}

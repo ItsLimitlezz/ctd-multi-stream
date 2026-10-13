@@ -1,0 +1,52 @@
+# CTD Multi-Stream on a generic Docker host (Linux server, mini PC, VPS, Docker Desktop).
+# TrueNAS: use deploy/truenas/ctd-multi-stream.yaml instead (docs/INSTALL-TRUENAS.md).
+#
+# First start:
+#   cp .env.example .env              # optional settings (image, Let's Encrypt e-mail, domain, ...)
+#   mkdir -p data && sudo chown 568:568 data    # the container runs as uid/gid 568
+#   docker compose up -d
+#   docker compose logs | grep setupCode    # one-time code to create the admin account
+# Then open https://<this-host> (LAN) or https://<your-public-ip> once your router forwards port 443.
+#
+# Locked out (forgotten password / lost 2FA)? Prints a new password, turns off 2FA, signs the user out:
+#   docker compose exec ctd-multi-stream node dist/server/src/cli.js list-users
+#   docker compose exec ctd-multi-stream node dist/server/src/cli.js reset-password <username>
+
+name: ctd-multi-stream
+
+services:
+  ctd-multi-stream:
+    # Prebuilt multi-arch image (amd64 + arm64) from GitHub Container Registry. "<owner>" is a placeholder
+    # for the GitHub user/organization that publishes CTD Multi-Stream (lowercase), so set the real name
+    # in .env:  CTD_IMAGE=ghcr.io/<owner>/ctd-multi-stream:latest
+    # Without CTD_IMAGE, Compose builds the image from this checkout (`build: .`).
+    image: ${CTD_IMAGE:-ctd-multi-stream:local}
+    build: .
+    restart: unless-stopped
+    init: true
+    # Chromium (browser-driven platforms) needs more than Docker's default 64 MB of shared memory.
+    shm_size: 1gb
+    # Time to end lives cleanly on every platform before Docker kills the container.
+    stop_grace_period: 30s
+    ports:
+      # Router: forward public TCP 443 and 80 to this host. Nothing else.
+      - "443:8443" # web UI (HTTPS)
+      - "80:8080" # Let's Encrypt HTTP-01 challenges + redirect to HTTPS (needed for automatic certificates)
+      - "1935:1935" # RTMP from OBS. LAN only: NEVER port-forward 1935 on your router.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TLS_MODE: ${TLS_MODE:-auto}
+    volumes:
+      # Database, master.key (decrypts your stored keys/tokens), certificates. Back this folder up.
+      - ./data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

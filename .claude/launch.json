@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ctd-dev",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$env:TLS_MODE='off'; $env:DATA_DIR='./data-dev'; $env:WEB_PORT='8443'; node dist/server/src/index.js"
+      ],
+      "port": 8443
+    }
+  ]
+}

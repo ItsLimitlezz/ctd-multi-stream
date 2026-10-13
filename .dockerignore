@@ -1,0 +1,39 @@
+# Keep the build context small, cache-friendly and free of local state / secrets.
+# The image needs: package*.json, tsconfig*.json, vite.config.ts, shared/, server/, web/, scripts/, LICENSE.
+
+# Dependencies and build output (rebuilt inside the image)
+node_modules
+**/node_modules
+dist
+coverage
+
+# Local runtime state: database, master.key, certificates, browser sessions, downloaded tools.
+# data* also covers throwaway data folders such as data-dev/ (DATA_DIR while developing).
+data
+data*
+tools
+.env
+.env.*
+*.log
+
+# Tests are not part of the build
+**/*.test.ts
+**/*.test.tsx
+**/*.test.mjs
+
+# Repo / editor / CI files
+.git
+.gitignore
+.gitattributes
+.github
+.vscode
+.idea
+.claude
+.DS_Store
+Thumbs.db
+docs
+deploy
+README.md
+Dockerfile
+.dockerignore
+docker-compose.yml

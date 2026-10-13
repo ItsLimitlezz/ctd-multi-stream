@@ -1,0 +1,168 @@
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import type { SessionStatus } from '@shared/types';
+import { Link, ROUTES, useRoute } from '../router';
+import { useAuth } from '../state/auth';
+import { useNow } from '../state/hooks';
+import { useLiveConnections, useLiveStatus, useSession } from '../state/live';
+import { Button } from './Button';
+import { elapsedSeconds, formatDuration } from './format';
+import { CloseIcon, MenuIcon } from './icons';
+import { StatusDot } from './StatusDot';
+import { cx, type Tone } from './utils';
+
+/** Top bar (brand, live indicator, nav, user menu) + main content area. */
+export function AppShell({ children }: { children: ReactNode }) {
+  const { user, isAdmin, logout } = useAuth();
+  const route = useRoute();
+  const [navOpen, setNavOpen] = useState(false);
+
+  // Close the mobile menu on navigation and on Escape.
+  useEffect(() => setNavOpen(false), [route.pathname]);
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setNavOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [navOpen]);
+
+  const items = ROUTES.filter((r) => r.nav && (!r.adminOnly || isAdmin));
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div className="topbar-inner">
+          <button
+            type="button"
+            className="icon-btn nav-toggle"
+            aria-label={navOpen ? 'Close menu' : 'Open menu'}
+            aria-expanded={navOpen}
+            aria-controls="main-nav"
+            onClick={() => setNavOpen((o) => !o)}
+          >
+            {navOpen ? <CloseIcon /> : <MenuIcon />}
+          </button>
+          <Link to="/" className="brand" aria-label="CTD Multi-Stream home">
+            <img src="/favicon.svg" alt="" width={26} height={26} />
+            <span className="brand-text">CTD Multi-Stream</span>
+          </Link>
+          <nav id="main-nav" className={cx('nav', navOpen && 'is-open')} aria-label="Main">
+            {items.map((r) => (
+              <Link key={r.name} to={r.path} className="nav-link" aria-current={route.name === r.name ? 'page' : undefined}>
+                {r.label}
+              </Link>
+            ))}
+            {user && (
+              <div className="nav-mobile-footer">
+                <span className="muted small truncate">
+                  Signed in as <strong>{user.username}</strong> ({user.role})
+                </span>
+                <Button size="sm" onClick={() => void logout()}>
+                  Log out
+                </Button>
+              </div>
+            )}
+          </nav>
+          <div className="spacer" />
+          <LiveIndicator />
+          {user && <UserMenu username={user.username} role={user.role} onLogout={() => void logout()} />}
+        </div>
+      </header>
+      <main className="main" id="main">
+        {children}
+      </main>
+    </div>
+  );
+}
+
+const STATUS_UI: Record<SessionStatus, { label: string; tone: Tone; pulse: boolean }> = {
+  offline: { label: 'Offline', tone: 'neutral', pulse: false },
+  starting: { label: 'Starting', tone: 'warn', pulse: true },
+  live: { label: 'LIVE', tone: 'live', pulse: true },
+  stopping: { label: 'Stopping', tone: 'warn', pulse: true },
+};
+
+/** Session status pill (links to the dashboard); shows reconnecting when the socket is down. */
+export function LiveIndicator() {
+  const session = useSession();
+  const connected = useLiveStatus();
+  const connections = useLiveConnections();
+  const live = session?.status === 'live';
+  const now = useNow(live ? 1000 : null);
+
+  if (!connected) {
+    const label = connections === 0 ? 'Connecting…' : 'Reconnecting…';
+    return (
+      <span className="live-pill is-warn" title="Live updates from the server are unavailable" role="status">
+        <StatusDot tone="warn" pulse />
+        {label}
+      </span>
+    );
+  }
+  const ui = STATUS_UI[session?.status ?? 'offline'];
+  return (
+    <Link to="/" className={cx('live-pill', live && 'is-live')} title="Stream status" aria-label={`Stream status: ${ui.label}`}>
+      <StatusDot tone={ui.tone} pulse={ui.pulse} />
+      {ui.label}
+      {live && <span className="live-elapsed">{formatDuration(elapsedSeconds(session?.startedAt, now))}</span>}
+    </Link>
+  );
+}
+
+function UserMenu({ username, role, onLogout }: { username: string; role: string; onLogout: () => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const route = useRoute();
+
+  useEffect(() => setOpen(false), [route.pathname]);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="user-menu" ref={ref}>
+      <button
+        type="button"
+        className="user-button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Account menu for ${username}`}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="avatar" aria-hidden="true">
+          {username.charAt(0)}
+        </span>
+        <span className="user-name truncate">{username}</span>
+      </button>
+      {open && (
+        <div className="menu" role="menu">
+          <div className="menu-header">
+            <div className="truncate">
+              <strong>{username}</strong>
+            </div>
+            <div className="muted small">{role === 'admin' ? 'Administrator' : 'Operator'}</div>
+          </div>
+          <Link to="/profile" className="menu-item" role="menuitem">
+            Profile &amp; security
+          </Link>
+          <button type="button" className="menu-item is-danger" role="menuitem" onClick={onLogout}>
+            Log out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
