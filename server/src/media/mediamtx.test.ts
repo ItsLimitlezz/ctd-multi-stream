@@ -44,7 +44,9 @@ function fakeApi() {
 async function setup(opts: { bin?: string; secrets?: Record<string, string>; deps?: MediaServerDeps } = {}) {
   let bin = opts.bin;
   if (bin === undefined) {
-    bin = path.join(tmp, process.platform === 'win32' ? 'mediamtx.exe' : 'mediamtx');
+    // Own folder: on Linux <tmp>/mediamtx would collide with the config dir <dataDir>/mediamtx/.
+    bin = path.join(tmp, 'bin', process.platform === 'win32' ? 'mediamtx.exe' : 'mediamtx');
+    await fs.mkdir(path.dirname(bin), { recursive: true });
     await fs.writeFile(bin, '');
     await fs.chmod(bin, 0o755);
   }
