@@ -29,7 +29,9 @@ services:
       # TrueNAS's own web UI uses 80/443, so the app uses 30443/30080 on the NAS.
       - "30443:8443" # web UI (HTTPS): https://<NAS-IP>:30443 on your LAN
       - "30080:8080" # Let's Encrypt HTTP-01 + redirect to HTTPS
-      - "1935:1935" # RTMP from OBS (LAN only, never port-forward)
+      # RTMP from OBS (LAN only, never port-forward). If 1935 is already used on the NAS ("address already
+      # in use"), use e.g. "1936:1936" here and add RTMP_PORT: "1936" under environment.
+      - "1935:1935"
     environment:
       # Port the router forwards to 30443 (used in links and redirects).
       PUBLIC_PORT: "443"
