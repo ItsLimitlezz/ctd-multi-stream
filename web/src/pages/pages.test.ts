@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { WsServerMessage } from '@shared/api';
-import type { ChatMessage, Feed, FeedState, PlatformId, SessionState } from '@shared/types';
+import type { ChatMessage, DestinationPhase, DestinationState, Feed, FeedState, PlatformId, SessionState } from '@shared/types';
 import { LiveStore } from '../state/live-store';
 import { chatPlatforms, filterChat } from './ChatPage';
-import { applySessionResult, statusSubtitle } from './DashboardPage';
+import { applySessionResult, recoverySummary, statusSubtitle } from './DashboardPage';
 import { groupSecret, validatePasswordChange } from './ProfilePage';
 import { validateSetup } from './SetupPage';
 
@@ -56,6 +56,18 @@ describe('page helpers', () => {
 });
 
 const feed = (f: Feed, online: boolean): FeedState => ({ feed: f, online, since: null, video: null, audio: null, bitrateKbps: null });
+const dest = (id: string, phase: DestinationPhase, over: Partial<DestinationState> = {}): DestinationState => ({
+  destinationId: id,
+  phase,
+  message: null,
+  stats: null,
+  watchUrl: null,
+  retries: 0,
+  since: '2026-10-11T10:00:00.000Z',
+  recoveries: 0,
+  lastRecovery: null,
+  ...over,
+});
 const session = (over: Partial<SessionState> = {}): SessionState => ({
   status: 'offline',
   sessionId: null,
@@ -78,6 +90,15 @@ describe('dashboard status', () => {
     expect(statusSubtitle(session({ autoGoLive: false, feeds: [feed('landscape', true)] }))).toBe('Press "Go live" when you are ready.');
   });
 
+  it('counts a destination being recovered as active but not live', () => {
+    const live = session({
+      status: 'live',
+      destinations: [dest('a', 'live'), dest('b', 'recovering'), dest('c', 'disabled')],
+    });
+    expect(statusSubtitle(live)).toBe('1 of 2 destinations live · 1 recovering');
+    expect(statusSubtitle(session({ status: 'live', destinations: [dest('a', 'live'), dest('b', 'live')] }))).toBe('2 of 2 destinations live');
+  });
+
   it("the auto toggle's REST snapshot doesn't undo a newer WebSocket 'live'", () => {
     const store = new LiveStore();
     store.dispatch({ type: 'hello', session: session({ autoGoLive: false }), chat: [] } as WsServerMessage);
@@ -89,5 +110,33 @@ describe('dashboard status', () => {
     // Start / stop answer after the operation finished: their snapshot replaces the state.
     applySessionResult('stop', session({ status: 'offline', autoGoLive: true }), store);
     expect(store.getState().session?.status).toBe('offline');
+  });
+});
+
+describe('destination card: takedown recoveries', () => {
+  const now = Date.parse('2026-10-11T23:30:00.000Z');
+
+  it('says nothing before the first recovery', () => {
+    expect(recoverySummary(null, now)).toBeNull();
+    expect(recoverySummary(dest('a', 'live'), now)).toBeNull();
+    // An older server without the new fields.
+    expect(recoverySummary({ recoveries: undefined as unknown as number, lastRecovery: null }, now)).toBeNull();
+  });
+
+  it('shows the count, the last reason and how long ago', () => {
+    const state = dest('a', 'live', {
+      recoveries: 2,
+      lastRecovery: { at: '2026-10-11T23:27:00.000Z', reason: 'copyright takedown' },
+    });
+    expect(recoverySummary(state, now)).toBe('Recovered 2× · last: copyright takedown 3 min ago');
+    expect(recoverySummary({ recoveries: 1, lastRecovery: null }, now)).toBe('Recovered 1×');
+    expect(recoverySummary({ recoveries: 1, lastRecovery: { at: 'bad', reason: '' } }, now)).toBe('Recovered 1×');
+  });
+
+  it('keeps long or multi-line reasons on one short line', () => {
+    const reason = `Your live video was removed\nbecause it may violate ${'x'.repeat(200)}`;
+    const text = recoverySummary({ recoveries: 3, lastRecovery: { at: '2026-10-11T23:29:58.000Z', reason } }, now) ?? '';
+    expect(text).toMatch(/^Recovered 3× · last: Your live video was removed because it may violate x+… just now$/);
+    expect(text.length).toBeLessThan(170);
   });
 });

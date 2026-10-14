@@ -18,6 +18,22 @@ export type ChatMessageInput = Omit<ChatMessage, 'id' | 'platform' | 'destinatio
   ts?: string;
 };
 
+/**
+ * Chat moderation as produced by a driver (a chat source may yield these between messages).
+ * The ChatHub removes the affected messages and emits 'chat-moderation'.
+ */
+export type ChatModerationInput =
+  | { kind: 'message-deleted'; platformMessageId: string }
+  | { kind: 'user-cleared'; userId?: string; userName?: string }
+  | { kind: 'cleared' };
+
+/** What a chat source yields. Tell them apart with `isChatModeration`. */
+export type ChatSourceItem = ChatMessageInput | ChatModerationInput;
+
+export function isChatModeration(item: ChatSourceItem): item is ChatModerationInput {
+  return item.kind === 'message-deleted' || item.kind === 'user-cleared' || item.kind === 'cleared';
+}
+
 /** Developer-app credentials the user entered for this platform (see PlatformInfo.developerApp). */
 export type PlatformAppCredentials = Record<string, string>;
 
@@ -43,6 +59,11 @@ export interface DriverContext {
   ): Promise<void>;
   /** Aborted when the session/destination is stopped. Drivers should pass it to fetch/waits. */
   signal: AbortSignal;
+  /**
+   * Session test mode is on: prepare() must use the platform's private/test setting
+   * (PlatformInfo.testMode). Drivers without a test mode are never prepared while it's on.
+   */
+  testMode?: boolean;
 }
 
 /**
@@ -79,7 +100,37 @@ export interface PreparedLive {
    * Chat stream for this live. Should yield until `signal` aborts. If it throws or ends early,
    * the ChatHub restarts it with backoff while the destination is live.
    */
-  chat?(signal: AbortSignal): AsyncIterable<ChatMessageInput>;
+  chat?(signal: AbortSignal): AsyncIterable<ChatSourceItem>;
+  /**
+   * Live health watcher, started by the runner once the destination is live (and stopped with
+   * `signal`). Yield `ended` when the platform killed the live (copyright takedown, "live ended"
+   * banner, 0 viewers for too long...). The runner then recovers with a fresh prepare() when
+   * `recovery` is set. Drivers apply their own start-up grace for slow signals (e.g. viewer counts).
+   */
+  health?(signal: AbortSignal): AsyncIterable<LiveHealthEvent>;
+  /**
+   * Enables automatic takedown recovery for this live (platforms that issue a new key per live,
+   * like Instagram). Besides `health`, the runner treats "push to the platform is down for
+   * `pushDownConfirmMs` while the OBS feed is still online" as a takedown.
+   */
+  recovery?: LiveRecoveryPolicy;
+}
+
+export type LiveHealthEvent =
+  /** The platform ended the live; recover with a new one (when recovery is enabled). */
+  | { type: 'ended'; reason: string }
+  /** Something looks wrong but needs no action; shown on the destination card. */
+  | { type: 'warning'; message: string }
+  /** A previous warning cleared. */
+  | { type: 'ok' }
+  /** Current viewer count (null = unknown/hidden). Poll politely (≥ 30 s for API platforms; YouTube ≥ 60 s). */
+  | { type: 'viewers'; count: number | null };
+
+export interface LiveRecoveryPolicy {
+  /** Push down (feed still up) this long ⇒ takedown. Stream Guard default: 5 s. */
+  pushDownConfirmMs: number;
+  /** Back-to-back failed recoveries before giving up and asking for a human. Default 3. */
+  maxAttempts: number;
 }
 
 export interface PlatformDriver {
@@ -87,6 +138,13 @@ export interface PlatformDriver {
 
   /** Feeds that must be online before prepare() is called. Default: [dest.feed]. */
   requiredFeeds?(dest: Destination): Feed[];
+
+  /**
+   * Whether this destination can stream privately while session test mode is on. Default:
+   * `info.testMode?.supported === true`. (Facebook: Pages yes, profile mode no.) Unsupported
+   * destinations are skipped in test mode.
+   */
+  supportsTestMode?(dest: Destination, account: Account | null): boolean;
 
   // ---- account connection (omit for connectMethod 'none') ----
   startConnect?(account: Account, ctx: DriverContext): Promise<ConnectStart>;

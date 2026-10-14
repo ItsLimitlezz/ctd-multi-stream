@@ -14,7 +14,7 @@ import path from 'node:path';
 import type { Logger } from 'pino';
 import type { TlsMode, TlsStatus } from '../../../shared/types.js';
 import type { AppConfig } from '../config.js';
-import type { SettingsRepo, TlsManager, TlsMaterial } from '../services.js';
+import type { LanHandler, SettingsRepo, TlsManager, TlsMaterial } from '../services.js';
 import {
   acmeDirectoryUrl,
   AcmeIssueError,
@@ -27,7 +27,7 @@ import {
 } from './acme.js';
 import { backoffDelayMs, coversNames, keyMatchesCert, readCertInfo, renewalTime, subjectLabel, type CertInfo, type CertNames } from './cert-info.js';
 import { loadOrCreateKey, readPemPair, writePemPair } from './cert-store.js';
-import { createHttpListener, type ChallengeStore, type HttpListener } from './http-listener.js';
+import { createHttpListener, lanClientPolicy, type ChallengeStore, type HttpListener, type LanClientPolicy } from './http-listener.js';
 import { classifyIp, describeIpClass, discoverPublicIp, localIPv4Addresses, normalizeIp } from './public-ip.js';
 import { isValidHostname, loadOrCreateSelfSigned, selfSignedNames, SELF_SIGNED_MIN_REMAINING_MS } from './self-signed.js';
 
@@ -66,6 +66,8 @@ export interface TlsManagerDeps {
   generateCertKey: () => Promise<string>;
   now: () => number;
   timings: TlsTimings;
+  /** Which peers get /api/v1, /dock and /overlay over plain HTTP (default: LAN_HTTP / LAN_HTTP_CIDRS env). */
+  lanPolicy: LanClientPolicy;
 }
 
 export const DEFAULT_TLS_TIMINGS: TlsTimings = {
@@ -122,6 +124,7 @@ class DefaultTlsManager implements TlsManager {
 
   private onRenew: ((m: TlsMaterial) => void) | null = null;
   private listener: HttpListener | null = null;
+  private lanHandler: LanHandler | null = null;
   private abort = new AbortController();
   private started = false;
   private stopped = false;
@@ -197,6 +200,11 @@ class DefaultTlsManager implements TlsManager {
     }
   }
 
+  setLanHandler(handler: LanHandler | null): void {
+    // Read by the HTTP listener per request, so this works before or after start().
+    this.lanHandler = handler;
+  }
+
   status(): TlsStatus {
     const errors = [this.listenerError, this.lastError].filter((e): e is string => !!e);
     return {
@@ -259,11 +267,15 @@ class DefaultTlsManager implements TlsManager {
   private async startListener(): Promise<void> {
     const port = this.config.httpPort;
     if (port <= 0) return;
+    const policy = this.deps.lanPolicy;
+    for (const warning of policy.warnings) this.log.warn(warning);
     const listener = createHttpListener({
       port,
       publicPort: this.config.publicPort,
       challenges: this.challenges,
       log: this.log,
+      lanHandler: () => (policy.enabled ? this.lanHandler : null),
+      isLanClient: (remoteAddress) => policy.isLanClient(remoteAddress),
     });
     try {
       await listener.listen();
@@ -273,7 +285,11 @@ class DefaultTlsManager implements TlsManager {
       }
       this.listener = listener;
       this.listenerError = null;
-      this.log.info(`HTTP listener on http://0.0.0.0:${port} (ACME challenges + redirect to HTTPS)`);
+      this.log.info(
+        policy.enabled
+          ? `HTTP listener on http://0.0.0.0:${port} (ACME challenges, redirect to HTTPS; plain-HTTP /api/v1, /dock, /overlay for ${policy.description})`
+          : `HTTP listener on http://0.0.0.0:${port} (ACME challenges, redirect to HTTPS; LAN plain HTTP ${policy.description})`,
+      );
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code ?? errorMessage(err);
       this.listenerError = `HTTP port ${port} is unavailable (${code}); Let's Encrypt validation and the HTTPS redirect won't work.`;
@@ -624,6 +640,7 @@ export function createTlsManager(
     generateCertKey: deps.generateCertKey ?? createEcKey,
     now: deps.now ?? Date.now,
     timings: { ...DEFAULT_TLS_TIMINGS, ...deps.timings },
+    lanPolicy: deps.lanPolicy ?? lanClientPolicy(process.env),
   };
   return new DefaultTlsManager({ config, log, settings }, full);
 }

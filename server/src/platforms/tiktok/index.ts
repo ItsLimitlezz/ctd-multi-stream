@@ -2,14 +2,26 @@
 // TikTok LIVE Producer (https://livecenter.tiktok.com/producer) in the account's browser:
 // set the title, save the LIVE settings, read the new server URL + stream key, push the vertical
 // feed, click "Go LIVE", scrape comments and click "End LIVE". It never changes the LIVE topic.
+// Stream Guard: TikTok also ends LIVEs (copyright / Community Guidelines) and issues a new key
+// per LIVE, so the driver watches the producer page (health.ts) and opts into the runner's
+// automatic recovery (PreparedLive.recovery), which builds a fresh LIVE with prepare().
 // UI assumptions and sources: selectors.ts.
 
 import type { ConnectPoll, ConnectStart } from '../../../../shared/api.js';
 import type { Account, PlatformInfo } from '../../../../shared/types.js';
 import { abortable, requireLoggedIn, scrapeChat, withTimeout } from '../../browser/helpers.js';
-import { DriverError, type ChatMessageInput, type DriverContext, type PlatformDriver, type PreparedLive } from '../types.js';
+import {
+  DriverError,
+  type ChatMessageInput,
+  type DriverContext,
+  type LiveHealthEvent,
+  type PlatformDriver,
+  type PreparedLive,
+} from '../types.js';
+import { createHealthTracker, HEALTH_POLL_MS, VIEWER_GRACE_MS, watchProducerHealth } from './health.js';
 import {
   detectState,
+  dismissEndedNotices,
   endLive,
   goLive,
   gotoPage,
@@ -28,22 +40,37 @@ import {
 import { CHAT_EXTRACT, CHAT_ITEM_SELECTOR, TITLE_MAX, URLS } from './selectors.js';
 import {
   accountUsername,
+  autoRecoverEnabled,
   DEFAULT_GO_LIVE_TIMEOUT_SEC,
+  DEFAULT_TAKEDOWN_CONFIRM_SEC,
   errorText,
   goLiveTimeoutSec,
   hostOf,
   isUnder,
   joinRtmpUrl,
   MAX_GO_LIVE_TIMEOUT_SEC,
+  MAX_TAKEDOWN_CONFIRM_SEC,
+  MAX_ZERO_VIEWER_SEC,
   MIN_GO_LIVE_TIMEOUT_SEC,
+  MIN_TAKEDOWN_CONFIRM_SEC,
+  parseOptionalBoolean,
   parseOptionalNumber,
+  RECOVERY_MAX_ATTEMPTS,
   sameHost,
+  takedownConfirmSec,
   watchUrlFor,
+  zeroViewerSec,
 } from './util.js';
 
 export interface TiktokDriverOptions {
   urls: { producer: string; login: string; home: string; cookies: string[] };
-  timing: ProducerTiming & { minGoLiveTimeoutSec: number };
+  timing: ProducerTiming & {
+    minGoLiveTimeoutSec: number;
+    /** Stream Guard poll interval for health(). */
+    healthPollMs: number;
+    /** Viewer-rule grace after going LIVE. */
+    healthGraceMs: number;
+  };
 }
 
 export interface TiktokDriverOverrides {
@@ -60,6 +87,8 @@ const DEFAULT_OPTIONS: TiktokDriverOptions = {
     settleMs: 2_000,
     typingDelayMs: [40, 120],
     minGoLiveTimeoutSec: MIN_GO_LIVE_TIMEOUT_SEC,
+    healthPollMs: HEALTH_POLL_MS,
+    healthGraceMs: VIEWER_GRACE_MS,
   },
 };
 
@@ -93,6 +122,37 @@ export const TIKTOK_INFO: PlatformInfo = {
       default: DEFAULT_GO_LIVE_TIMEOUT_SEC,
       help: `How long to wait for TikTok to receive the video before clicking "Go LIVE" (${MIN_GO_LIVE_TIMEOUT_SEC}–${MAX_GO_LIVE_TIMEOUT_SEC} s).`,
     },
+    {
+      key: 'autoRecover',
+      label: 'Auto-recover when TikTok ends the LIVE',
+      type: 'boolean',
+      target: 'option',
+      default: true,
+      help:
+        'Automatically start a new LIVE when TikTok ends this one (e.g. a copyright or Community Guidelines interruption). ' +
+        'Viewers have to rejoin the new LIVE.',
+    },
+    {
+      key: 'takedownConfirmSec',
+      label: 'Takedown confirmation (seconds)',
+      type: 'number',
+      target: 'option',
+      default: DEFAULT_TAKEDOWN_CONFIRM_SEC,
+      help:
+        `Push to TikTok down this long while OBS is still streaming ⇒ treat it as a takedown ` +
+        `(${MIN_TAKEDOWN_CONFIRM_SEC}–${MAX_TAKEDOWN_CONFIRM_SEC} s).`,
+    },
+    {
+      key: 'zeroViewerSec',
+      label: '0-viewer takedown (seconds)',
+      type: 'number',
+      target: 'option',
+      default: 0,
+      help:
+        `0 viewers this long ⇒ treat it as a takedown and start a new LIVE (needs auto-recover; checked after the first ` +
+        `${VIEWER_GRACE_MS / 1000} s of a LIVE; 0 = off, max ${MAX_ZERO_VIEWER_SEC} s). ` +
+        'Leave 0 if your streams sometimes really have no viewers.',
+    },
   ],
   developerApp: null,
   titleSupport: 'browser',
@@ -103,33 +163,63 @@ export const TIKTOK_INFO: PlatformInfo = {
     'Needs TikTok LIVE stream key access (LIVE Producer): TikTok reportedly requires about 1,000 followers, age 18+ ' +
     'and an account in good standing, and availability varies by region. A new stream key is created for every stream. ' +
     `The title (max ${TITLE_MAX} characters) is set before going LIVE and can't be changed during the LIVE. ` +
-    'The app never changes the LIVE topic: if TikTok requires one and none is selected, pick it once yourself in LIVE Producer.',
+    'The app never changes the LIVE topic: if TikTok requires one and none is selected, pick it once yourself in LIVE Producer. ' +
+    'When TikTok ends a LIVE (e.g. for copyright or Community Guidelines), the app can start a new one automatically; ' +
+    'viewers have to rejoin it.',
 };
+
+/**
+ * One prepared LIVE on an account's producer page. Identity matters: a newer LIVE on the same
+ * account (a recovery) supersedes it, after which its end()/health()/chat must not touch the page.
+ */
+interface LiveRef {
+  destinationId: string;
+  /** When "Go LIVE" succeeded (epoch ms); the viewer-rule grace counts from here. */
+  liveSince: number | null;
+  /** health() saw TikTok end this LIVE. */
+  takenDown: boolean;
+}
 
 export function createTiktokDriver(overrides: TiktokDriverOverrides = {}): PlatformDriver {
   const urls = { ...DEFAULT_OPTIONS.urls, ...overrides.urls };
   const timing = { ...DEFAULT_OPTIONS.timing, ...overrides.timing };
 
   /**
-   * accountId → destinationId of the LIVE using that account's (single) producer page, from
-   * prepare() until end(). While set, account checks must not navigate the page and another
-   * destination can't use the account (it would drive, or end, this destination's LIVE).
+   * accountId → the LIVE using that account's (single) producer page, from prepare() until end().
+   * While set, account checks must not navigate the page and another destination can't use the
+   * account (it would drive, or end, this destination's LIVE). The same destination may claim it
+   * again (a takedown recovery): the new LIVE supersedes the old one.
    */
-  const owners = new Map<string, string>();
+  const owners = new Map<string, LiveRef>();
+  /**
+   * Accounts whose last LIVE was ended — by TikTok (health saw a takedown) or by us (end() was called,
+   * e.g. by a recovery after the push died). A LIVE the next prepare() finds still running is that
+   * stale LIVE: end it and create a fresh one, never reuse its key. (Reuse is only for a LIVE this
+   * process never ended, e.g. after an app restart mid-stream.)
+   */
+  const staleLive = new Map<string, 'takedown' | 'ended'>();
+  /** accountId → end() still working on the producer page; prepare() waits for it before touching the page. */
+  const pendingEnds = new Map<string, Promise<void>>();
 
-  function claim(accountId: string, destinationId: string): void {
+  function claim(accountId: string, live: LiveRef): void {
     const owner = owners.get(accountId);
-    if (owner && owner !== destinationId) {
+    if (owner && owner.destinationId !== live.destinationId) {
       throw new DriverError(
         'This TikTok account is already used by another destination. Use one TikTok destination per account.',
         'misconfigured',
       );
     }
-    owners.set(accountId, destinationId);
+    owners.set(accountId, live);
   }
 
-  function release(accountId: string, destinationId: string): void {
-    if (owners.get(accountId) === destinationId) owners.delete(accountId);
+  function release(accountId: string, live: LiveRef): void {
+    if (owners.get(accountId) === live) owners.delete(accountId);
+  }
+
+  /** A newer LIVE on this account took over the page. */
+  function superseded(accountId: string, live: LiveRef): boolean {
+    const owner = owners.get(accountId);
+    return owner !== undefined && owner !== live;
   }
 
   async function saveSession(ctx: DriverContext, accountId: string): Promise<void> {
@@ -147,7 +237,8 @@ export function createTiktokDriver(overrides: TiktokDriverOverrides = {}): Platf
     return state;
   }
 
-  async function confirmLive(ctx: DriverContext, accountId: string, sec: number, signal: AbortSignal): Promise<void> {
+  async function confirmLive(ctx: DriverContext, accountId: string, live: LiveRef, sec: number, signal: AbortSignal): Promise<void> {
+    if (superseded(accountId, live)) throw new DriverError('This TikTok LIVE was replaced by a newer one', 'platform-error');
     const page = await abortable(ctx.browser.page(accountId), signal);
     if (!isUnder(page.url(), urls.producer) && !(await isDashboard(page))) {
       // The page was navigated away (e.g. in the browser view): the prepared LIVE is still there.
@@ -155,21 +246,82 @@ export function createTiktokDriver(overrides: TiktokDriverOverrides = {}): Platf
       await detectState(page, timing.detectMs, signal);
     }
     await goLive(page, sec * 1000, timing, signal, ctx.log);
+    live.liveSince = Date.now();
     ctx.log.info('TikTok LIVE started');
     await saveSession(ctx, accountId);
   }
 
-  async function endOnProducer(ctx: DriverContext, accountId: string): Promise<void> {
-    const page = await ctx.browser.page(accountId);
+  async function endOnProducer(ctx: DriverContext, accountId: string, live: LiveRef, signal: AbortSignal): Promise<void> {
+    const page = await abortable(ctx.browser.page(accountId), signal);
     if (!isUnder(page.url(), urls.producer) && !(await isLiveOnPage(page))) {
-      const signal = AbortSignal.timeout(timing.endMs);
       await gotoPage(page, urls.producer, signal);
       await detectState(page, Math.min(timing.detectMs, 15_000), signal);
     }
-    if ((await endLive(page, timing.endMs)) === 'ended') {
+    // After a takedown TikTok may still show its "LIVE ended" dialog over the dashboard.
+    if (live.takenDown) await dismissEndedNotices(page, signal);
+    if ((await endLive(page, timing.endMs, signal)) === 'ended') {
       ctx.log.info('TikTok LIVE ended');
       await saveSession(ctx, accountId);
     }
+  }
+
+  /**
+   * end() of one LIVE: at most END_BUDGET_MS, a no-op once a newer LIVE took over the page, and
+   * never a failure when TikTok had already ended the LIVE itself (takedown).
+   */
+  function endPrepared(ctx: DriverContext, accountId: string, live: LiveRef): Promise<void> {
+    if (superseded(accountId, live)) return Promise.resolve();
+    if (!staleLive.has(accountId)) staleLive.set(accountId, 'ended');
+    const budget = AbortSignal.timeout(END_BUDGET_MS);
+    const run = endOnProducer(ctx, accountId, live, budget)
+      .catch((err: unknown) => {
+        if (live.takenDown) {
+          const msg = errorText(err).split('\n', 1)[0]?.slice(0, 200);
+          ctx.log.warn({ err: msg }, 'TikTok had already ended the LIVE; ignoring the End LIVE failure');
+          return;
+        }
+        if (budget.aborted) throw new DriverError('Ending the TikTok LIVE timed out', 'timeout');
+        throw err;
+      })
+      .finally(() => {
+        release(accountId, live);
+        if (pendingEnds.get(accountId) === tracked) pendingEnds.delete(accountId);
+      });
+    const tracked: Promise<void> = run.catch(() => {});
+    pendingEnds.set(accountId, tracked);
+    return withTimeout(run, END_BUDGET_MS + 2000, 'Ending the TikTok LIVE timed out');
+  }
+
+  function liveHealth(ctx: DriverContext, accountId: string, live: LiveRef, zeroViewerMs: number, signal: AbortSignal) {
+    const tracker = createHealthTracker({
+      zeroViewerMs,
+      graceMs: timing.healthGraceMs,
+      liveSince: live.liveSince ?? Date.now(),
+    });
+    const events = watchProducerHealth(
+      {
+        getPage: () => abortable(ctx.browser.page(accountId), signal),
+        producerUrl: urls.producer,
+        pollMs: timing.healthPollMs,
+        detectMs: Math.min(timing.detectMs, 15_000),
+        tracker,
+        isCurrent: () => !superseded(accountId, live) && !live.takenDown,
+        log: ctx.log,
+      },
+      signal,
+    );
+    return (async function* (): AsyncGenerator<LiveHealthEvent> {
+      for await (const event of events) {
+        if (event.type === 'ended') {
+          live.takenDown = true;
+          staleLive.set(accountId, 'takedown');
+          ctx.log.warn({ reason: event.reason }, 'TikTok ended the LIVE');
+        } else if (event.type === 'warning') {
+          ctx.log.info({ message: event.message }, 'TikTok LIVE health warning');
+        }
+        yield event;
+      }
+    })();
   }
 
   async function* producerChat(ctx: DriverContext, accountId: string, signal: AbortSignal): AsyncGenerator<ChatMessageInput> {
@@ -261,6 +413,11 @@ export function createTiktokDriver(overrides: TiktokDriverOverrides = {}): Platf
       const problems: string[] = [];
       if (dest.feed !== 'vertical') problems.push('TikTok only accepts the vertical feed');
       if (Number.isNaN(parseOptionalNumber(dest.options.goLiveTimeoutSec))) problems.push('Go-live timeout must be a number of seconds');
+      if (parseOptionalBoolean(dest.options.autoRecover) === 'invalid') problems.push('Auto-recover must be on or off');
+      if (Number.isNaN(parseOptionalNumber(dest.options.takedownConfirmSec))) {
+        problems.push('Takedown confirmation must be a number of seconds');
+      }
+      if (Number.isNaN(parseOptionalNumber(dest.options.zeroViewerSec))) problems.push('0-viewer takedown must be a number of seconds');
       return problems;
     },
 
@@ -268,11 +425,16 @@ export function createTiktokDriver(overrides: TiktokDriverOverrides = {}): Platf
       if (!account) throw new DriverError('Choose a connected TikTok account for this destination', 'not-connected');
       const { signal, log } = ctx;
       const accountId = account.id;
+      const live: LiveRef = { destinationId: dest.id, liveSince: null, takenDown: false };
       // Before touching the page: another destination's LIVE (or its key) must never be reused or ended.
-      claim(accountId, dest.id);
+      claim(accountId, live);
 
       let ingest: Ingest | null = null;
       try {
+        // A previous LIVE's end() (e.g. the one TikTok just killed) may still be using the page.
+        const pendingEnd = pendingEnds.get(accountId);
+        if (pendingEnd) await abortable(pendingEnd, signal);
+
         const context = await abortable(ctx.browser.context(accountId), signal);
         if (!(await hasSessionCookie(context, urls.cookies))) {
           throw new DriverError('TikTok session expired — log in again from Accounts', 'needs-login');
@@ -281,12 +443,20 @@ export function createTiktokDriver(overrides: TiktokDriverOverrides = {}): Platf
         let state = await openProducer(page, signal);
 
         if (state === 'live') {
-          // A LIVE is already running (e.g. the app restarted mid-stream): reuse it when its key is readable.
-          ingest = await tryReadIngest(page, 5000, signal, log);
+          // A LIVE is already running. After a takedown (or an end() that didn't take) it is the stale
+          // LIVE: never reuse it. Otherwise (e.g. the app restarted mid-stream) reuse it when its key is readable.
+          const stale = staleLive.get(accountId);
+          ingest = stale ? null : await tryReadIngest(page, 5000, signal, log);
           if (ingest) {
             log.info('A TikTok LIVE is already running; reusing it (its title is kept)');
           } else {
-            log.warn('Ending a TikTok LIVE left over from an earlier session');
+            log.warn(
+              stale === 'takedown'
+                ? 'Ending the TikTok LIVE that TikTok interrupted'
+                : stale === 'ended'
+                  ? 'Ending the previous TikTok LIVE (still shown as running)'
+                  : 'Ending a TikTok LIVE left over from an earlier session',
+            );
             await endLive(page, timing.endMs, signal);
             state = await openProducer(page, signal);
             if (state === 'live') {
@@ -299,24 +469,30 @@ export function createTiktokDriver(overrides: TiktokDriverOverrides = {}): Platf
           ingest = await readIngest(page, timing.stepMs, signal, log);
         }
       } catch (err) {
-        release(accountId, dest.id);
+        release(accountId, live);
         throw err;
       }
+      staleLive.delete(accountId);
       await saveSession(ctx, accountId);
       log.info({ server: hostOf(ingest.serverUrl) }, 'TikTok LIVE prepared');
 
       const goLiveSec = goLiveTimeoutSec(dest, timing.minGoLiveTimeoutSec);
+      const autoRecover = autoRecoverEnabled(dest);
+      // The 0-viewer rule starts a new LIVE, so it only applies with auto-recover.
+      const zeroViewerMs = autoRecover ? zeroViewerSec(dest) * 1000 : 0;
       let ending: Promise<void> | null = null;
-      return {
+      const prepared: PreparedLive = {
         push: { url: joinRtmpUrl(ingest.serverUrl, ingest.streamKey), mode: 'copy', feeds: ['vertical'] },
         watchUrl: watchUrlFor(accountUsername(account)),
-        confirm: (s) => confirmLive(ctx, accountId, goLiveSec, s),
-        end: () =>
-          (ending ??= withTimeout(endOnProducer(ctx, accountId), END_BUDGET_MS, 'Ending the TikTok LIVE timed out').finally(() =>
-            release(accountId, dest.id),
-          )),
+        confirm: (s) => confirmLive(ctx, accountId, live, goLiveSec, s),
+        end: () => (ending ??= endPrepared(ctx, accountId, live)),
         chat: (s) => producerChat(ctx, accountId, s),
+        health: (s) => liveHealth(ctx, accountId, live, zeroViewerMs, s),
       };
+      if (autoRecover) {
+        prepared.recovery = { pushDownConfirmMs: takedownConfirmSec(dest) * 1000, maxAttempts: RECOVERY_MAX_ATTEMPTS };
+      }
+      return prepared;
     },
   };
 }

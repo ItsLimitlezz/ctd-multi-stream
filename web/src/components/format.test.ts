@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { elapsedSeconds, formatAudio, formatBitrate, formatCodecs, formatDuration, formatFps, formatResolution, plural } from './format';
+import { elapsedSeconds, formatAgo, formatAudio, formatBitrate, formatCodecs, formatDuration, formatFps, formatResolution, plural } from './format';
 
 describe('format', () => {
   it('formats durations', () => {
@@ -37,6 +37,19 @@ describe('format', () => {
     expect(formatAudio({ codec: 'aac', sampleRate: 48000, channels: 2 })).toBe('AAC · 48 kHz · stereo');
     expect(formatAudio({ codec: 'opus', sampleRate: 44100, channels: 1 })).toBe('OPUS · 44.1 kHz · mono');
     expect(formatAudio(null)).toBe('—');
+  });
+
+  it('formats relative times', () => {
+    const now = Date.parse('2026-10-11T10:00:00.000Z');
+    const ago = (sec: number) => new Date(now - sec * 1000).toISOString();
+    expect(formatAgo(ago(3), now)).toBe('just now');
+    expect(formatAgo(ago(-30), now)).toBe('just now'); // clock skew: never "in the future"
+    expect(formatAgo(ago(45), now)).toBe('45 s ago');
+    expect(formatAgo(ago(181), now)).toBe('3 min ago');
+    expect(formatAgo(ago(2 * 3600 + 5), now)).toBe('2 h ago');
+    expect(formatAgo(ago(3 * 86400), now)).toBe('3 d ago');
+    expect(formatAgo(null, now)).toBe('');
+    expect(formatAgo('garbage', now)).toBe('');
   });
 
   it('pluralizes', () => {

@@ -4,7 +4,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from 'playwrig
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { withTimeout } from '../../browser/helpers.js';
 import type { BrowserManager } from '../../services.js';
-import { DriverError, type ChatMessageInput, type PreparedLive } from '../types.js';
+import { DriverError, isChatModeration, type ChatMessageInput, type ChatSourceItem, type PreparedLive } from '../types.js';
 import { createFacebookDriver } from './index.js';
 import { DEFAULT_INGEST_URL, joinIngestUrl } from './profile-mode.js';
 import { profileNameFromTitle } from './selectors.js';
@@ -168,9 +168,10 @@ async function addSessionCookies(context: BrowserContext): Promise<void> {
   ]);
 }
 
-async function next(it: AsyncIterator<ChatMessageInput>, ms = 6000): Promise<ChatMessageInput> {
+async function next(it: AsyncIterator<ChatSourceItem>, ms = 6000): Promise<ChatMessageInput> {
   const r = await withTimeout(it.next(), ms, 'no chat message');
   if (r.done) throw new Error('chat ended');
+  if (isChatModeration(r.value)) throw new Error('expected a chat message, got moderation');
   return r.value;
 }
 

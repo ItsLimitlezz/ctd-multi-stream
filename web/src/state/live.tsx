@@ -6,6 +6,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyn
 import type { WsServerMessage } from '@shared/api';
 import type { Account, ChatMessage, SessionState } from '@shared/types';
 import { api, wsUrl } from '../api';
+import { alertForNotice, installAlerts } from './alerts';
 import { useAuth } from './auth';
 import { isApiError } from './errors';
 import { LiveConnection, LiveStore, type LiveState } from './live-store';
@@ -34,11 +35,16 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       url: () => wsUrl('/api/ws'),
       onMessage: (msg) => {
         store.dispatch(msg);
-        if (msg.type === 'notice') toast(msg.message, { tone: msg.level });
+        if (msg.type === 'notice') {
+          toast(msg.message, { tone: msg.level });
+          // Opt-in sound + browser notification (Profile → Alerts / dashboard "Alert me").
+          alertForNotice(msg.level, msg.message);
+        }
       },
       onConnectedChange: (connected) => store.setConnected(connected),
       checkAuth: stillLoggedIn,
     });
+    const uninstallAlerts = installAlerts();
     conn.start();
     const kick = () => conn.kick();
     const onVisible = () => {
@@ -49,6 +55,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     return () => {
       window.removeEventListener('online', kick);
       document.removeEventListener('visibilitychange', onVisible);
+      uninstallAlerts();
       conn.stop();
       store.reset();
     };

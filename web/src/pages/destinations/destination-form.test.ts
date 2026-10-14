@@ -170,6 +170,39 @@ describe('destination form helpers', () => {
     expect(buildUpdateRequest(i, { ...base, accountId: '' }).accountId).toBeNull();
   });
 
+  it("sends 'links' fields as arrays (blank rows dropped; [] clears on update)", () => {
+    const ig = info({
+      id: 'instagram',
+      name: 'Instagram',
+      feeds: ['vertical'],
+      defaultFeed: 'vertical',
+      connectMethod: 'browser',
+      keyPerSession: true,
+      destinationFields: [
+        { key: 'autoRecover', label: 'Auto-recover', type: 'boolean', default: true },
+        { key: 'takedownConfirmSec', label: 'Takedown confirm (s)', type: 'number', default: 5 },
+        { key: 'links', label: 'Links', type: 'links' },
+        { key: 'linkMode', label: 'Link mode', type: 'select', default: 'rotate', options: [{ value: 'off', label: 'Off' }, { value: 'rotate', label: 'Rotate' }] },
+      ],
+    });
+    const kick = { title: 'Kick - Live Stream', url: 'https://kick.com/dprtmnttoronto' };
+    const draft = initialDraft(ig, [account('i1', 'instagram')], null);
+    expect(draft.values).toEqual({ autoRecover: true, takedownConfirmSec: 5, links: [], linkMode: 'rotate' });
+    const withLinks = { ...draft, values: { ...draft.values, links: [{ title: ' Kick - Live Stream ', url: kick.url }, { title: '', url: '' }] } };
+    expect(validateDraft(ig, withLinks, {})).toEqual({});
+    expect(buildCreateRequest(ig, withLinks).options).toEqual({ autoRecover: true, takedownConfirmSec: 5, links: [kick], linkMode: 'rotate' });
+
+    const stored = dest({ platform: 'instagram', feed: 'vertical', options: { autoRecover: false, links: [kick], linkMode: 'rotate' } });
+    const editing = initialDraft(ig, [], stored);
+    expect(editing.values.links).toEqual([kick]);
+    expect(buildUpdateRequest(ig, editing).options?.links).toEqual([kick]);
+    expect(buildUpdateRequest(ig, { ...editing, values: { ...editing.values, links: [] } }).options?.links).toEqual([]);
+
+    const bad = { ...editing, values: { ...editing.values, links: [kick, { title: 'Twitch', url: 'twitch.tv/x' }] } };
+    expect(validateDraft(ig, bad, {})).toEqual({ links: 'Link 2: URL must start with http:// or https://' });
+    expect(destinationErrorField(ig, 'Links: item 2 must be an http(s) URL')).toBe('links');
+  });
+
   it('maps server validation messages to fields', () => {
     const i = info();
     expect(destinationErrorField(i, 'Name is required')).toBe('name');

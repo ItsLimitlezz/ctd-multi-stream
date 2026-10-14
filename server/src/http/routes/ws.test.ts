@@ -75,7 +75,7 @@ describe('WsHub', () => {
     hub.add(s, hello);
     bus.emit('session', SESSION);
     bus.emit('feed', { feed: 'landscape', online: true, since: null, video: null, audio: null, bitrateKbps: 5000 });
-    bus.emit('destination', { destinationId: 'd1', phase: 'live', message: null, stats: null, watchUrl: null, retries: 0, since: 'x' });
+    bus.emit('destination', { destinationId: 'd1', phase: 'live', message: null, stats: null, watchUrl: null, retries: 0, since: 'x', recoveries: 0, lastRecovery: null });
     bus.emit('chat', CHAT);
     bus.emit('destinations-changed');
     bus.emit('notice', { level: 'warn', message: 'careful' });

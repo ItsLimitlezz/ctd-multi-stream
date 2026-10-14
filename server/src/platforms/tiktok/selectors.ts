@@ -19,6 +19,22 @@
 // markup (borrowed from tiktok.com's LIVE room: data-e2e="chat-message").
 // Title limit: 32 characters (https://howmanywords.app/blog/tiktok-character-limits; the
 // field's own maxlength wins when it is smaller).
+//
+// Stream Guard (takedown detection, see health.ts). TikTok publishes no wording for the notices it
+// shows when it ends a LIVE; creators report (October 2026) red in-LIVE banners about "potentially
+// harmful" content, "LIVE access suspended for repeated violations of Community Guidelines", LIVEs
+// "interrupted" for violations, copyright/unoriginal-content enforcement that mutes or ends the
+// LIVE, and a violations page at livecenter.tiktok.com/violation:
+//   https://steadystate1.substack.com/p/tiktok-technical-issues-or-platform
+//   https://itch.io/post/11880374
+//   https://support.streamlabs.com/hc/en-us/articles/35259691237147-TikTok-Live-Streaming-Access-Revoked-No-Violations
+//   https://sociallyin.com/blog/tiktok-live-stream-rules/
+// So the matchers are deliberately loose but split by meaning: "the LIVE ended/was removed/suspended"
+// (hard signal), "interrupted/paused" (a takedown unless the notice blames the connection or is
+// waiting for the stream, with no violation wording: OBS dropping out must not start a new LIVE), violation warnings while the LIVE still runs (warning
+// only: TikTok often warns before ending), and network notices (warning only). Viewer comments are
+// never scanned. The viewer count label ("Viewers" next to a number, or "12 viewers") is also an
+// assumption; when it can't be read the 0-viewer rule never fires.
 
 import type { Locator, Page } from 'playwright';
 
@@ -36,6 +52,8 @@ export const SESSION_COOKIES = ['sessionid', 'sessionid_ss'];
 export const TITLE_MAX = 32;
 
 const APOS = "['\u2019]"; // straight or curly apostrophe
+/** "LIVE", "LIVE video", "LIVE stream"... as TikTok names a broadcast. */
+const LIVE_WORD = 'live(?:\\s+(?:video|stream|broadcast|session))?';
 
 export const TEXT = {
   // Buttons
@@ -95,6 +113,71 @@ export const TEXT = {
     ].join('|'),
     'i',
   ),
+
+  // Stream Guard notices (health.ts classifies them; see the header for sources)
+  /** TikTok ended the LIVE for good: ended / removed / suspended / LIVE access revoked. */
+  liveEnded: new RegExp(
+    [
+      `\\b${LIVE_WORD}\\s+(?:has\\s+)?ended\\b`,
+      `\\b${LIVE_WORD}\\s+(?:has\\s+been|was|is|got)\\s+(?:ended|terminated|removed|suspended|banned|shut\\s+down|taken\\s+down|closed|cancell?ed)\\b`,
+      `\\b(?:ended|terminated|removed|suspended|shut\\s+down|took\\s+down)\\s+(?:your|this|the)\\s+${LIVE_WORD}\\b`,
+      `\\b${LIVE_WORD}\\s+(?:access|feature|privileges?)\\s+(?:has\\s+been\\s+|was\\s+|is\\s+)?(?:suspended|revoked|removed|restricted|banned|disabled)\\b`,
+      `\\b(?:banned|suspended|restricted)\\s+from\\s+(?:going\\s+)?live\\b`,
+    ].join('|'),
+    'i',
+  ),
+  /**
+   * TikTok interrupted/paused the LIVE: a takedown, unless the notice blames the connection or says
+   * TikTok is waiting for the stream (and gives no policy/copyright reason).
+   */
+  liveInterrupted: new RegExp(
+    [
+      `\\b${LIVE_WORD}\\s+(?:has\\s+been|was|is|got)\\s+(?:interrupted|paused|stopped|cut\\s+off|disrupted)\\b`,
+      `\\b(?:interrupted|paused|stopped)\\s+(?:your|this|the)\\s+${LIVE_WORD}\\b`,
+      `\\b${LIVE_WORD}\\s+(?:interrupted|paused)\\b`,
+    ].join('|'),
+    'i',
+  ),
+  /** Policy / copyright wording. Alone (LIVE still running) it is a warning, not a takedown. */
+  liveViolation: new RegExp(
+    [
+      '\\bviolat(?:e|es|ed|ing|ion|ions)\\b',
+      '\\binfring',
+      '\\bunoriginal\\b',
+      '\\bintellectual\\s+property\\b',
+      'copyright(?:ed)?\\s+(?:content|music|audio|sound|material|works?|claims?|strikes?|issues?|protected)',
+      '(?:copyright|music|audio|sound)\\s+(?:was\\s+|has\\s+been\\s+|is\\s+)?(?:detected|muted|claimed)',
+      '\\bmuted\\s+(?:your\\s+|the\\s+)?(?:live|audio|sound)\\b',
+      '\\bagainst\\s+(?:our\\s+)?community\\s+guidelines\\b',
+    ].join('|'),
+    'i',
+  ),
+  /** Encoder / network trouble (OBS or the network dropped out): never a takedown by itself. */
+  connectionIssue: new RegExp(
+    [
+      '\\b(?:poor|weak|unstable|lost|bad|slow)\\s+(?:network|connection|internet|signal)',
+      '\\b(?:network|connection|internet)\\s+(?:is\\s+|was\\s+)?(?:unstable|lost|issues?|problems?|errors?|interrupted|disconnected)',
+      '\\breconnect',
+      '\\bdisconnected\\b',
+      '\\bno\\s+(?:video|stream|signal|data)\\s+(?:detected|received)',
+      '\\b(?:stream|video|signal|encoder)\\s+(?:was\\s+|has\\s+been\\s+)?(?:interrupted|lost|disconnected|stopped)',
+      '\\bnot\\s+receiving\\b',
+    ].join('|'),
+    'i',
+  ),
+  /**
+   * "Check your encoder / network" advice: blames the feed, not the content. Only used to classify an
+   * interrupted/paused notice (health.ts), never to find notices on the page.
+   */
+  checkEncoder:
+    /\bcheck\s+(?:your\s+|the\s+)?(?:streaming\s+(?:software|settings)|stream\s+settings|encoder|obs|(?:network|internet)(?:\s+connection)?|connection)\b/i,
+  /** A "current viewers" stat label (not total/unique/peak viewers). */
+  viewersLabel: /^\s*(?:(?:current|live|concurrent|real[-\s]?time)\s+)?(?:viewers?|viewing(?:\s+now)?|watching(?:\s+now)?)\s*:?\s*$/i,
+  /** "12 viewers", "1.2K watching", "Viewers: 12" in one text. Group 1 or 2 = the number. */
+  viewersInline:
+    /^\s*(?:([\d.,]+\s*[kmb]?)\+?\s+(?:(?:current\s+)?viewers?|watching(?:\s+now)?|viewing(?:\s+now)?)|(?:current\s+)?viewers?\s*:\s*([\d.,]+\s*[kmb]?)\+?)\s*$/i,
+  /** Buttons that close a "your LIVE ended" notice (never Share / View / Appeal). */
+  noticeDismiss: /^\s*(?:ok(?:ay)?|got\s*it|close|done|dismiss|i\s+understand|understood|acknowledge)\s*$/i,
 };
 
 // ---------------------------------------------------------------------------
@@ -143,7 +226,16 @@ export const sel = {
   loginPrompt: (p: Page) => p.getByRole('button', { name: TEXT.login }).or(p.getByRole('link', { name: TEXT.login })),
   cookieDecline: (p: Page) => p.getByRole('button', { name: TEXT.cookieDecline }),
   benignDismiss: (p: Page) => dialogs(p).getByRole('button', { name: TEXT.benignDismiss }),
+  /** OK / Close on a leftover "your LIVE ended / violated..." dialog (from a LIVE TikTok killed). */
+  endedNoticeDismiss: (p: Page) =>
+    dialogs(p)
+      .or(p.locator('[aria-modal="true"]'))
+      .filter({ hasText: ENDED_NOTICE })
+      .getByRole('button', { name: TEXT.noticeDismiss }),
 };
+
+/** Any "LIVE ended / interrupted / violation" wording (for dialogs to dismiss before a new LIVE). */
+const ENDED_NOTICE = new RegExp([TEXT.liveEnded.source, TEXT.liveInterrupted.source, TEXT.liveViolation.source].join('|'), 'i');
 
 // ---------------------------------------------------------------------------
 // In-page scripts. Plain JavaScript strings (not TS functions) so no transpiler helpers end up
@@ -374,3 +466,164 @@ export const CHAT_EXTRACT = `(el) => {
     el.getAttribute('data-comment-id') || null;
   return { id, author: author || (isEvent ? 'TikTok' : ''), text, avatarUrl: avatar, kind: isEvent ? 'event' : 'message' };
 }`;
+
+// ---------------------------------------------------------------------------
+// Stream Guard: notices + viewer count on the producer page (classified in health.ts)
+// ---------------------------------------------------------------------------
+
+/** Viewer comments: never read as notices (a viewer typing "LIVE ended" must not end the LIVE). */
+const CHAT_ITEMS = `${CHAT_ITEM_SELECTOR}, [role="log"]`;
+/** Anything that looks like the comment panel; skipped too unless the text is in a dialog/toast. */
+const CHAT_AREA = [CHAT_ITEMS, '[data-e2e*="chat" i]', '[data-e2e*="comment" i]', '[class*="comment" i]', '[class*="chat" i]'].join(
+  ', ',
+);
+
+/** Controls, navigation and form fields: their text is never a notice ("Violations" menu item, the title field...). */
+const NOT_NOTICE = [
+  CHAT_ITEMS,
+  'script, style, noscript, template, input, textarea, select, option, label, button, a, nav, header, footer',
+  '[contenteditable="true"], [role="button"], [role="link"], [role="navigation"], [role="menu"], [role="menuitem"]',
+  '[role="tab"], [role="tablist"], [role="option"], [role="listbox"], [role="textbox"]',
+].join(', ');
+
+const OVERLAY_SELECTOR = [
+  '[role="dialog"]',
+  '[role="alertdialog"]',
+  '[role="alert"]',
+  '[role="status"]',
+  '[aria-modal="true"]',
+  '[aria-live="assertive"]',
+  '[aria-live="polite"]',
+].join(', ');
+
+const HEALTH_SCAN_SOURCE = `(args) => {
+  ${PAGE_UTILS}
+  const noticeRes = args.notices.map(re);
+  const keywordRe = /live|violat|copyright|infring|guideline|unoriginal|propert|suspend|interrupt|terminat|banned|removed|ended|paus|stopp|mute|network|connect|internet|signal|detect|receiv|video|stream|encoder/i;
+  const labelRe = re(args.viewersLabel);
+  const inlineRe = re(args.viewersInline);
+  const countRe = /^[\\d.,]+\\s*[kmb]?\\+?$/i;
+  const overlayClassRe = /toast|snackbar|banner|notice|notification|modal|popup|popover|alert/i;
+  const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+  const isOverlay = (el) => {
+    if (el.closest(args.overlay)) return true;
+    let n = el;
+    for (let i = 0; n && n !== document.body && i < 8; i++, n = n.parentElement) {
+      const c = typeof n.className === 'string' ? n.className : '';
+      if (c && overlayClassRe.test(c)) return true;
+    }
+    return false;
+  };
+  // A sentence split over inline elements ("Your LIVE <b>was ended</b>") is read from its block.
+  const blockOf = (el) => {
+    let b = el;
+    while (b.parentElement && b.parentElement !== document.body) {
+      const d = getComputedStyle(b).display;
+      if (d !== 'inline' && d !== 'contents') break;
+      b = b.parentElement;
+    }
+    return b;
+  };
+
+  const notices = [];
+  const seen = new Set();
+  const tooLong = new Set();
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode()) && notices.length < 30) {
+    const own = norm(node.textContent);
+    if (own.length < 3 || !keywordRe.test(own)) continue;
+    const el = node.parentElement;
+    if (!el || el.closest(args.notNotice)) continue;
+    // The sentence's block, or just the element when that block is a whole page section.
+    let block = blockOf(el);
+    if (tooLong.has(block)) block = el;
+    if (seen.has(block)) continue;
+    let text = norm(block.innerText || block.textContent);
+    if (text.length > 300 && block !== el) {
+      tooLong.add(block);
+      block = el;
+      if (seen.has(block)) continue;
+      text = norm(el.innerText || el.textContent);
+    }
+    seen.add(block);
+    if (!text || text.length > 300 || !visible(block)) continue;
+    if (block.closest(args.chat) || block.querySelector(args.chat)) continue;
+    const overlay = isOverlay(block);
+    if (!overlay && block.closest(args.chatArea)) continue;
+    if (!noticeRes.some((r) => r.test(text))) continue;
+    notices.push({ text, overlay });
+  }
+
+  // Current viewers: a "Viewers" label with exactly one number next to it (else ambiguous: unreadable).
+  const valueNear = (label) => {
+    let n = label;
+    for (let i = 0; i < 2; i++) {
+      n = n.parentElement;
+      if (!n || n === document.body) return null;
+      const values = [];
+      const w = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+      let t;
+      while ((t = w.nextNode())) {
+        const el = t.parentElement;
+        if (!el || label.contains(el) || el.closest(args.chat)) continue;
+        const v = norm(t.textContent);
+        if (v && countRe.test(v) && visible(el)) values.push(v);
+      }
+      if (values.length === 1) return values[0];
+      if (values.length > 1) return null;
+    }
+    return null;
+  };
+  let viewers = null;
+  for (const label of labelsFor(labelRe)) {
+    if (label.closest(args.chat)) continue;
+    viewers = valueNear(label);
+    if (viewers) break;
+  }
+  if (!viewers) {
+    const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let t;
+    while ((t = w.nextNode())) {
+      const v = norm(t.textContent);
+      if (!v || v.length > 40) continue;
+      const m = inlineRe.exec(v);
+      const el = t.parentElement;
+      if (m && el && !el.closest(args.chat) && visible(el)) {
+        viewers = m[1] || m[2] || null;
+        break;
+      }
+    }
+  }
+  if (!viewers) {
+    for (const el of document.querySelectorAll('[aria-label]')) {
+      const m = inlineRe.exec(norm(el.getAttribute('aria-label')));
+      if (m && !el.closest(args.chat) && visible(el)) {
+        viewers = m[1] || m[2] || null;
+        break;
+      }
+    }
+  }
+  return { notices, viewers };
+}`;
+
+export interface HealthScan {
+  /** Visible texts outside chat/controls that look like a LIVE notice; `overlay` = in a dialog/toast/banner. */
+  notices: { text: string; overlay: boolean }[];
+  /** Raw current-viewers value ("12", "1.2K"), or null when not found. */
+  viewers: string | null;
+}
+
+/** Expression returning HealthScan for the current page. */
+export function healthScanScript(): string {
+  const args = {
+    notices: [TEXT.liveEnded, TEXT.liveInterrupted, TEXT.liveViolation, TEXT.connectionIssue].map(reArg),
+    viewersLabel: reArg(TEXT.viewersLabel),
+    viewersInline: reArg(TEXT.viewersInline),
+    chat: CHAT_ITEMS,
+    chatArea: CHAT_AREA,
+    notNotice: NOT_NOTICE,
+    overlay: OVERLAY_SELECTOR,
+  };
+  return `(${HEALTH_SCAN_SOURCE})(${JSON.stringify(args)})`;
+}

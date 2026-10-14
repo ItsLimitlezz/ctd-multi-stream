@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import type { Destination, DestinationPhase, DestinationState, Feed, FeedState, SessionState, TitleResult } from '@shared/types';
 import { FEEDS } from '@shared/types';
 import { api } from '../api';
+import { AlertToggle } from '../components/AlertToggle';
 import { Badge } from '../components/Badge';
 import { Button, buttonClass } from '../components/Button';
 import { Card } from '../components/Card';
@@ -11,15 +12,17 @@ import { EmptyState } from '../components/EmptyState';
 import { Field } from '../components/Field';
 import {
   elapsedSeconds,
+  formatAgo,
   formatAudio,
   formatBitrate,
   formatClock,
+  formatDateTime,
   formatDuration,
   formatFps,
   formatResolution,
   plural,
 } from '../components/format';
-import { BroadcastIcon, ExternalIcon, LandscapeIcon, RetryIcon, VerticalIcon } from '../components/icons';
+import { BroadcastIcon, ExternalIcon, LandscapeIcon, RetryIcon, ShieldIcon, VerticalIcon } from '../components/icons';
 import { PhaseBadge } from '../components/PhaseBadge';
 import { PlatformBadge, platformName } from '../components/PlatformBadge';
 import { Spinner } from '../components/Spinner';
@@ -36,7 +39,16 @@ import { useChat, useLiveActions, useSession, type LiveActions } from '../state/
 
 export const TITLE_MAX = 140;
 const FEED_LABEL: Record<Feed, string> = { landscape: 'Landscape', vertical: 'Vertical' };
-const ACTIVE_PHASES: ReadonlySet<DestinationPhase> = new Set(['waiting-for-feed', 'preparing', 'connecting', 'confirming', 'live', 'retrying', 'error']);
+const ACTIVE_PHASES: ReadonlySet<DestinationPhase> = new Set([
+  'waiting-for-feed',
+  'preparing',
+  'connecting',
+  'confirming',
+  'live',
+  'retrying',
+  'recovering',
+  'error',
+]);
 
 export default function DashboardPage() {
   const session = useSession();
@@ -88,6 +100,9 @@ const STATUS_TEXT: Record<SessionState['status'], { label: string; tone: Tone; p
 export function statusSubtitle(session: SessionState): string {
   const active = session.destinations.filter((d) => ACTIVE_PHASES.has(d.phase));
   const live = active.filter((d) => d.phase === 'live').length;
+  // A destination being recovered after a takedown is active but not live yet.
+  const recovering = active.filter((d) => d.phase === 'recovering').length;
+  const recoveringNote = recovering ? ` · ${recovering} recovering` : '';
   switch (session.status) {
     case 'offline':
       if (!session.autoGoLive) return 'Press "Go live" when you are ready.';
@@ -99,7 +114,7 @@ export function statusSubtitle(session: SessionState): string {
     case 'starting':
       return active.length ? `Preparing destinations… ${live} of ${active.length} live` : 'Preparing destinations…';
     case 'live':
-      return active.length ? `${live} of ${plural(active.length, 'destination')} live` : 'No active destinations';
+      return active.length ? `${live} of ${plural(active.length, 'destination')} live${recoveringNote}` : 'No active destinations';
     case 'stopping':
       return 'Ending the stream on every platform…';
   }
@@ -188,7 +203,7 @@ function StatusCard({ session }: { session: SessionState | null }) {
           )}
         </div>
       </div>
-      <div className="status-auto">
+      <div className="status-auto status-toggles">
         <Field label="Auto go-live" help="Start automatically when OBS starts streaming" inline>
           <Toggle
             checked={session.autoGoLive}
@@ -196,6 +211,7 @@ function StatusCard({ session }: { session: SessionState | null }) {
             onChange={(v) => void run('auto', () => api.setAutoGoLive(v))}
           />
         </Field>
+        <AlertToggle help="Sound + notification in this browser when a platform ends the live" />
       </div>
     </Card>
   );
@@ -470,13 +486,40 @@ function DestinationsSection({ destinations, loading, error, reload, states, isA
   );
 }
 
-function DestinationCard({ dest, state, onUpdated }: { dest: Destination; state: DestinationState | null; onUpdated: (d: Destination) => void }) {
+const RECOVERY_REASON_MAX = 120;
+
+/** Takedown recoveries this session, as shown on a destination card (null when there were none). */
+export function recoverySummary(state: Pick<DestinationState, 'recoveries' | 'lastRecovery'> | null, now: number): string | null {
+  const n = typeof state?.recoveries === 'number' && Number.isFinite(state.recoveries) ? Math.floor(state.recoveries) : 0;
+  if (!state || n <= 0) return null;
+  const head = `Recovered ${n}×`;
+  const last = state.lastRecovery;
+  if (!last) return head;
+  const raw = typeof last.reason === 'string' ? last.reason.replace(/\s+/g, ' ').trim() : '';
+  const reason = raw.length > RECOVERY_REASON_MAX ? `${raw.slice(0, RECOVERY_REASON_MAX - 1).trimEnd()}…` : raw;
+  const parts = [reason, formatAgo(last.at, now)].filter(Boolean);
+  return parts.length ? `${head} · last: ${parts.join(' ')}` : head;
+}
+
+export function DestinationCard({
+  dest,
+  state,
+  onUpdated,
+}: {
+  dest: Destination;
+  state: DestinationState | null;
+  onUpdated: (d: Destination) => void;
+}) {
   const [toggling, setToggling] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const phase: DestinationPhase = state?.phase ?? (dest.enabled ? 'idle' : 'disabled');
   const watchUrl = safeHttpUrl(state?.watchUrl);
   const stats = state?.stats ?? null;
+  // Not while 'recovering': the server is already building a fresh live.
   const canRetry = phase === 'error' || phase === 'retrying';
+  const hasRecoveries = (state?.recoveries ?? 0) > 0;
+  const now = useNow(hasRecoveries ? 30_000 : null);
+  const recovery = recoverySummary(state, now);
 
   const toggle = async (enabled: boolean) => {
     setToggling(true);
@@ -503,7 +546,13 @@ function DestinationCard({ dest, state, onUpdated }: { dest: Destination; state:
 
   return (
     <section
-      className={cx('card dest-card', !dest.enabled && 'is-disabled', phase === 'live' && 'is-live', phase === 'error' && 'is-error')}
+      className={cx(
+        'card dest-card',
+        !dest.enabled && 'is-disabled',
+        phase === 'live' && 'is-live',
+        phase === 'recovering' && 'is-recovering',
+        phase === 'error' && 'is-error',
+      )}
       aria-label={`${dest.name} (${platformName(dest.platform)})`}
     >
       <div className="stack-sm" style={{ gap: 10 }}>
@@ -526,6 +575,12 @@ function DestinationCard({ dest, state, onUpdated }: { dest: Destination; state:
           {state && state.retries > 0 && phase !== 'live' && <span className="faint small">attempt {state.retries + 1}</span>}
         </div>
         {state?.message && <p className={cx('dest-message', phase === 'error' && 'is-error')}>{state.message}</p>}
+        {recovery && (
+          <p className="dest-recovery" title={state?.lastRecovery ? `Last takedown: ${formatDateTime(state.lastRecovery.at)}` : undefined}>
+            <ShieldIcon width={14} height={14} />
+            <span>{recovery}</span>
+          </p>
+        )}
         {stats && (phase === 'live' || phase === 'connecting' || phase === 'confirming') && (
           <div className="dest-stats">
             <span>

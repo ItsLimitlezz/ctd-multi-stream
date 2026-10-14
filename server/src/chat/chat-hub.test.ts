@@ -1,8 +1,8 @@
 import type { Logger } from 'pino';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessage } from '../../../shared/types.js';
+import type { ChatMessage, ChatModeration } from '../../../shared/types.js';
 import { EventBus } from '../events.js';
-import type { ChatMessageInput } from '../platforms/types.js';
+import type { ChatMessageInput, ChatSourceItem } from '../platforms/types.js';
 import type { ChatHub, ScopedSecrets } from '../services.js';
 import { BACKOFF_MAX_MS, DEDUPE_SIZE, RING_SIZE, createChatHub } from './chat-hub.js';
 
@@ -51,8 +51,8 @@ function msg(id: string, text = `text ${id}`): ChatMessageInput {
 }
 
 /** Source that yields the given messages, then stays open until aborted. */
-function staticSource(messages: ChatMessageInput[]) {
-  return async function* (signal: AbortSignal): AsyncGenerator<ChatMessageInput> {
+function staticSource(messages: ChatSourceItem[]) {
+  return async function* (signal: AbortSignal): AsyncGenerator<ChatSourceItem> {
     yield* messages;
     await waitForAbort(signal);
   };
@@ -290,6 +290,148 @@ describe('dedupe and ring buffer', () => {
     expect(hub.recent(0)).toEqual([]);
     expect(hub.recent(-5)).toEqual([]);
     expect(hub.recent(Number.NaN)).toHaveLength(200);
+  });
+});
+
+describe('moderation', () => {
+  let moderations: ChatModeration[];
+  beforeEach(() => {
+    moderations = [];
+    bus.on('chat-moderation', (m) => moderations.push(m));
+  });
+
+  function user(id: string, name: string, extra: Partial<ChatMessageInput> = {}): ChatMessageInput {
+    return { id, author: { name, id: `uid-${name}`, login: name.toLowerCase() }, text: `from ${name} ${id}`, ...extra };
+  }
+
+  it('message-deleted removes the message from the buffer and reports the hub id', async () => {
+    hub.attach(
+      'd1',
+      'twitch',
+      staticSource([user('m1', 'Ann'), user('m2', 'Bob'), { kind: 'message-deleted', platformMessageId: 'm1' }]),
+      parent.signal,
+    );
+    await flush();
+    expect(hub.recent().map((m) => m.id)).toEqual(['twitch:m2']);
+    expect(moderations).toEqual([
+      { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', ts: expect.any(String), messageId: 'twitch:m1', platformMessageId: 'm1' },
+    ]);
+  });
+
+  it('uses the explicit platformMessageId when the driver gives one, and the derived id for unknown messages', async () => {
+    hub.attach(
+      'd1',
+      'youtube',
+      staticSource([
+        user('LCC.abc', 'Ann', { platformMessageId: 'raw-1' }),
+        { kind: 'message-deleted', platformMessageId: 'raw-1' },
+        { kind: 'message-deleted', platformMessageId: 'never-seen' },
+        { kind: 'message-deleted', platformMessageId: '' },
+      ]),
+      parent.signal,
+    );
+    await flush();
+    expect(hub.recent()).toEqual([]);
+    // Never null (docs/API.md): an unknown message gets the id it would have had.
+    expect(moderations.map((m) => (m.kind === 'message-deleted' ? m.messageId : m.kind))).toEqual(['youtube:LCC.abc', 'youtube:never-seen']);
+  });
+
+  it('remembers the hub id of a deleted message that already left the ring buffer', async () => {
+    const many = Array.from({ length: RING_SIZE + 5 }, (_, i) => user(`m${i}`, 'Ann'));
+    hub.attach('d1', 'kick', staticSource([...many, { kind: 'message-deleted', platformMessageId: 'm0' }]), parent.signal);
+    await flush();
+    expect(hub.recent(RING_SIZE)).toHaveLength(RING_SIZE);
+    expect(moderations[0]).toMatchObject({ kind: 'message-deleted', messageId: 'kick:m0', platformMessageId: 'm0' });
+  });
+
+  it('only affects the destination the moderation came from', async () => {
+    hub.attach('a', 'twitch', staticSource([user('1', 'Ann'), user('2', 'Bob')]), parent.signal);
+    await flush();
+    hub.attach('b', 'twitch', staticSource([user('3', 'Ann'), { kind: 'user-cleared', userId: 'uid-Ann' }, { kind: 'message-deleted', platformMessageId: '2' }]), parent.signal);
+    await flush();
+    expect(hub.recent().map((m) => m.id)).toEqual(['twitch:1', 'twitch:2']);
+    expect(moderations).toEqual([
+      { kind: 'user-cleared', platform: 'twitch', destinationId: 'b', ts: expect.any(String), userId: 'uid-Ann', userName: null },
+      { kind: 'message-deleted', platform: 'twitch', destinationId: 'b', ts: expect.any(String), messageId: 'twitch:2', platformMessageId: '2' },
+    ]);
+  });
+
+  it('user-cleared matches the author id, or the name/login (case-insensitive) when there is no id', async () => {
+    hub.attach(
+      'd',
+      'kick',
+      staticSource([
+        user('1', 'Ann'),
+        user('2', 'Bob'),
+        { id: '3', author: { name: 'Carl' }, text: 'no id' },
+        { id: '4', author: { name: 'Dee', login: 'dee_login' }, text: 'login only' },
+        { kind: 'user-cleared', userId: 'uid-Ann' },
+        { kind: 'user-cleared', userName: 'CARL' },
+        { kind: 'user-cleared', userName: 'DEE_LOGIN' },
+        { kind: 'user-cleared' }, // nothing to match: ignored
+      ]),
+      parent.signal,
+    );
+    await flush();
+    expect(hub.recent().map((m) => m.id)).toEqual(['kick:2']);
+    expect(moderations.map((m) => (m.kind === 'user-cleared' ? [m.userId, m.userName] : null))).toEqual([
+      ['uid-Ann', null],
+      [null, 'CARL'],
+      [null, 'DEE_LOGIN'],
+    ]);
+  });
+
+  it('an id mismatch is not overridden by a matching name', async () => {
+    hub.attach('d', 'twitch', staticSource([user('1', 'Ann'), { kind: 'user-cleared', userId: 'someone-else', userName: 'ann' }]), parent.signal);
+    await flush();
+    expect(hub.recent().map((m) => m.id)).toEqual(['twitch:1']);
+  });
+
+  it('cleared removes the whole chat of that destination', async () => {
+    hub.attach('a', 'twitch', staticSource([user('1', 'Ann')]), parent.signal);
+    hub.attach('b', 'youtube', staticSource([user('2', 'Bob'), user('3', 'Cy'), { kind: 'cleared' }]), parent.signal);
+    await flush();
+    expect(hub.recent().map((m) => m.id)).toEqual(['twitch:1']);
+    expect(moderations).toEqual([{ kind: 'cleared', platform: 'youtube', destinationId: 'b', ts: expect.any(String) }]);
+  });
+
+  it('a deleted message is not re-added when the source replays it', async () => {
+    hub.attach('d', 'twitch', staticSource([user('1', 'Ann'), { kind: 'message-deleted', platformMessageId: '1' }, user('1', 'Ann')]), parent.signal);
+    await flush();
+    expect(hub.recent()).toEqual([]);
+    expect(emitted).toHaveLength(1);
+  });
+
+  it('keeps the new optional message fields', async () => {
+    hub.attach(
+      'd',
+      'twitch',
+      staticSource([
+        {
+          id: 'x',
+          platformMessageId: 'x',
+          author: { name: 'DJFan', id: '144552210', login: 'djfan', badges: ['subscriber/12'] },
+          text: 'hi Kappa',
+          fragments: [
+            { type: 'text', text: 'hi ' },
+            { type: 'emote', text: 'Kappa', image: 'https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0' },
+          ],
+          action: true,
+          highlighted: true,
+          reply: { messageId: 'parent', userName: 'Ann', text: 'hello' },
+        },
+      ]),
+      parent.signal,
+    );
+    await flush();
+    expect(emitted[0]).toMatchObject({
+      platformMessageId: 'x',
+      author: { id: '144552210', login: 'djfan' },
+      fragments: [{ type: 'text', text: 'hi ' }, { type: 'emote', text: 'Kappa' }],
+      action: true,
+      highlighted: true,
+      reply: { messageId: 'parent', userName: 'Ann', text: 'hello' },
+    });
   });
 });
 

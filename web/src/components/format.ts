@@ -68,6 +68,19 @@ export function formatDateTime(iso: string | null | undefined, fallback = 'Never
   return Number.isNaN(d.getTime()) ? fallback : d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+/** "just now", "45 s ago", "3 min ago", "2 h ago", "4 d ago" (empty for a missing/invalid time). */
+export function formatAgo(iso: string | null | undefined, now: number): string {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const s = Math.max(0, Math.floor((now - t) / 1000));
+  if (s < 10) return 'just now';
+  if (s < 60) return `${s} s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
+}
+
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }

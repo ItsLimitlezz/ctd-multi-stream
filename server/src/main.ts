@@ -5,6 +5,8 @@ import type https from 'node:https';
 import path from 'node:path';
 import pino from 'pino';
 import type { AppSettings } from '../../shared/api.js';
+import { eventHubFor } from './api/event-hub.js';
+import { createLanHandler } from './api/lan.js';
 import { createChatHub } from './chat/chat-hub.js';
 import { createBrowserManager } from './browser/browser-manager.js';
 import { loadConfig, type AppConfig } from './config.js';
@@ -142,6 +144,9 @@ export async function main(): Promise<void> {
   const services = await createServices(config);
   const { log } = services;
 
+  // External API event buffer: subscribe before anything starts emitting.
+  const apiEvents = eventHubFor(services);
+
   await services.media.start();
   await services.orchestrator.init();
 
@@ -149,6 +154,9 @@ export async function main(): Promise<void> {
   const app = await buildApp(services, tlsMaterial);
   await app.listen({ host: '0.0.0.0', port: config.webPort });
   log.info(`Web UI listening on ${tlsMaterial ? 'https' : 'http'}://0.0.0.0:${config.webPort}`);
+
+  // LAN clients get /api/v1, /dock and /overlay over plain HTTP on HTTP_PORT (TLS modes only).
+  services.tls.setLanHandler?.(createLanHandler(app));
 
   await services.tls.start((material) => {
     if (tlsMaterial) {
@@ -180,6 +188,7 @@ export async function main(): Promise<void> {
       await services.media.stop();
       await services.tls.stop();
       await app.close();
+      apiEvents.close();
     } catch (err) {
       log.error({ err }, 'error during shutdown');
     }

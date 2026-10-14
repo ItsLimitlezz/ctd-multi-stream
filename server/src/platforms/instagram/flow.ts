@@ -5,7 +5,7 @@ import type { Logger } from 'pino';
 import type { BrowserContext, Locator, Page } from 'playwright';
 import { abortable, fillField, humanPause, readTextValue, waitForAny } from '../../browser/helpers.js';
 import { DriverError } from '../types.js';
-import { LOGIN_PATH, RE, SESSION_COOKIE, STREAM_DETAILS_SOURCE, sel } from './selectors.js';
+import { LIVE_TITLE_ATTR, LOGIN_PATH, RE, SESSION_COOKIE, STREAM_DETAILS_SOURCE, sel } from './selectors.js';
 import {
   instagramTitle,
   isMasked,
@@ -28,6 +28,10 @@ export interface FlowTimeouts {
   liveConfirm: number;
   /** Ending the live (click, confirm, ended state). */
   end: number;
+  /** After going live: how long to look for the "Add link" control (before going live: a short look). */
+  linkFind: number;
+  /** One step of adding the link (form opens, "Add" enabled, form closes). */
+  linkStep: number;
 }
 
 export const DEFAULT_TIMEOUTS: FlowTimeouts = {
@@ -37,6 +41,8 @@ export const DEFAULT_TIMEOUTS: FlowTimeouts = {
   liveConfirm: 25_000,
   // end() as a whole must fit the orchestrator's 30 s budget (plus 5 s summary + 8 s navigation).
   end: 15_000,
+  linkFind: 4_000,
+  linkStep: 8_000,
 };
 
 export interface FlowConfig {
@@ -70,7 +76,7 @@ export async function visibleNow(loc: Locator, last = false): Promise<Locator | 
 }
 
 /** Wait for a visible element; null on timeout (abort still rejects). */
-async function waitVisible(loc: Locator, page: Page, timeoutMs: number, signal: AbortSignal): Promise<Locator | null> {
+export async function waitVisible(loc: Locator, page: Page, timeoutMs: number, signal: AbortSignal): Promise<Locator | null> {
   try {
     await waitForAny(page, { target: loc }, { timeoutMs, signal, pollMs: 150 });
     return await visibleNow(loc);
@@ -103,7 +109,7 @@ async function errorText(page: Page): Promise<string> {
   return text.replace(/\s+/g, ' ').trim().slice(0, 150) || 'unknown error';
 }
 
-async function click(target: Locator, signal: AbortSignal, timeoutMs = 10_000): Promise<void> {
+export async function click(target: Locator, signal: AbortSignal, timeoutMs = 10_000): Promise<void> {
   await humanPause(150, 450, signal);
   await abortable(target.click({ timeout: timeoutMs }), signal);
 }
@@ -195,11 +201,15 @@ export async function readUsername(page: Page): Promise<string | null> {
   return null;
 }
 
-/** Best effort: "Not now" on prompts and "decline optional cookies" on the cookie banner. */
+/**
+ * Best effort: "Not now" on prompts, "decline optional cookies" on the cookie banner, and "Done" /
+ * "Close" / "Don't share" on a "live ended" or "share your live" dialog left over from a live
+ * Instagram ended (never "Share").
+ */
 export async function dismissInterstitials(page: Page, signal: AbortSignal, rounds = 3): Promise<void> {
   for (let i = 0; i < rounds; i++) {
     let clicked = false;
-    for (const loc of [sel.cookieDecline(page), sel.notNow(page)]) {
+    for (const loc of [sel.cookieDecline(page), sel.leftoverDismiss(page), sel.notNow(page)]) {
       const target = await visibleNow(loc);
       if (!target) continue;
       try {
@@ -262,16 +272,22 @@ export async function openLiveSetup(page: Page, cfg: FlowConfig, signal: AbortSi
   if (setup === 'error') throw new DriverError(`Instagram couldn't start a live: ${await errorText(page)}`, 'platform-error');
 }
 
-/** Type the title, choose the audience, click "Next". */
+/**
+ * Type the title, choose the audience, run `beforeNext` (e.g. add the live's link when the setup
+ * form offers it; it must not throw except on abort), click "Next".
+ */
 export async function fillSetup(
   page: Page,
   input: { title: string; audience: Audience },
   cfg: FlowConfig,
   signal: AbortSignal,
   log: Logger,
+  beforeNext?: () => Promise<void>,
 ): Promise<void> {
+  await tagLiveTitle(page);
   if (input.title) await typeTitle(page, input.title, signal, log);
   await chooseAudience(page, input.audience, signal, log);
+  if (beforeNext) await beforeNext();
   await humanPause(300, 800, signal);
   try {
     await clickWhenReady(page, sel.nextButton(page), 'the "Next" button', signal, cfg.timeouts.step);
@@ -282,6 +298,15 @@ export async function fillSetup(
     }
     throw err;
   }
+}
+
+/** Mark the live's title field so link-field detection never mistakes it for the link's title. */
+async function tagLiveTitle(page: Page): Promise<void> {
+  const field = await visibleNow(sel.titleInput(page));
+  if (!field) return;
+  await field
+    .evaluate((el, attr) => (el as unknown as { setAttribute(n: string, v: string): void }).setAttribute(attr, ''), LIVE_TITLE_ATTR)
+    .catch(() => {});
 }
 
 /** Title is set at creation only. A failure here is logged and the live goes on without it. */
@@ -537,22 +562,33 @@ async function waitUntilLive(page: Page, cfg: FlowConfig, signal: AbortSignal): 
   }
 }
 
-export type EndResult = 'ended' | 'not-live' | 'closed';
+export type EndResult = 'ended' | 'not-live' | 'closed' | 'skipped';
 
 /**
  * End the live: "End live video" → confirmation → ended state → close the summary without
- * sharing. Returns 'not-live' when there was no live to end (never went live / already ended).
+ * sharing. Returns 'not-live' when there was no live to end (never went live / Instagram already
+ * ended it — a "live ended"/"share" dialog is then closed without sharing). `stillOwner` is
+ * checked before every click: once it returns false (the page now hosts a newer live) nothing
+ * more is clicked ('skipped').
  */
-export async function endLive(page: Page, cfg: FlowConfig): Promise<EndResult> {
+export async function endLive(page: Page, cfg: FlowConfig, stillOwner: () => boolean = () => true): Promise<EndResult> {
   if (page.isClosed()) return 'closed';
+  if (!stillOwner()) return 'skipped';
   const signal = AbortSignal.timeout(cfg.timeouts.end);
+  // Instagram ended it already (takedown): its notice would block the "End" click.
+  if (await visibleNow(sel.leftoverDismiss(page))) await dismissLeftovers(page, stillOwner);
   const endButton = await visibleNow(sel.endLiveButton(page));
-  if (!endButton) return 'not-live';
+  if (!endButton) {
+    await dismissLeftovers(page, stillOwner);
+    return 'not-live';
+  }
+  if (!stillOwner()) return 'skipped';
   await click(endButton, signal);
 
   let confirmed = false;
   for (;;) {
     if (page.isClosed()) return 'closed';
+    if (!stillOwner()) return 'skipped';
     if (signal.aborted) throw new DriverError('Instagram did not confirm that the live ended', 'timeout');
     if (await visibleNow(sel.ended(page))) break;
     if (!confirmed) {
@@ -569,8 +605,27 @@ export async function endLive(page: Page, cfg: FlowConfig): Promise<EndResult> {
     await humanPause(300, 500, signal).catch(() => {});
   }
 
+  if (!stillOwner()) return 'skipped';
   await dismissAfterEnd(page);
   return 'ended';
+}
+
+/**
+ * Close "live ended" / "share your live" dialogs left by a live Instagram ended (best effort,
+ * bounded, never throws; never "Share").
+ */
+export async function dismissLeftovers(page: Page, stillOwner: () => boolean = () => true): Promise<void> {
+  const signal = AbortSignal.timeout(6_000);
+  try {
+    for (let i = 0; i < 3 && !page.isClosed() && stillOwner(); i++) {
+      const button = await visibleNow(sel.leftoverDismiss(page), true);
+      if (!button) return;
+      await click(button, signal, 3_000);
+      await humanPause(250, 450, signal);
+    }
+  } catch {
+    // best effort
+  }
 }
 
 /** Close the post-live summary ("Done" / "Close"); never "Share" or "Delete". */

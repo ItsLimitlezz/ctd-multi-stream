@@ -1,10 +1,11 @@
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { tiktokDriver, TIKTOK_INFO } from './index.js';
-import { CHAT_EXTRACT, ingestScript, TEXT, topicScript, USERNAME_SCRIPT } from './selectors.js';
+import { CHAT_EXTRACT, healthScanScript, ingestScript, TEXT, topicScript, USERNAME_SCRIPT } from './selectors.js';
 import { makeAccount, makeDestination } from './test-utils.js';
 import {
   accountUsername,
+  autoRecoverEnabled,
   goLiveTimeoutSec,
   hostOf,
   isLoginUrl,
@@ -14,9 +15,13 @@ import {
   joinRtmpUrl,
   looksLikeStreamKey,
   normalizeUsername,
+  parseOptionalBoolean,
   parseOptionalNumber,
+  parseViewerCount,
   sameHost,
+  takedownConfirmSec,
   watchUrlFor,
+  zeroViewerSec,
 } from './util.js';
 
 describe('tiktok util', () => {
@@ -52,6 +57,45 @@ describe('tiktok util', () => {
     expect(parseOptionalNumber('')).toBeNull();
     expect(parseOptionalNumber(undefined)).toBeNull();
     expect(parseOptionalNumber('x')).toBeNaN();
+  });
+
+  it('parses the Stream Guard options with defaults and bounds', () => {
+    const d = (options: Record<string, unknown>) => makeDestination({ options });
+    expect(autoRecoverEnabled(d({}))).toBe(true);
+    expect(autoRecoverEnabled(d({ autoRecover: false }))).toBe(false);
+    expect(autoRecoverEnabled(d({ autoRecover: 'false' }))).toBe(false);
+    expect(autoRecoverEnabled(d({ autoRecover: true }))).toBe(true);
+    expect(autoRecoverEnabled(d({ autoRecover: 'garbage' }))).toBe(true);
+    expect(takedownConfirmSec(d({}))).toBe(5);
+    expect(takedownConfirmSec(d({ takedownConfirmSec: 12 }))).toBe(12);
+    expect(takedownConfirmSec(d({ takedownConfirmSec: '1' }))).toBe(2);
+    expect(takedownConfirmSec(d({ takedownConfirmSec: 999 }))).toBe(60);
+    expect(takedownConfirmSec(d({ takedownConfirmSec: 'x' }))).toBe(5);
+    expect(zeroViewerSec(d({}))).toBe(0);
+    expect(zeroViewerSec(d({ zeroViewerSec: 5 }))).toBe(5);
+    expect(zeroViewerSec(d({ zeroViewerSec: -3 }))).toBe(0);
+    expect(zeroViewerSec(d({ zeroViewerSec: 10_000 }))).toBe(600);
+    expect(zeroViewerSec(d({ zeroViewerSec: 'nope' }))).toBe(0);
+    expect(parseOptionalBoolean(undefined)).toBeNull();
+    expect(parseOptionalBoolean('on')).toBe(true);
+    expect(parseOptionalBoolean(0)).toBe(false);
+    expect(parseOptionalBoolean('maybe')).toBe('invalid');
+  });
+
+  it('parses viewer counts the way TikTok shows them', () => {
+    expect(parseViewerCount('0')).toBe(0);
+    expect(parseViewerCount(' 12 ')).toBe(12);
+    expect(parseViewerCount('1,234')).toBe(1234);
+    expect(parseViewerCount('1.234')).toBe(1234);
+    expect(parseViewerCount('1.2K')).toBe(1200);
+    expect(parseViewerCount('1,2k')).toBe(1200);
+    expect(parseViewerCount('3M')).toBe(3_000_000);
+    expect(parseViewerCount('10K+')).toBe(10_000);
+    expect(parseViewerCount('--')).toBeNull();
+    expect(parseViewerCount('')).toBeNull();
+    expect(parseViewerCount(null)).toBeNull();
+    expect(parseViewerCount('1.5')).toBeNull();
+    expect(parseViewerCount('viewers')).toBeNull();
   });
 
   it('derives the username and watch URL from the account', () => {
@@ -99,6 +143,10 @@ describe('tiktok selectors', () => {
     expect(TEXT.noStream.test('Waiting for stream...')).toBe(true);
     expect(TEXT.noStream.test("We haven't received any video")).toBe(true);
     expect(TEXT.noStream.test('Preview')).toBe(false);
+    expect(TEXT.checkEncoder.test('Please check your streaming software')).toBe(true);
+    expect(TEXT.checkEncoder.test('Check your network connection')).toBe(true);
+    expect(TEXT.checkEncoder.test('Check OBS')).toBe(true);
+    expect(TEXT.checkEncoder.test('Please check our Community Guidelines')).toBe(false);
     expect(TEXT.topicPlaceholder.test('Select a topic')).toBe(true);
     expect(TEXT.topicPlaceholder.test('')).toBe(true);
     expect(TEXT.topicPlaceholder.test('Gaming')).toBe(false);
@@ -113,7 +161,7 @@ describe('tiktok selectors', () => {
   });
 
   it('page scripts are valid JavaScript', () => {
-    for (const source of [ingestScript(), topicScript(), USERNAME_SCRIPT, `(${CHAT_EXTRACT})`]) {
+    for (const source of [ingestScript(), topicScript(), healthScanScript(), USERNAME_SCRIPT, `(${CHAT_EXTRACT})`]) {
       expect(() => new vm.Script(source)).not.toThrow();
     }
   });
@@ -132,8 +180,12 @@ describe('tiktok driver info', () => {
     expect(TIKTOK_INFO.chatSupport).toBe('browser');
     expect(TIKTOK_INFO.destinationFields).toEqual([
       expect.objectContaining({ key: 'goLiveTimeoutSec', type: 'number', target: 'option', default: 90 }),
+      expect.objectContaining({ key: 'autoRecover', type: 'boolean', target: 'option', default: true }),
+      expect.objectContaining({ key: 'takedownConfirmSec', type: 'number', target: 'option', default: 5 }),
+      expect.objectContaining({ key: 'zeroViewerSec', type: 'number', target: 'option', default: 0 }),
     ]);
     expect(TIKTOK_INFO.notes).toMatch(/topic/i);
+    expect(TIKTOK_INFO.notes).toMatch(/new one automatically/);
     expect(tiktokDriver.info).toBe(TIKTOK_INFO);
   });
 
@@ -149,6 +201,24 @@ describe('tiktok driver info', () => {
       'TikTok only accepts the vertical feed',
     ]);
     expect(await tiktokDriver.validateDestination!(makeDestination({ options: { goLiveTimeoutSec: 'x' } }), null, ctx)).toHaveLength(1);
+    expect(
+      await tiktokDriver.validateDestination!(
+        makeDestination({ options: { autoRecover: false, takedownConfirmSec: 10, zeroViewerSec: '5' } }),
+        null,
+        ctx,
+      ),
+    ).toEqual([]);
+    expect(
+      await tiktokDriver.validateDestination!(
+        makeDestination({ options: { autoRecover: 'maybe', takedownConfirmSec: 'soon', zeroViewerSec: {} } }),
+        null,
+        ctx,
+      ),
+    ).toEqual([
+      'Auto-recover must be on or off',
+      'Takedown confirmation must be a number of seconds',
+      '0-viewer takedown must be a number of seconds',
+    ]);
   });
 
   it('requires an account to prepare', async () => {

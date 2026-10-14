@@ -1,317 +1,8 @@
-import pino from 'pino';
-import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import type { AppSettings } from '../../../shared/api.js';
-import type {
-  Account,
-  ChatMessage,
-  Destination,
-  DestinationPhase,
-  DestinationState,
-  Feed,
-  FeedState,
-  PlatformId,
-  PlatformInfo,
-  SessionState,
-} from '../../../shared/types.js';
-import { EventBus, type PushEvent, type PushStatus } from '../events.js';
-import {
-  DriverError,
-  type ChatMessageInput,
-  type DriverContext,
-  type PlatformDriver,
-  type PreparedLive,
-  type PushPlan,
-} from '../platforms/types.js';
-import type {
-  AppServices,
-  BrowserManager,
-  ChatHub,
-  MediaServer,
-  Orchestrator,
-  PushSupervisor,
-  Repos,
-  ScopedSecrets,
-} from '../services.js';
-import { createOrchestrator } from './orchestrator.js';
-
-// ---------------------------------------------------------------------------
-// Fakes
-// ---------------------------------------------------------------------------
-
-const PLAN: PushPlan = { url: 'rtmp://ingest.example.com/app/secret-key', mode: 'copy', feeds: ['landscape'] };
-const STATS = { bitrateKbps: 6000, fps: 60, speed: 1, uptimeSec: 4 };
-
-/** Drains pending microtasks/immediates (setImmediate stays real under our fake timers). */
-async function flush(): Promise<void> {
-  for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r));
-}
-
-async function advance(ms: number): Promise<void> {
-  await vi.advanceTimersByTimeAsync(ms);
-  await flush();
-}
-
-function offlineFeed(feed: Feed): FeedState {
-  return { feed, online: false, since: null, video: null, audio: null, bitrateKbps: null };
-}
-
-class FakeMedia {
-  private readonly states = new Map<Feed, FeedState>([
-    ['landscape', offlineFeed('landscape')],
-    ['vertical', offlineFeed('vertical')],
-  ]);
-  constructor(private readonly bus: EventBus) {}
-  feeds(): FeedState[] {
-    return [...this.states.values()];
-  }
-  feed(f: Feed): FeedState {
-    return this.states.get(f)!;
-  }
-  /** Change state without emitting (initial conditions). */
-  preset(f: Feed, online: boolean): void {
-    this.states.set(f, { ...offlineFeed(f), online, since: online ? new Date().toISOString() : null });
-  }
-  set(f: Feed, online: boolean, bitrateKbps: number | null = null): void {
-    const s: FeedState = { ...offlineFeed(f), online, since: online ? new Date().toISOString() : null, bitrateKbps };
-    this.states.set(f, s);
-    this.bus.emit('feed', s);
-  }
-}
-
-class FakePushes implements PushSupervisor {
-  starts: { id: string; plan: PushPlan }[] = [];
-  stops: string[] = [];
-  private readonly active = new Set<string>();
-  constructor(private readonly bus: EventBus) {}
-  start(id: string, plan: PushPlan): void {
-    this.starts.push({ id, plan });
-    this.active.add(id);
-    this.emit(id, 'starting');
-  }
-  async stop(id: string): Promise<void> {
-    this.stops.push(id);
-    if (this.active.delete(id)) this.emit(id, 'stopped');
-  }
-  async stopAll(): Promise<void> {
-    for (const id of [...this.active]) await this.stop(id);
-  }
-  isRunning(id: string): boolean {
-    return this.active.has(id);
-  }
-  emit(id: string, status: PushStatus, extra: Partial<PushEvent> = {}): void {
-    this.bus.emit('push', { id, status, message: null, stats: null, attempt: 0, ...extra });
-  }
-  running(id: string): void {
-    this.emit(id, 'running', { stats: STATS });
-  }
-}
-
-class FakeChat implements ChatHub {
-  attaches: { id: string; platform: PlatformId; signal: AbortSignal }[] = [];
-  attach(
-    destinationId: string,
-    platform: PlatformId,
-    _source: (signal: AbortSignal) => AsyncIterable<ChatMessageInput>,
-    signal: AbortSignal,
-  ): void {
-    this.attaches.push({ id: destinationId, platform, signal });
-  }
-  recent(): ChatMessage[] {
-    return [];
-  }
-  async overlayToken(): Promise<string> {
-    return 't';
-  }
-  async rotateOverlayToken(): Promise<string> {
-    return 't';
-  }
-}
-
-function platformInfo(id: PlatformId): PlatformInfo {
-  return {
-    id,
-    name: id,
-    feeds: ['landscape', 'vertical'],
-    defaultFeed: 'landscape',
-    connectMethod: 'none',
-    accountFields: [],
-    destinationFields: [],
-    developerApp: null,
-    titleSupport: 'api',
-    chatSupport: 'none',
-    keyPerSession: false,
-    experimental: false,
-  };
-}
-
-type DriverImpl = Omit<PlatformDriver, 'info'>;
-
-function driver(id: PlatformId, impl: DriverImpl): PlatformDriver {
-  return { info: platformInfo(id), ...impl };
-}
-
-function dest(id: string, over: Partial<Destination> = {}): Destination {
-  return {
-    id,
-    platform: 'custom',
-    accountId: null,
-    name: id.toUpperCase(),
-    feed: 'landscape',
-    enabled: true,
-    options: {},
-    ingestUrl: 'rtmp://ingest.example.com/app',
-    hasStreamKey: true,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    ...over,
-  };
-}
-
-type EndMock = Mock<() => Promise<void>>;
-
-function prepared(over: Omit<Partial<PreparedLive>, 'end'> & { end?: EndMock } = {}): PreparedLive & { end: EndMock } {
-  return { push: PLAN, watchUrl: 'https://watch.example.com/me', ...over, end: over.end ?? vi.fn(async () => {}) };
-}
-
-interface HarnessOptions {
-  dests: Destination[];
-  drivers: PlatformDriver[];
-  settings?: Record<string, unknown>;
-  graceSec?: number;
-  accounts?: Account[];
-}
-
-function harness(opts: HarnessOptions) {
-  const bus = new EventBus();
-  const media = new FakeMedia(bus);
-  const pushes = new FakePushes(bus);
-  const chat = new FakeChat();
-  const dests = new Map(opts.dests.map((d) => [d.id, d]));
-  const accounts = new Map((opts.accounts ?? []).map((a) => [a.id, a]));
-  const settings = new Map<string, unknown>(Object.entries(opts.settings ?? {}));
-  const secrets = new Map<string, string>();
-  const drivers = new Map(opts.drivers.map((d) => [d.info.id, d]));
-  const contexts: DriverContext[] = [];
-  const log = pino({ level: 'silent' });
-
-  const scoped = (scope: string): ScopedSecrets => ({
-    get: async (k) => secrets.get(`${scope}/${k}`) ?? null,
-    set: async (k, v) => void secrets.set(`${scope}/${k}`, v),
-    delete: async (k) => void secrets.delete(`${scope}/${k}`),
-    getJson: async <T>(k: string) => {
-      const v = secrets.get(`${scope}/${k}`);
-      return v ? (JSON.parse(v) as T) : null;
-    },
-    setJson: async (k, v) => void secrets.set(`${scope}/${k}`, JSON.stringify(v)),
-  });
-
-  const repos = {
-    destinations: {
-      list: () => [...dests.values()],
-      get: (id: string) => dests.get(id) ?? null,
-    },
-    accounts: {
-      list: () => [...accounts.values()],
-      get: (id: string) => accounts.get(id) ?? null,
-    },
-    settings: {
-      get: <T>(k: string, fallback: T): T => (settings.has(k) ? (settings.get(k) as T) : fallback),
-      set: (k: string, v: unknown) => void settings.set(k, v),
-      delete: (k: string) => void settings.delete(k),
-    },
-    secrets: { scoped, deleteScope: () => {} },
-    audit: { log: () => {}, list: () => [] },
-  } as unknown as Repos;
-
-  const appSettings = (): AppSettings => ({
-    publicBaseUrl: '',
-    ingestHost: '',
-    disconnectGraceSec: opts.graceSec ?? 15,
-  });
-
-  const services = {
-    log,
-    bus,
-    repos,
-    media: media as unknown as MediaServer,
-    pushes,
-    chat,
-    browser: {} as BrowserManager,
-    platforms: {
-      get: (id: PlatformId) => {
-        const d = drivers.get(id);
-        if (!d) throw new Error(`Unknown platform: ${id}`);
-        return d;
-      },
-      all: () => [...drivers.values()],
-    },
-    appSettings,
-    publicBaseUrl: () => 'https://example.test',
-    driverContext: async ({ accountId, destinationId, signal }) => {
-      const ctx: DriverContext = {
-        log,
-        accountSecrets: accountId ? scoped(`account:${accountId}`) : null,
-        destinationSecrets: destinationId ? scoped(`destination:${destinationId}`) : null,
-        app: null,
-        browser: {} as BrowserManager,
-        publicBaseUrl: 'https://example.test',
-        signal: signal ?? new AbortController().signal,
-        updateAccount: async () => {},
-      };
-      contexts.push(ctx);
-      return ctx;
-    },
-  } as Partial<AppServices> as AppServices;
-
-  const orch: Orchestrator = createOrchestrator(services);
-  services.orchestrator = orch;
-
-  const destEvents: DestinationState[] = [];
-  const sessionEvents: SessionState[] = [];
-  const notices: { level: string; message: string }[] = [];
-  bus.on('destination', (s) => destEvents.push(s));
-  bus.on('session', (s) => sessionEvents.push(s));
-  bus.on('notice', (n) => notices.push(n));
-
-  const destState = (id: string): DestinationState => {
-    const s = orch.state().destinations.find((d) => d.destinationId === id);
-    if (!s) throw new Error(`no state for ${id}`);
-    return s;
-  };
-
-  return {
-    bus,
-    media,
-    pushes,
-    chat,
-    dests,
-    settings,
-    secrets,
-    contexts,
-    services,
-    orch,
-    destEvents,
-    sessionEvents,
-    notices,
-    destState,
-    phase: (id: string): DestinationPhase => destState(id).phase,
-    /** Phase transitions seen in 'destination' events for `id`. */
-    history: (id: string): DestinationPhase[] => {
-      const out: DestinationPhase[] = [];
-      for (const e of destEvents) if (e.destinationId === id && out[out.length - 1] !== e.phase) out.push(e.phase);
-      return out;
-    },
-  };
-}
-
-/** Starts a session with landscape online and every destination pushing + running. */
-async function goLive(h: ReturnType<typeof harness>, ids: string[]): Promise<void> {
-  await h.orch.init();
-  h.media.set('landscape', true);
-  await flush();
-  for (const id of ids) h.pushes.running(id);
-  await flush();
-}
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Account, Destination, FieldSpec } from '../../../shared/types.js';
+import { normalizeFields } from '../http/validation.js';
+import { DriverError, type ChatMessageInput, type PreparedLive } from '../platforms/types.js';
+import { advance, dest, driver, flush, goLive, harness, PLAN, prepared, STATS } from './test-helpers.js';
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
@@ -1023,6 +714,41 @@ describe('destination changes mid-session', () => {
     await h.orch.destinationChanged('k1');
     await flush();
     expect(kPrepare).toHaveBeenCalledTimes(3);
+  });
+
+  it('compares effective options: a save that backfills defaults or normalizes values does not restart it', async () => {
+    // A TikTok destination saved before autoRecover / zeroViewerSec existed, with a text-typed number.
+    const fields: FieldSpec[] = [
+      { key: 'goLiveTimeoutSec', label: 'Go-live timeout', type: 'number', target: 'option', default: 90 },
+      { key: 'autoRecover', label: 'Auto-recover', type: 'boolean', target: 'option', default: true },
+      { key: 'zeroViewerSec', label: 'Zero viewers', type: 'number', target: 'option', default: 0 },
+      { key: 'note', label: 'Note', type: 'text', target: 'option' },
+      { key: 'streamKey', label: 'Stream key', type: 'secret', target: 'streamKey' },
+    ];
+    const live = prepared();
+    const prepare = vi.fn(async () => live);
+    const h = harness({
+      dests: [dest('t1', { platform: 'tiktok', options: { goLiveTimeoutSec: '45', note: '' } })],
+      drivers: [driver('tiktok', { prepare }, { destinationFields: fields })],
+    });
+    await goLive(h, ['t1']);
+    const save = async (patch: Partial<Destination>, input: Record<string, unknown> = {}) => {
+      const current = h.dests.get('t1')!;
+      h.dests.set('t1', { ...current, ...patch, options: normalizeFields(fields.filter((f) => f.target === 'option'), input, current.options) });
+      await h.orch.destinationChanged('t1');
+      await flush();
+    };
+
+    await save({ name: 'Renamed' });
+    expect(h.dests.get('t1')!.options).toEqual({ goLiveTimeoutSec: 45, autoRecover: true, zeroViewerSec: 0 });
+    await save({}, { autoRecover: 'true', note: '  ' });
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(live.end).not.toHaveBeenCalled();
+    expect(h.phase('t1')).toBe('live');
+
+    await save({}, { note: 'hello' });
+    expect(live.end).toHaveBeenCalledTimes(1);
+    expect(prepare).toHaveBeenCalledTimes(2);
   });
 
   it('a destination added mid-session starts right away', async () => {

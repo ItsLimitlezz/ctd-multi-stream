@@ -82,6 +82,23 @@ export function awaitBounded<T>(work: (signal: AbortSignal) => Promise<T>, opts:
   });
 }
 
+/** Wait `ms`; resolves early (never rejects) when `signal` aborts. Leaves no timer behind. */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 /** Runs async tasks one at a time, in call order. A failing task does not block later ones. */
 export class SerialQueue {
   private tail: Promise<unknown>;

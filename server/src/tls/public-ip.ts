@@ -73,11 +73,18 @@ function unmapIpv4(ip: string): string | null {
   return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
 }
 
-export function classifyIp(value: string): IpClass {
+/** Canonical address (IPv4-mapped IPv6 unwrapped to IPv4) and its family, or null when not an IP. */
+export function canonicalIp(value: string): { ip: string; type: 'ipv4' | 'ipv6' } | null {
   let ip = normalizeIp(value);
-  if (!ip) return 'invalid';
+  if (!ip) return null;
   ip = unmapIpv4(ip) ?? ip;
-  const type = net.isIPv6(ip) ? 'ipv6' : 'ipv4';
+  return { ip, type: net.isIPv6(ip) ? 'ipv6' : 'ipv4' };
+}
+
+export function classifyIp(value: string): IpClass {
+  const canonical = canonicalIp(value);
+  if (!canonical) return 'invalid';
+  const { ip, type } = canonical;
   for (const [cls, list] of LISTS) if (list.check(ip, type)) return cls;
   if (type === 'ipv6' && !GLOBAL_V6.check(ip, 'ipv6')) return 'reserved';
   return 'public';

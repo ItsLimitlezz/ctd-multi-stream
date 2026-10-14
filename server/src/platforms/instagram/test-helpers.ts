@@ -6,7 +6,7 @@ import type { AddressInfo } from 'node:net';
 import pino from 'pino';
 import type { BrowserContext, Page } from 'playwright';
 import type { Account, AccountStatus, Destination } from '../../../../shared/types.js';
-import type { BrowserManager } from '../../services.js';
+import type { BrowserManager, ScopedSecrets } from '../../services.js';
 import type { DriverContext } from '../types.js';
 
 export const FIXTURE_SERVER_URL = 'rtmps://edgetee-upload-tst.xx.fbcdn.net:443/rtmp/';
@@ -28,6 +28,30 @@ export interface FixtureConfig {
   titleMaxLength: number;
   /** "Next" stays disabled while the title is empty. */
   requireTitle: boolean;
+  /** Where "Add link" is offered: setup form, producer before going live, or only once live. */
+  linkUi: 'none' | 'setup' | 'producer' | 'live';
+  /** The link form refuses every link ("Couldn't add link"). */
+  linkFails: boolean;
+  /** maxlength of the link's title field. */
+  linkTitleMax: number;
+  /** The link form's URL field has no type/placeholder/label the driver recognizes. */
+  linkUrlUnlabelled: boolean;
+  /** "Add link" opens nothing. */
+  linkDead: boolean;
+  /**
+   * The link form stays open after "Add": 'silent' = nothing else happens; 'shown' = the link is
+   * taken and shown in the producer, but the form stays open.
+   */
+  linkSticky: 'off' | 'silent' | 'shown';
+  /** Viewer count once live: an icon labelled "Viewers" + number, or "N viewers" text. */
+  viewerUi: 'none' | 'icon' | 'text';
+  /** Viewer count shown when the live starts. */
+  viewers: number;
+  /**
+   * A dialog left over from a live Instagram ended, shown when the page loads ('policy': a policy
+   * notice without "ended"/"removed" wording).
+   */
+  leftover: 'none' | 'ended' | 'share' | 'policy';
 }
 
 export const DEFAULT_FIXTURE: FixtureConfig = {
@@ -42,6 +66,15 @@ export const DEFAULT_FIXTURE: FixtureConfig = {
   endConfirm: true,
   titleMaxLength: 30,
   requireTitle: false,
+  linkUi: 'none',
+  linkFails: false,
+  linkTitleMax: 30,
+  linkUrlUnlabelled: false,
+  linkDead: false,
+  linkSticky: 'off',
+  viewerUi: 'none',
+  viewers: 3,
+  leftover: 'none',
 };
 
 export interface FixtureEvent {
@@ -87,9 +120,35 @@ function detailsHtml(ui: FixtureConfig['detailsUi']): string {
     <div><div><span>Stream key</span></div><div><span id="keyText">••••••••••••</span><button type="button" id="showKey">Show</button><button type="button">Copy</button></div></div>`;
 }
 
+function viewersHtml(ui: FixtureConfig['viewerUi']): string {
+  switch (ui) {
+    case 'icon':
+      return `<div id="viewers" hidden><svg aria-label="Viewers" role="img" width="16" height="16" viewBox="0 0 16 16"><rect width="16" height="16"/></svg><span id="viewerCount"></span></div>`;
+    case 'text':
+      return `<div id="viewers" hidden><span id="viewerCount"></span> viewers</div>`;
+    case 'none':
+      return '';
+  }
+}
+
+function leftoverHtml(kind: FixtureConfig['leftover']): string {
+  if (kind === 'none') return '';
+  const body =
+    kind === 'ended'
+      ? `<h2>Your live video was removed</h2><p>It may go against our Community Guidelines.</p>
+         <button type="button" id="leftoverShare">Share</button><button type="button" id="leftoverDone">Done</button>`
+      : kind === 'policy'
+        ? `<h2>Live video interrupted</h2><p>Your live video was interrupted because it may include music that belongs to someone else.</p>
+         <button type="button" id="leftoverShare">Share</button><button type="button" id="leftoverDone">Done</button>`
+        : `<h2>Share your live video?</h2><p>Your live video will be shared to your profile as a reel.</p>
+         <button type="button" id="leftoverShare">Share</button><button type="button" id="leftoverDone">Don't share</button>`;
+  return `<div class="overlay" id="leftover"><div class="modal" role="dialog">${body}</div></div>`;
+}
+
 function homePage(cfg: FixtureConfig): string {
   const liveItem =
     cfg.eligibility === 'no-live' ? '' : `<a href="#" role="link" id="menuLive">${icon('Live video')}<span>Live video</span></a>`;
+  const addLink = (id: string, hidden: boolean) => `<button type="button" class="addLink" id="${id}" ${hidden ? 'hidden' : ''}>Add link</button>`;
   return `<!doctype html><html><head><meta charset="utf-8"><title>Instagram</title>
 <style>
   body { font-family: sans-serif; margin: 0; }
@@ -123,12 +182,17 @@ function homePage(cfg: FixtureConfig): string {
   <h2>Go live</h2>
   <input id="title" type="text" placeholder="Add a title" maxlength="${cfg.titleMaxLength}">
   ${audienceHtml(cfg.audienceUi)}
+  ${cfg.linkUi === 'setup' ? addLink('addLinkSetup', false) : ''}
   <button type="button" id="next">Next</button>
 </div></div>
 <div class="producer" id="producer" role="dialog" aria-label="Live producer" hidden>
-  <header><span id="liveBadge" hidden>LIVE</span>
+  <header><span id="liveBadge" hidden>LIVE</span><span id="producerTitle"></span>
+    ${viewersHtml(cfg.viewerUi)}
     <button type="button" id="goLive" disabled>Go live</button>
-    <button type="button" id="endLive" hidden>End live video</button></header>
+    <button type="button" id="endLive" hidden>End live video</button>
+    ${cfg.linkUi === 'producer' || cfg.linkUi === 'live' ? addLink('addLinkProducer', cfg.linkUi === 'live') : ''}
+    <span id="linkShown" hidden></span>
+    <div role="alert" id="warnBanner" hidden></div></header>
   <section>${detailsHtml(cfg.detailsUi)}</section>
   <div id="waiting">Waiting for your stream…</div>
   <div role="tablist"><button type="button" role="tab" id="tabSetup" aria-selected="true">Stream setup</button>
@@ -144,6 +208,14 @@ function homePage(cfg: FixtureConfig): string {
   <button type="button" id="endNow">End now</button><button type="button">Cancel</button></div></div>
 <div class="overlay" id="ended" hidden><div class="modal" role="dialog"><h2>Your live video has ended</h2>
   <button type="button" id="share">Share</button><button type="button" id="done">Done</button></div></div>
+<div class="overlay" id="linkDialog" hidden><div class="modal" role="dialog" aria-label="Add link"><h3>Add link</h3>
+  <input id="linkTitle" type="text" placeholder="Link title" maxlength="${cfg.linkTitleMax}">
+  <input id="linkUrl" ${cfg.linkUrlUnlabelled ? 'type="text"' : 'type="url" placeholder="URL"'}>
+  <p id="linkError" hidden>Couldn't add link. Try again.</p>
+  <button type="button" id="linkAdd" disabled>Add</button><button type="button" id="linkCancel">Cancel</button></div></div>
+<div class="overlay" id="takedown" hidden><div class="modal" role="dialog"><h2 id="tdTitle"></h2><p id="tdText"></p>
+  <button type="button" id="tdShare">Share</button><button type="button" id="tdDone">Done</button></div></div>
+${leftoverHtml(cfg.leftover)}
 <script>
 const CFG = ${JSON.stringify(cfg)};
 const AVATAR = ${JSON.stringify(AVATAR)};
@@ -180,13 +252,56 @@ if (CFG.requireTitle) {
 $('next').onclick = async () => {
   await ev('title', $('title').value);
   await ev('audience', audience());
+  $('producerTitle').textContent = $('title').value;
   show('setup', false); show('producer');
   if (CFG.previewDelayMs >= 0) setTimeout(() => { $('goLive').disabled = false; show('waiting', false); }, CFG.previewDelayMs);
 };
 if ($('showKey')) $('showKey').onclick = () => { $('keyText').textContent = ${JSON.stringify(FIXTURE_KEY)}; };
+function setViewers(n) {
+  if (!$('viewers')) return;
+  if (n === null) { show('viewers', false); return; }
+  $('viewerCount').textContent = String(n); show('viewers');
+}
 function startLive() {
   ev('golive'); show('goLive', false); show('endLive'); show('liveBadge');
   $('tabSetup').setAttribute('aria-selected', 'false');
+  setViewers(CFG.viewers);
+  if (CFG.linkUi === 'live' && !$('linkShown').textContent) show('addLinkProducer');
+}
+window.__setViewers = setViewers;
+for (const b of document.querySelectorAll('.addLink')) b.onclick = () => {
+  if (CFG.linkDead) { ev('link-dead'); return; }
+  $('linkTitle').value = ''; $('linkUrl').value = ''; $('linkAdd').disabled = true; show('linkError', false);
+  show('linkDialog'); ev('link-opened');
+};
+$('linkUrl').addEventListener('input', () => { $('linkAdd').disabled = !/^https?:\\/\\/\\S+$/.test($('linkUrl').value.trim()); });
+$('linkAdd').onclick = () => {
+  if (CFG.linkFails) { show('linkError'); ev('link-refused'); return; }
+  if (CFG.linkSticky === 'silent') { ev('link-sticky'); return; }
+  ev('link', $('linkTitle').value + '|' + $('linkUrl').value);
+  if (CFG.linkSticky !== 'shown') show('linkDialog', false);
+  for (const b of document.querySelectorAll('.addLink')) b.hidden = true;
+  $('linkShown').textContent = $('linkTitle').value + ' ' + $('linkUrl').value.replace(/^https?:\\/\\//, ''); show('linkShown');
+};
+$('linkCancel').onclick = () => { show('linkDialog', false); ev('link-cancelled'); };
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  ev('key-escape');
+  if (!$('linkDialog').hidden) { show('linkDialog', false); ev('link-escaped'); }
+});
+// Instagram ends the live (takedown): the live UI goes away and a notice shows.
+window.__takedown = (title, text) => {
+  ev('takedown'); show('endLive', false); show('liveBadge', false); setViewers(null);
+  $('tdTitle').textContent = title; $('tdText').textContent = text || ''; show('takedown');
+};
+$('tdShare').onclick = () => ev('share');
+$('tdDone').onclick = () => { show('takedown', false); ev('takedown-dismissed'); };
+// The producer drops back to its setup state (no notice).
+window.__dropLive = () => { show('endLive', false); show('liveBadge', false); show('goLive'); $('goLive').disabled = false; setViewers(null); };
+window.__warn = (text) => { $('warnBanner').textContent = text; show('warnBanner', !!text); };
+if ($('leftover')) {
+  $('leftoverShare').onclick = () => ev('share');
+  $('leftoverDone').onclick = () => { show('leftover', false); ev('leftover-dismissed'); };
 }
 $('goLive').onclick = () => { if (CFG.goLiveConfirm) show('goLiveConfirm'); else startLive(); };
 $('goLiveConfirmBtn').onclick = () => { show('goLiveConfirm', false); startLive(); };
@@ -303,12 +418,37 @@ export class FakeBrowserManager implements BrowserManager {
 
 export type AccountPatch = Partial<{ label: string; status: AccountStatus; statusMessage: string | null; options: Record<string, unknown> }>;
 
-export function makeCtx(browser: BrowserManager, signal: AbortSignal = new AbortController().signal) {
+/** In-memory ScopedSecrets (values stored as strings, like the real store). */
+export class FakeSecrets implements ScopedSecrets {
+  readonly values = new Map<string, string>();
+  async get(key: string): Promise<string | null> {
+    return this.values.get(key) ?? null;
+  }
+  async set(key: string, value: string): Promise<void> {
+    this.values.set(key, value);
+  }
+  async delete(key: string): Promise<void> {
+    this.values.delete(key);
+  }
+  async getJson<T>(key: string): Promise<T | null> {
+    const raw = this.values.get(key);
+    return raw === undefined ? null : (JSON.parse(raw) as T);
+  }
+  async setJson(key: string, value: unknown): Promise<void> {
+    this.values.set(key, JSON.stringify(value));
+  }
+}
+
+export function makeCtx(
+  browser: BrowserManager,
+  signal: AbortSignal = new AbortController().signal,
+  destinationSecrets: ScopedSecrets | null = null,
+) {
   const updates: AccountPatch[] = [];
   const ctx: DriverContext = {
     log: pino({ level: 'silent' }),
     accountSecrets: null,
-    destinationSecrets: null,
+    destinationSecrets,
     app: null,
     browser,
     publicBaseUrl: 'https://203.0.113.7',

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type {
   Account,
   ChatMessage,
+  ChatModeration,
   DestinationState,
   FeedState,
   PushStats,
@@ -34,6 +35,8 @@ export interface AppEvents {
   destination: [DestinationState];
   /** New chat message (emitted by ChatHub). */
   chat: [ChatMessage];
+  /** Chat removed by moderation: deleted message, banned/timed-out user, cleared chat (emitted by ChatHub). */
+  'chat-moderation': [ChatModeration];
   /** Account changed (status, label...) (emitted by account routes / drivers via DriverContext). */
   account: [Account];
   /** Destination list or config changed (emitted by destination routes). */

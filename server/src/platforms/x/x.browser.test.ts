@@ -5,7 +5,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { ChatMessageInput, PlatformDriver } from '../types.js';
+import { isChatModeration, type ChatMessageInput, type ChatSourceItem, type PlatformDriver } from '../types.js';
 import { DriverError } from '../types.js';
 import { createXDriver } from './index.js';
 import type { XUrls } from './selectors.js';
@@ -164,10 +164,11 @@ const FAST: Partial<XTimings> = {
   typeMaxMs: 5,
 };
 
-async function nextMessage(it: AsyncIterator<ChatMessageInput>, ms = 10_000): Promise<ChatMessageInput> {
+async function nextMessage(it: AsyncIterator<ChatSourceItem>, ms = 10_000): Promise<ChatMessageInput> {
   const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no chat message')), ms));
   const r = await Promise.race([it.next(), timeout]);
   if (r.done) throw new Error('chat ended');
+  if (isChatModeration(r.value)) throw new Error('expected a chat message, got moderation');
   return r.value;
 }
 

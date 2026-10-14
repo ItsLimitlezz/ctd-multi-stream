@@ -176,6 +176,49 @@ describe('overlay script behavior', () => {
     expect(list.children).toHaveLength(0);
   });
 
+  it('removes moderated messages from the screen', () => {
+    const { list, sockets } = runOverlay('https://h/overlay/chat?token=t&max=20');
+    const ws = sockets[0]!;
+    const moderate = (moderation: unknown) => ws.onmessage?.({ data: JSON.stringify({ type: 'chat-moderation', moderation }) });
+    const texts = () => list.children.map((c) => c.children[2]?.textContent);
+
+    ws.deliver(chat('twitch:1', { author: { name: 'Ann', id: 'u-ann' } }));
+    ws.deliver(chat('twitch:2', { author: { name: 'Bob', id: 'u-bob' } }));
+    ws.deliver(chat('twitch:3', { author: { name: 'Ann', id: 'u-ann' } }));
+    ws.deliver(chat('youtube:4', { platform: 'youtube', destinationId: 'yt', author: { name: 'Cy' } }));
+    ws.deliver(chat('youtube:5', { platform: 'youtube', destinationId: 'yt', author: { name: 'Dee', login: 'dee_l' } }));
+    ws.deliver(chat('twitch:6', { author: { name: 'Eve' }, platformMessageId: 'raw-6' }));
+    expect(list.children).toHaveLength(6);
+
+    moderate({ kind: 'message-deleted', platform: 'twitch', destinationId: 'd', messageId: 'twitch:2', platformMessageId: '2' });
+    expect(texts()).toEqual(['hello twitch:1', 'hello twitch:3', 'hello youtube:4', 'hello youtube:5', 'hello twitch:6']);
+
+    // Unknown hub id: falls back to the platform message id.
+    moderate({ kind: 'message-deleted', platform: 'twitch', destinationId: 'd', messageId: null, platformMessageId: 'raw-6' });
+    expect(list.children).toHaveLength(4);
+
+    // Another destination's moderation never touches this one.
+    moderate({ kind: 'user-cleared', platform: 'twitch', destinationId: 'other', userId: 'u-ann', userName: null });
+    expect(list.children).toHaveLength(4);
+
+    moderate({ kind: 'user-cleared', platform: 'twitch', destinationId: 'd', userId: 'u-ann', userName: 'Ann' });
+    expect(texts()).toEqual(['hello youtube:4', 'hello youtube:5']);
+
+    moderate({ kind: 'user-cleared', platform: 'youtube', destinationId: 'yt', userId: null, userName: 'DEE_L' });
+    expect(texts()).toEqual(['hello youtube:4']);
+
+    moderate({ kind: 'cleared', platform: 'youtube', destinationId: 'yt' });
+    expect(list.children).toHaveLength(0);
+
+    // Junk is ignored; a deleted message id stays "seen" (not re-rendered by a replay).
+    moderate(null);
+    moderate({ kind: 'cleared' });
+    ws.deliver(chat('twitch:1'));
+    expect(list.children).toHaveLength(0);
+    ws.deliver(chat('twitch:7'));
+    expect(list.children).toHaveLength(1);
+  });
+
   it('reconnects with backoff, but stops for good on close code 4401', () => {
     const { sockets, timers } = runOverlay('https://h/overlay/chat?token=t');
     sockets[0]!.onclose?.({ code: 1006 });

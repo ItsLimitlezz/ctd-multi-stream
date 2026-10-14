@@ -52,7 +52,9 @@ Tones (`Tone`): `neutral`, `info`, `success`, `warn`, `danger`, `live`, `accent`
 Helpers: `PLATFORM_META`, `platformMeta(id)` (unknown ids fall back to custom styling) and `platformName(id)`.
 
 ### PhaseBadge
-`<PhaseBadge phase={DestinationPhase} />` shows a label and tone for each destination phase. For example, `live` is a red pulsing "Live", `error` is a red "Error" and `waiting-for-feed` is an amber "Waiting for feed". Helpers: `PHASE_META` and `phaseMeta(phase)`.
+`<PhaseBadge phase={DestinationPhase} />` shows a label and tone for each destination phase. For example, `live` is a red pulsing "Live", `error` is a red "Error", `waiting-for-feed` is an amber "Waiting for feed" and `recovering` (the platform ended the live, e.g. a copyright takedown, and a fresh one is being created) is an amber pulsing "Recovering". Helpers: `PHASE_META` and `phaseMeta(phase)`.
+
+On the dashboard, `recovering` counts as active but not live ("1 of 2 destinations live · 1 recovering"), has no Retry button, and a card with `recoveries > 0` shows "Recovered 2× · last: <reason> <time ago>" (`recoverySummary(state, now)` in `DashboardPage.tsx`).
 
 ### Modal
 `<Modal open onClose title footer size="sm|md|lg" dismissible>{children}</Modal>` uses the native `<dialog>` element, so the focus trap, Escape and top-layer stacking come from the browser. Children mount only while the modal is open, so forms inside start fresh each time. Clicking the backdrop closes it when `dismissible` is set (the default). With `dismissible={false}`, Escape is stopped at keydown; if the browser still forces a close (Android back, a repeated Escape), the dialog is shown again. A dismissible modal closed by the browser calls `onClose`, so React state and the DOM never disagree. Open modals are tracked in `state/modal-stack.ts`.
@@ -80,18 +82,26 @@ Helpers: `PLATFORM_META`, `platformMeta(id)` (unknown ids fall back to custom st
 | `select` | `Select` with `options` (plus an empty choice unless the field is required and has a default) |
 | `boolean` | `Toggle` |
 | `secret` | password input with Show/Hide. When `secretsSet[key]` is true it shows **"•••• set"** with a **Change** button, and Cancel returns to "set". |
+| `links` | `LinksEditor`: an ordered list of Title + URL rows with Add link, Remove and Move up/down; value is `LinkItem[]` |
 
-Value semantics: `onChange` receives the whole values object. A key that is absent (`undefined`) means unset. For secrets, an absent key means "keep the stored value", so send only the secrets the user typed. Secret inputs carry `autocomplete="new-password"` and password-manager ignore attributes.
+Value semantics: `onChange` receives the whole values object. A key that is absent (`undefined`) means unset. For secrets, an absent key means "keep the stored value", so send only the secrets the user typed. Secret inputs carry `autocomplete="new-password"` and password-manager ignore attributes. A `links` value is always an array (it may hold blank rows while editing); it is sent as an array, never stringified.
 
 Pure helpers in `dynamic-form.ts`, all exported from the barrel:
 
-- `initialValues(fields, existing?)` applies existing values first, then defaults. Booleans default to `false`, and secrets are never prefilled.
-- `validateValues(fields, values, secretsSet?)` returns `{ [key]: message }`. A stored secret counts as satisfying `required`. URLs must be http(s), rtmp(s) or srt.
-- `cleanValues(fields, values)` trims strings and drops empty values.
+- `initialValues(fields, existing?)` applies existing values first, then defaults. Booleans default to `false`, links to the stored array (`[]` when missing or not an array), and secrets are never prefilled.
+- `validateValues(fields, values, secretsSet?)` returns `{ [key]: message }`. A stored secret counts as satisfying `required`. URLs must be http(s), rtmp(s) or srt. Links: at most `LINKS_MAX` (20) non-blank rows, title 1–`LINK_TITLE_MAX` (100) characters, URL absolute http(s) of at most `LINK_URL_MAX` (2048) characters; the message names the row ("Link 2: URL must start with http:// or https://").
+- `cleanValues(fields, values)` trims strings and drops empty values. A links field always yields its list, trimmed with blank rows dropped (`[]` clears the stored list on update).
+- Links helpers: `toLinkItems(value)` (defensive read of an option value), `cleanLinks`, `isBlankLink`, `isHttpUrl`, `linkRowErrors(row)`, `validateLinks(field, value)`, and the immutable row edits `addLinkRow`, `removeLinkRow`, `moveLinkRow(list, index, ±1)`, `updateLinkRow`.
 - `coerceNumber(raw)` and `isValidUrl(raw)`.
 - `destinationFormValues(fields, destination)` maps `Destination.options` and `ingestUrl` to form values, according to each field's `target`.
 - `destinationSecretsSet(fields, destination | null)` returns `{ [streamKeyField]: destination.hasStreamKey }`.
 - `splitDestinationValues(fields, values)` returns `{ options, ingestUrl?, streamKey? }` for `CreateDestinationRequest` / `UpdateDestinationRequest`. `streamKey` is present only when the user typed a new key.
+
+### LinksEditor
+`<LinksEditor id label help error required value={LinkItem[]} onChange disabled />` is the `links` control on its own (a `role="group"` labelled by `label`). Row inputs get ids `${id}-<n>-title` / `${id}-<n>-url` and labels "Link n title" / "Link n URL". Rows keep stable keys, so focus follows a row when it moves; adding focuses the new title and removing focuses the neighbouring row (or Add link). While `error` is set, rows with a problem get a red border and their own message. Add link is disabled at `LINKS_MAX` rows. Stacked inputs keep it usable at 375 px.
+
+### AlertToggle
+`<AlertToggle label help />` is the "Alert me" switch (on the dashboard status card; the Profile page has the full Alerts card with "Read alerts aloud", the notification permission state and Test alert). `useAlertToggle()` returns `{ enabled, prefs, busy, setEnabled }`. Enabling runs `enableAlerts()` inside the click: it unlocks audio, plays a short chime and asks for notification permission, then toasts what works (`alertsEnabledMessage(status)`).
 
 ### ChatLog
 `<ChatLog messages={ChatMessage[]} compact emptyText />` is a scrolling chat list, oldest first. It sticks to the bottom while the user is there. Once the user scrolls up it shows a "N new / Jump to latest" button. Each row shows a timestamp, a `PlatformBadge`, the author and the text, all as plain text. Author colors are accepted only as hex. When the message set changes completely, for example a filter change, pass a new `key` to reset it.
@@ -104,8 +114,8 @@ Pure helpers in `dynamic-form.ts`, all exported from the barrel:
 - `LiveIndicator` is the session status pill and shows "Reconnecting…" while the socket is down.
 - `AuthLayout` is the centered card used by the sign-in and setup pages.
 - `ErrorBoundary` catches a crashing page without taking down the shell. `App.tsx` resets it on every route. Lazy admin pages that fail to load after an update (missing chunk) reload the page once (`state/chunk-reload.ts`); if that fails too, the boundary offers Reload instead of Try again.
-- `icons.tsx` holds small inline SVG icons (`CloseIcon`, `MenuIcon`, `LandscapeIcon`, `VerticalIcon`, `BroadcastIcon`, `ChatIcon`, `ExternalIcon`, `RetryIcon`, `ArrowDownIcon`, `ShieldIcon`).
-- `format.ts` has `formatDuration`, `elapsedSeconds`, `formatBitrate`, `formatFps`, `formatResolution`, `formatCodecs`, `formatAudio`, `formatClock`, `formatDateTime` and `plural`.
+- `icons.tsx` holds small inline SVG icons (`CloseIcon`, `MenuIcon`, `LandscapeIcon`, `VerticalIcon`, `BroadcastIcon`, `ChatIcon`, `ExternalIcon`, `RetryIcon`, `ArrowDownIcon`, `ShieldIcon`, `ChevronUpIcon`, `ChevronDownIcon`, `PlusIcon`, `TrashIcon`, `BellIcon`).
+- `format.ts` has `formatDuration`, `elapsedSeconds`, `formatBitrate`, `formatFps`, `formatResolution`, `formatCodecs`, `formatAudio`, `formatClock`, `formatDateTime`, `formatAgo` ("just now", "3 min ago"; never in the future) and `plural`.
 - `utils.ts` has `cx(...)`, `safeHttpUrl(url)`, `safeHexColor(color)` and `copyText(text)`.
 
 ## Router (`web/src/router.tsx`)
@@ -146,7 +156,16 @@ While a user is logged in, the app keeps one WebSocket open to `/api/ws`. If it 
 | `useLiveActions()` | `{ applySession, seedSession, patchSession, mergeChat }`, which push REST results into the store |
 | `useLiveState(selector)` | any slice of the state; the selector must return a stable reference |
 
-`notice` messages are shown as toasts automatically.
+`notice` messages are shown as toasts automatically, and passed to `alertForNotice` (below).
+
+### Alerts (`alerts.ts`)
+Opt-in, per-browser alerts for `notice` messages, e.g. "Instagram ended the live (copyright). Starting a new one…" and "Instagram is live again (recovery #1)". While on, `warn`/`error` notices play an alarm and `info` notices a gentle chime, both generated with the Web Audio API (no audio files, nothing external, so the CSP is unaffected), and each shows a browser `Notification` when permission is granted (only on HTTPS or localhost; `notificationStatus()` returns `'insecure'` otherwise, and `notificationHint(status)` explains it). "Read alerts aloud" also speaks the notice with `speechSynthesis`.
+
+- The preference `{ enabled, speak }` lives in `localStorage` under `ctd.alerts`. Every access is wrapped in try/catch, so blocked storage only means the setting isn't remembered. `useAlertPrefs()`, `getAlertPrefs()`, `setAlertPrefs(patch)`; other tabs follow through the `storage` event.
+- Browsers start audio only after a user gesture: `enableAlerts()` unlocks it in the click, and `installAlerts()` (installed by `LiveProvider`, which also follows changes from other tabs) unlocks it on the first click or key press after a reload. A sound that can't start within 3 s is dropped rather than played late.
+- Identical notices from several open tabs share a notification `tag`, so they show once. `error` notifications stay until dismissed.
+- Android browsers refuse `new Notification()` from a page ("Illegal constructor"); only a service worker can show one. `installAlerts()` registers `web/public/sw.js` (served at `/sw.js`) on secure origins. It only handles `notificationclick` (focus the tab, or open `/`) and has no fetch handler, so nothing is cached or intercepted. While it runs, `showAlertNotification` goes through `registration.showNotification()` and returns `true` once it has handed the notification over; otherwise it uses the constructor. Chrome refuses to register a service worker on a self-signed certificate, so on Android `notificationStatus()` returns `'unavailable'` (detected from the user agent, never by creating a test notification) until the worker runs, and the UI says "sound only". A constructor that throws a `TypeError` anywhere sets `'unavailable'` too. `useNotificationStatus()` re-renders on our own permission prompts, on the worker starting and on that refusal. This is not Web Push: a phone that pauses or closes the tab gets no alert, so the Profile page tells phone users to keep the tab open and on screen.
+- Pure, injectable helpers for tests: `parseAlertPrefs`, `readAlertPrefs(storage)`, `writeAlertPrefs(prefs, storage)`, `notificationStatus(env)` (`env.worker` / `env.workerOnly` model the service worker), `notificationsNeedWorker(navigator)`, `requestNotificationPermission(env)`, `showAlertNotification(level, message, env)`, `startAlertWorker(container)`, `soundForLevel`, `alertPattern`, `schedulePattern(ctx, steps)`, `alertForNotice(level, message, prefs, outputs)` and `testAlert(outputs)`.
 
 Example (accounts page refetch):
 

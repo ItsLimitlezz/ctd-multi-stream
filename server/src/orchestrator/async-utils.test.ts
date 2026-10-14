@@ -5,10 +5,34 @@ import {
   isAbortError,
   redactText,
   SerialQueue,
+  sleep,
   stableStringify,
   textLength,
   TimeoutError,
 } from './async-utils.js';
+
+describe('sleep', () => {
+  beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }));
+  afterEach(() => vi.useRealTimers());
+
+  it('resolves after the delay, or right away when aborted, without leaving a timer', async () => {
+    let done = false;
+    void sleep(1000).then(() => (done = true));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+
+    const ctl = new AbortController();
+    let aborted = false;
+    void sleep(60_000, ctl.signal).then(() => (aborted = true));
+    ctl.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(sleep(1000, ctl.signal)).resolves.toBeUndefined(); // already aborted
+  });
+});
 
 describe('awaitBounded', () => {
   beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }));

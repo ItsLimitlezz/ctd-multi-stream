@@ -7,6 +7,10 @@ import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { ZodError } from 'zod';
+import dockRoutes from '../api/dock.js';
+import { lanHttpPlugin } from '../api/lan.js';
+import v1Routes, { API_PREFIX } from '../api/v1.js';
+import overlayModeration from '../chat/overlay-moderation.js';
 import { DriverError } from '../platforms/types.js';
 import type { AppServices, TlsMaterial } from '../services.js';
 import authPlugin from './auth-plugin.js';
@@ -23,6 +27,7 @@ import platformRoutes from './routes/platforms.js';
 import sessionRoutes from './routes/session.js';
 import settingsRoutes from './routes/settings.js';
 import setupRoutes from './routes/setup.js';
+import tokenRoutes from './routes/tokens.js';
 import userRoutes from './routes/users.js';
 import wsRoutes from './routes/ws.js';
 
@@ -83,6 +88,8 @@ export async function buildApp(services: AppServices, tlsMaterial: TlsMaterial |
   await app.register(websocket, { options: { maxPayload: 1024 * 1024 } });
 
   const opts: RouteOptions = { services };
+  // After helmet: LAN plain-HTTP requests (TlsManager.setLanHandler) drop the HTTPS-only headers.
+  await app.register(lanHttpPlugin, opts);
   await app.register(authPlugin, opts);
 
   await app.register(healthRoutes, opts);
@@ -99,6 +106,11 @@ export async function buildApp(services: AppServices, tlsMaterial: TlsMaterial |
   await app.register(settingsRoutes, opts);
   await app.register(browserRoutes, opts);
   await app.register(wsRoutes, opts);
+  await app.register(tokenRoutes, opts);
+  await app.register(overlayModeration, opts);
+  // External API (bearer tokens, docs/API.md) + the OBS dock page that uses it.
+  await app.register(v1Routes, { ...opts, prefix: API_PREFIX });
+  await app.register(dockRoutes, opts);
 
   const dir = webDir();
   if (dir) {

@@ -12,6 +12,8 @@ function services(phases: Record<string, DestinationPhase>, accounts: Record<str
     watchUrl: null,
     retries: 0,
     since: '',
+    recoveries: 0,
+    lastRecovery: null,
   }));
   return {
     orchestrator: { state: () => ({ destinations }) },

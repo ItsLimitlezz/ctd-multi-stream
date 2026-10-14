@@ -2,6 +2,7 @@
 
 import type { Repos, SecretBox } from '../services.js';
 import { createAccountsRepo } from './accounts-repo.js';
+import { createApiTokensRepo } from './api-tokens-repo.js';
 import { createAuditRepo } from './audit-repo.js';
 import type { Db } from './database.js';
 import { createDestinationsRepo } from './destinations-repo.js';
@@ -26,5 +27,6 @@ export function createRepos(db: Db, box: SecretBox): Repos {
     settings: createSettingsRepo(stmt),
     secrets: createSecretsRepo(stmt, box),
     audit: { log: audit.log, list: audit.list },
+    apiTokens: createApiTokensRepo(stmt),
   };
 }

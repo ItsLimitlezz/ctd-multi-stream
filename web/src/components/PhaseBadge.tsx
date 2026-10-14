@@ -18,6 +18,8 @@ export const PHASE_META: Readonly<Record<DestinationPhase, PhaseMeta>> = {
   confirming: { label: 'Going live', tone: 'info', pulse: true },
   live: { label: 'Live', tone: 'live', pulse: true },
   retrying: { label: 'Retrying', tone: 'warn', pulse: true },
+  // The platform ended the live (e.g. a copyright takedown) and a fresh one is being created.
+  recovering: { label: 'Recovering', tone: 'warn', pulse: true },
   ending: { label: 'Ending', tone: 'neutral', pulse: true },
   error: { label: 'Error', tone: 'danger', pulse: false },
 };

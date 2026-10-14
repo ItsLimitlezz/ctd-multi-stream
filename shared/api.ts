@@ -8,8 +8,11 @@
 
 import type {
   Account,
+  ApiScope,
+  ApiTokenInfo,
   AuditEntry,
   ChatMessage,
+  ChatModeration,
   ConnectMethod,
   Destination,
   DestinationState,
@@ -232,6 +235,10 @@ export interface TitleResponse {
 export interface SetAutoGoLiveRequest {
   autoGoLive: boolean;
 }
+/** PUT /api/session/test-mode [user] -> SessionState. 409 code 'session_live' while a session runs. */
+export interface SetTestModeRequest {
+  testMode: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Ingest (OBS setup)
@@ -278,6 +285,36 @@ export interface SettingsResponse {
   tls: TlsStatus;
   version: string;
 }
+
+// ---------------------------------------------------------------------------
+// External API tokens [admin] — the external API itself lives under /api/v1 (docs/API.md)
+// ---------------------------------------------------------------------------
+
+/** GET /api/tokens -> ApiTokensResponse */
+export interface ApiTokensResponse {
+  tokens: ApiTokenInfo[];
+  access: ApiAccessInfo;
+}
+/** How another app reaches the external API. */
+export interface ApiAccessInfo {
+  /** e.g. https://203.0.113.7/api/v1 */
+  baseUrl: string;
+  /** LAN address for apps on the same network/NAS, e.g. https://192.168.1.20:30443/api/v1 (null if unknown). */
+  lanBaseUrl: string | null;
+  /** SHA-256 fingerprint of the certificate being served, for apps that pin it (self-signed). */
+  tlsFingerprint256: string | null;
+  openApiUrl: string;
+}
+/** POST /api/tokens -> CreateApiTokenResponse (the secret is shown once) */
+export interface CreateApiTokenRequest {
+  name: string;
+  scopes: ApiScope[];
+}
+export interface CreateApiTokenResponse {
+  token: ApiTokenInfo;
+  secret: string;
+}
+/** DELETE /api/tokens/:id -> {} */
 
 // ---------------------------------------------------------------------------
 // Audit [admin]
@@ -336,6 +373,7 @@ export type WsServerMessage =
   | { type: 'feed'; feed: FeedState }
   | { type: 'destination'; state: DestinationState }
   | { type: 'chat'; message: ChatMessage }
+  | { type: 'chat-moderation'; moderation: ChatModeration }
   | { type: 'account'; account: Account }
   | { type: 'destinations-changed' }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; message: string };

@@ -269,6 +269,36 @@ function makeCustom(): PlatformDriver {
   };
 }
 
+/** Browser platform with a 'links' option (Instagram allows one link per live; rotated per live). */
+function makeInstagram(): PlatformDriver {
+  return {
+    info: baseInfo({
+      id: 'instagram',
+      name: 'Instagram',
+      connectMethod: 'browser',
+      feeds: ['vertical'],
+      defaultFeed: 'vertical',
+      keyPerSession: true,
+      destinationFields: [
+        { key: 'autoRecover', label: 'Auto-recover', type: 'boolean', default: true },
+        { key: 'links', label: 'Links', type: 'links' },
+        {
+          key: 'linkMode',
+          label: 'Link mode',
+          type: 'select',
+          default: 'rotate',
+          options: [
+            { value: 'off', label: "Don't add a link" },
+            { value: 'rotate', label: 'Rotate' },
+            { value: 'first', label: 'First' },
+          ],
+        },
+      ],
+    }),
+    prepare: notUsed,
+  };
+}
+
 const tlsStatus: TlsStatus = {
   mode: 'self-signed',
   source: 'self-signed',
@@ -285,7 +315,7 @@ function createFakeServices() {
   const bus = new EventBus();
   const log = pino({ level: 'silent' });
   const kickSeen: { pastedUrl?: string; ctx?: DriverContext } = {};
-  const drivers = [makeTwitch(), makeKick(kickSeen), makeFacebook(), makeCustom()];
+  const drivers = [makeTwitch(), makeKick(kickSeen), makeFacebook(), makeCustom(), makeInstagram()];
 
   const orchestrator = {
     destinationChanged: vi.fn(async (_id: string) => {}),
@@ -414,7 +444,7 @@ describe('platforms', () => {
   it('lists platform info for any user, not for anonymous', async () => {
     const res = await call('GET', '/api/platforms', 'operator');
     expect(res.statusCode).toBe(200);
-    expect(res.json<PlatformInfo[]>().map((p) => p.id)).toEqual(['twitch', 'kick', 'facebook', 'custom']);
+    expect(res.json<PlatformInfo[]>().map((p) => p.id)).toEqual(['twitch', 'kick', 'facebook', 'custom', 'instagram']);
     expect((await call('GET', '/api/platforms', null)).statusCode).toBe(401);
   });
 
@@ -841,6 +871,68 @@ describe('destinations', () => {
     expect((await call('POST', '/api/destinations', 'operator', { platform: 'custom' })).statusCode).toBe(403);
     expect((await call('PUT', `/api/destinations/${dest.id}/enabled`, null, { enabled: true })).statusCode).toBe(401);
     expect((await call('POST', '/api/destinations/missing/retry', 'operator', {})).statusCode).toBe(404);
+  });
+
+  describe("'links' options", () => {
+    const KICK = { title: 'Kick - Live Stream', url: 'https://kick.com/dprtmnttoronto' };
+    const TWITCH = { title: 'Twitch - Live Stream', url: 'https://www.twitch.tv/dprtmnttoronto' };
+    const ig = { platform: 'instagram', name: 'DPRTMNT', feed: 'vertical' };
+
+    it('stores the list as an array and returns it unchanged', async () => {
+      const created = await createDestination({
+        ...ig,
+        options: { links: [{ title: ' Kick - Live Stream ', url: KICK.url, index: 1 }, TWITCH], linkMode: 'rotate' },
+      });
+      expect(created.options).toEqual({ autoRecover: true, links: [KICK, TWITCH], linkMode: 'rotate' });
+      expect(fx.repos.destinations.get(created.id)?.options.links).toEqual([KICK, TWITCH]);
+
+      const list = await call('GET', '/api/destinations', 'operator');
+      expect(list.statusCode).toBe(200);
+      expect(list.json<Destination[]>().find((d) => d.id === created.id)?.options.links).toEqual([KICK, TWITCH]);
+
+      // Missing → [] on create.
+      const plain = await createDestination({ ...ig, name: 'Plain' });
+      expect(plain.options.links).toEqual([]);
+    });
+
+    it('patches keep the list unless it is submitted', async () => {
+      const dest = await createDestination({ ...ig, options: { links: [KICK, TWITCH] } });
+      let res = await call('PATCH', `/api/destinations/${dest.id}`, 'admin', { options: { linkMode: 'first' } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json<Destination>().options).toEqual({ autoRecover: true, links: [KICK, TWITCH], linkMode: 'first' });
+
+      res = await call('PATCH', `/api/destinations/${dest.id}`, 'admin', { options: { links: [TWITCH, KICK] } });
+      expect(res.json<Destination>().options.links).toEqual([TWITCH, KICK]);
+      expect(fx.orchestrator.destinationChanged).toHaveBeenLastCalledWith(dest.id);
+
+      res = await call('PATCH', `/api/destinations/${dest.id}`, 'admin', { options: { links: [] } });
+      expect(res.json<Destination>().options.links).toEqual([]);
+    });
+
+    it('rejects invalid lists with a field-labelled message', async () => {
+      const tooMany = Array.from({ length: 21 }, (_, i) => ({ title: `Link ${i}`, url: `https://example.com/${i}` }));
+      const cases: [unknown, RegExp][] = [
+        [tooMany, /^Links can have at most 20 links$/],
+        [[{ title: 'Kick', url: 'kick.com/dprtmnttoronto' }], /^Links: link 1 URL must be a full http:\/\/ or https:\/\/ address$/],
+        [[KICK, { title: 'Click me', url: 'javascript:alert(1)' }], /^Links: link 2 URL must be/],
+        [[{ title: '   ', url: KICK.url }], /^Links: link 1 needs a title$/],
+        [[{ title: 'x'.repeat(101), url: KICK.url }], /^Links: link 1 title must be at most 100 characters$/],
+        ['https://kick.com/dprtmnttoronto', /^Links must be a list of links$/],
+      ];
+      for (const [links, message] of cases) {
+        const res = await call('POST', '/api/destinations', 'admin', { ...ig, options: { links } });
+        expect(res.statusCode, JSON.stringify(links).slice(0, 80)).toBe(400);
+        expect(res.json<{ error: string }>().error).toMatch(message);
+      }
+      expect(fx.repos.destinations.list()).toHaveLength(0);
+
+      const dest = await createDestination({ ...ig, options: { links: [KICK] } });
+      const res = await call('PATCH', `/api/destinations/${dest.id}`, 'admin', {
+        options: { links: [{ title: 'Bad', url: 'javascript:void(0)' }] },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(fx.repos.destinations.get(dest.id)?.options.links).toEqual([KICK]);
+    });
   });
 
   it('does not fail the request when the orchestrator throws', async () => {

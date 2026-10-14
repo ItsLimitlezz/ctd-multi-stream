@@ -41,6 +41,8 @@ const destState = (id: string, phase: DestinationState['phase'] = 'idle'): Desti
   watchUrl: null,
   retries: 0,
   since: '2026-10-11T10:00:00.000Z',
+  recoveries: 0,
+  lastRecovery: null,
 });
 
 let seq = 0;

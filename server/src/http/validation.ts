@@ -3,7 +3,15 @@
 import { isIP } from 'node:net';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { FEEDS, PLATFORM_IDS, type FieldSpec, type PlatformId } from '../../../shared/types.js';
+import {
+  FEEDS,
+  LINK_TITLE_MAX,
+  LINKS_MAX,
+  PLATFORM_IDS,
+  type FieldSpec,
+  type LinkItem,
+  type PlatformId,
+} from '../../../shared/types.js';
 import type { PlatformDriver } from '../platforms/types.js';
 import type { AppServices } from '../services.js';
 import { sendError } from './guards.js';
@@ -88,12 +96,15 @@ export function isUrlWithProtocol(value: string, protocols: readonly string[]): 
 /**
  * Coerce one submitted value to its field type. Returns undefined for "no value"
  * (undefined, null, empty string). Throws HttpError(400) when the value is invalid.
+ * 'links' fields hold a list, not a scalar: use coerceLinks() (normalizeFields does).
  */
 export function coerceField(field: FieldSpec, value: unknown): string | number | boolean | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === 'string' && value.trim() === '') return undefined;
 
   switch (field.type) {
+    case 'links':
+      throw fieldError(field, 'must be a list of links');
     case 'boolean':
       if (typeof value === 'boolean') return value;
       if (value === 'true' || value === '1' || value === 1) return true;
@@ -119,10 +130,44 @@ export function coerceField(field: FieldSpec, value: unknown): string | number |
   }
 }
 
+// Control characters (incl. line breaks) are not allowed in a link title or URL.
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * Validate a 'links' field value: an array of `{ title, url }` (at most LINKS_MAX items; title
+ * trimmed, 1–LINK_TITLE_MAX characters; url an absolute http(s) URL of at most MAX_URL characters).
+ * Unknown keys in each item are dropped. Returns undefined for "no value" (undefined, null, '').
+ */
+export function coerceLinks(field: FieldSpec, value: unknown): LinkItem[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string' && value.trim() === '') return undefined;
+  if (!Array.isArray(value)) throw fieldError(field, 'must be a list of links');
+  if (value.length > LINKS_MAX) throw fieldError(field, `can have at most ${LINKS_MAX} links`);
+
+  return value.map((item: unknown, i): LinkItem => {
+    const problem = (what: string): HttpError => badRequest(`${field.label}: link ${i + 1} ${what}`);
+    if (!isRecord(item)) throw problem('must have a title and a URL');
+
+    const title = typeof item.title === 'string' ? item.title.trim() : '';
+    if (!title) throw problem('needs a title');
+    if ([...title].length > LINK_TITLE_MAX) throw problem(`title must be at most ${LINK_TITLE_MAX} characters`);
+    if (CONTROL_CHARS.test(title)) throw problem('title must be a single line of text');
+
+    const url = typeof item.url === 'string' ? item.url.trim() : '';
+    if (!url) throw problem('needs a URL');
+    if (url.length > MAX_URL) throw problem(`URL must be at most ${MAX_URL} characters`);
+    if (/\s/.test(url) || CONTROL_CHARS.test(url) || !isUrlWithProtocol(url, ['http:', 'https:'])) {
+      throw problem('URL must be a full http:// or https:// address');
+    }
+    return { title, url };
+  });
+}
+
 /**
  * Validate option values against field specs: unknown keys are rejected, values are coerced by
  * type, `null`/'' removes a value, defaults fill gaps and required fields are enforced.
- * `base` holds the current values when patching (submitted keys override it).
+ * 'links' fields always get a list (missing → `[]`). `base` holds the current values when
+ * patching (submitted keys override it).
  */
 export function normalizeFields(
   fields: readonly FieldSpec[],
@@ -136,6 +181,12 @@ export function normalizeFields(
   const out: Record<string, unknown> = {};
   for (const field of fields) {
     const raw = input && Object.hasOwn(input, field.key) ? input[field.key] : base[field.key];
+    if (field.type === 'links') {
+      const links = coerceLinks(field, raw) ?? [];
+      if (field.required && links.length === 0) throw fieldError(field, 'needs at least one link');
+      out[field.key] = links;
+      continue;
+    }
     const value = coerceField(field, raw) ?? field.default;
     if (value === undefined) {
       if (field.required) throw fieldError(field, 'is required');

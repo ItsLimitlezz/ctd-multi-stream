@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ChatMessage, FieldSpec } from '@shared/types';
+import { LINKS_MAX } from '@shared/types';
+import { AlertToggle, alertsEnabledMessage } from './AlertToggle';
 import { Badge } from './Badge';
 import { Button } from './Button';
 import { ChatLog } from './ChatLog';
@@ -10,6 +12,7 @@ import { CopyField } from './CopyField';
 import { DynamicForm } from './DynamicForm';
 import { EmptyState } from './EmptyState';
 import { Field } from './Field';
+import { LinksEditor } from './LinksEditor';
 import { PhaseBadge, PHASE_META } from './PhaseBadge';
 import { PlatformBadge, platformMeta } from './PlatformBadge';
 import { Tabs } from './Tabs';
@@ -63,7 +66,15 @@ describe('components (static render)', () => {
   it('PhaseBadge covers every phase', () => {
     expect(html(<PhaseBadge phase="live" />)).toContain('tone-live');
     expect(html(<PhaseBadge phase="error" />)).toContain('Error');
-    expect(Object.keys(PHASE_META)).toHaveLength(10);
+    expect(Object.keys(PHASE_META)).toHaveLength(11);
+  });
+
+  it('PhaseBadge: recovering is an animated warning', () => {
+    expect(PHASE_META.recovering).toEqual({ label: 'Recovering', tone: 'warn', pulse: true });
+    const out = html(<PhaseBadge phase="recovering" />);
+    expect(out).toContain('tone-warn');
+    expect(out).toContain('Recovering');
+    expect(out).toContain('dot-pulse');
   });
 
   it('Badge, EmptyState and Tabs render', () => {
@@ -122,6 +133,86 @@ describe('components (static render)', () => {
     expect(fresh).toContain('type="password"');
     expect(fresh).toMatch(/autocomplete="new-password"/i);
     expect(fresh).toContain('data-1p-ignore="true"');
+  });
+
+  it("DynamicForm renders a 'links' field as an ordered list editor", () => {
+    const fields: FieldSpec[] = [
+      { key: 'links', label: 'Links', type: 'links', help: 'One link per live' },
+      { key: 'linkMode', label: 'Link mode', type: 'select', options: [{ value: 'rotate', label: 'Rotate' }], default: 'rotate' },
+    ];
+    const out = html(
+      <DynamicForm
+        fields={fields}
+        values={{
+          links: [
+            { title: 'Kick - Live Stream', url: 'https://kick.com/dprtmnttoronto' },
+            { title: 'Twitch - Live Stream', url: 'https://www.twitch.tv/dprtmnttoronto' },
+          ],
+          linkMode: 'rotate',
+        }}
+        onChange={() => undefined}
+        idPrefix="dest-instagram"
+      />,
+    );
+    expect(out).toContain('role="group"');
+    expect(out).toContain('id="dest-instagram-links-label"');
+    expect(out).toContain('value="Kick - Live Stream"');
+    expect(out).toContain('value="https://www.twitch.tv/dprtmnttoronto"');
+    expect(out).toContain('id="dest-instagram-links-2-url"');
+    expect(out).toContain('aria-label="Move link 1 up"');
+    expect(out).toContain('aria-label="Remove link 2"');
+    expect(out).toContain('One link per live');
+    expect(out).toContain('Add link');
+    expect(out).toContain('2 of 20');
+    expect(out).toContain('Rotate');
+
+    // A non-array value (e.g. an old string option) renders as an empty list.
+    expect(html(<DynamicForm fields={fields.slice(0, 1)} values={{ links: 'x' }} onChange={() => undefined} />)).toContain('No links yet.');
+  });
+
+  it('LinksEditor: move buttons at the ends are disabled, rows show their errors with the field error', () => {
+    const rows = [
+      { title: 'A', url: 'https://a.example' },
+      { title: '', url: 'ftp://b.example' },
+    ];
+    const out = html(<LinksEditor id="l" label="Links" value={rows} onChange={() => undefined} error="Link 2: Title is required" />);
+    expect(out).toMatch(/aria-label="Move link 1 up"[^>]*disabled=""|disabled=""[^>]*aria-label="Move link 1 up"/);
+    expect(out).toMatch(/aria-label="Move link 2 down"[^>]*disabled=""|disabled=""[^>]*aria-label="Move link 2 down"/);
+    expect(out).not.toMatch(/aria-label="Move link 1 down"[^>]*disabled=""/);
+    expect(out).toContain('Link 2: Title is required');
+    expect(out).toContain('id="l-2-title-error"');
+    expect(out).toContain('URL must start with http:// or https://');
+    expect(out).toContain('link-row is-invalid');
+    expect(out).toContain('aria-describedby="l-error"');
+
+    // Without a field error (not submitted yet) rows aren't flagged.
+    const clean = html(<LinksEditor id="l" label="Links" value={rows} onChange={() => undefined} />);
+    expect(clean).not.toContain('is-invalid');
+    expect(clean).not.toContain('aria-invalid');
+  });
+
+  it('LinksEditor: "Add link" is disabled at the maximum', () => {
+    const full = Array.from({ length: LINKS_MAX }, (_, i) => ({ title: `L${i}`, url: `https://e.example/${i}` }));
+    const out = html(<LinksEditor id="l" label="Links" value={full} onChange={() => undefined} />);
+    expect(out).toMatch(/disabled=""[^>]*>(<svg[\s\S]*?<\/svg>)?Add link/);
+    expect(out).toContain(`Maximum of ${LINKS_MAX} links`);
+    expect(html(<LinksEditor id="l" label="Links" value={[]} onChange={() => undefined} />)).not.toMatch(/disabled=""[^>]*>(<svg[\s\S]*?<\/svg>)?Add link/);
+  });
+
+  it('AlertToggle: off by default; the confirmation explains missing notifications', () => {
+    const out = html(<AlertToggle />);
+    expect(out).toContain('Alert me');
+    expect(out).toContain('role="switch"');
+    expect(out).toContain('aria-checked="false"');
+    expect(alertsEnabledMessage('granted')).toEqual({ tone: 'success', message: expect.stringContaining('notification') });
+    expect(alertsEnabledMessage('insecure')).toEqual({ tone: 'info', message: expect.stringMatching(/^Alerts on \(sound only\)\..*HTTPS/) });
+    expect(alertsEnabledMessage('denied').message).toMatch(/blocked/);
+    expect(alertsEnabledMessage('default').message).toMatch(/Allow notifications/);
+    // Android without the service worker: no promise of a notification.
+    const unavailable = alertsEnabledMessage('unavailable');
+    expect(unavailable.tone).toBe('info');
+    expect(unavailable.message).toMatch(/^Alerts on \(sound only\)\..*Pop-ups aren't available/);
+    expect(unavailable.message).not.toMatch(/get a notification/);
   });
 
   it('ChatLog renders text as plain text (no HTML injection)', () => {

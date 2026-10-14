@@ -3,7 +3,7 @@
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { withTimeout } from '../../browser/helpers.js';
-import { DriverError, type ChatMessageInput, type PlatformDriver, type PreparedLive } from '../types.js';
+import { DriverError, type ChatSourceItem, type PlatformDriver, type PreparedLive } from '../types.js';
 import { DEFAULT_TIMEOUTS, endLive, goLive, type FlowConfig } from './flow.js';
 import { createInstagramDriver } from './index.js';
 import {
@@ -21,7 +21,7 @@ import {
 
 const TIMEOUTS = { pageLoad: 8_000, step: 8_000, streamDetails: 8_000, liveConfirm: 8_000, end: 10_000 };
 
-async function next(it: AsyncIterator<ChatMessageInput>, ms = 8_000): Promise<ChatMessageInput> {
+async function next(it: AsyncIterator<ChatSourceItem>, ms = 8_000): Promise<ChatSourceItem> {
   const r = await withTimeout(it.next(), ms, 'no chat message');
   if (r.done) throw new Error('chat ended');
   return r.value;

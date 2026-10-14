@@ -13,11 +13,27 @@ export class RingBuffer<T> {
     return this.count;
   }
 
-  push(item: T): void {
+  /** Appends `item`; returns the item that was dropped to make room, if any. */
+  push(item: T): T | undefined {
     const end = (this.start + this.count) % this.capacity;
+    const evicted = this.count === this.capacity ? this.items[end] : undefined;
     this.items[end] = item;
     if (this.count < this.capacity) this.count++;
     else this.start = (this.start + 1) % this.capacity;
+    return evicted;
+  }
+
+  /** Removes every item matching `pred` (keeping the order of the rest); returns the removed items. */
+  removeWhere(pred: (item: T) => boolean): T[] {
+    const kept: T[] = [];
+    const removed: T[] = [];
+    for (const item of this.last(this.count)) (pred(item) ? removed : kept).push(item);
+    if (removed.length === 0) return removed;
+    this.items.fill(undefined);
+    this.start = 0;
+    this.count = 0;
+    for (const item of kept) this.push(item);
+    return removed;
   }
 
   /** The newest `limit` items, oldest first. */

@@ -3,10 +3,11 @@
 // the live is created, and "Go live" is clicked once Instagram shows our preview.
 // Flow details and sources: selectors.ts.
 
+import { createHash } from 'node:crypto';
 import type { Logger } from 'pino';
 import type { Page } from 'playwright';
 import type { ConnectPoll, ConnectStart } from '../../../../shared/api.js';
-import type { Account, Destination, PlatformInfo } from '../../../../shared/types.js';
+import type { Account, PlatformInfo } from '../../../../shared/types.js';
 import { requireLoggedIn } from '../../browser/helpers.js';
 import { DriverError, type DriverContext, type PlatformDriver, type PreparedLive } from '../types.js';
 import { DEFAULT_CHAT_TIMINGS, instagramChat, type ChatTimings } from './chat.js';
@@ -22,16 +23,25 @@ import {
   openLiveSetup,
   readStreamDetails,
   readUsername,
+  visibleNow,
   type FlowConfig,
   type FlowTimeouts,
   type StreamDetails,
 } from './flow.js';
-import { IG_ORIGIN, LOGIN_PATH } from './selectors.js';
+import { DEFAULT_HEALTH_TIMINGS, HealthMonitor, watchHealth, type HealthTimings, type LiveMarks } from './health.js';
+import { closeLinkForm, LiveLink } from './links.js';
+import { IG_ORIGIN, LOGIN_PATH, sel } from './selectors.js';
 import {
   DEFAULT_GO_LIVE_TIMEOUT_SEC,
+  DEFAULT_TAKEDOWN_CONFIRM_SEC,
+  DEFAULT_ZERO_VIEWER_SEC,
   joinStreamUrl,
   MAX_GO_LIVE_TIMEOUT_SEC,
+  MAX_RECOVERY_ATTEMPTS,
+  MAX_TAKEDOWN_CONFIRM_SEC,
+  MAX_ZERO_VIEWER_SEC,
   MIN_GO_LIVE_TIMEOUT_SEC,
+  MIN_TAKEDOWN_CONFIRM_SEC,
   optionProblems,
   readOptions,
   shortError,
@@ -66,6 +76,51 @@ export const instagramInfo: PlatformInfo = {
       default: DEFAULT_GO_LIVE_TIMEOUT_SEC,
       help: `How long to wait for Instagram to receive the video before giving up (${MIN_GO_LIVE_TIMEOUT_SEC}–${MAX_GO_LIVE_TIMEOUT_SEC} s).`,
     },
+    {
+      key: 'autoRecover',
+      label: 'Auto-recover takedowns',
+      type: 'boolean',
+      target: 'option',
+      default: true,
+      help: 'Automatically start a new live when Instagram ends this one (e.g. a copyright takedown).',
+    },
+    {
+      key: 'takedownConfirmSec',
+      label: 'Takedown confirm (seconds)',
+      type: 'number',
+      target: 'option',
+      default: DEFAULT_TAKEDOWN_CONFIRM_SEC,
+      help: `Push to Instagram down this long while OBS is still streaming ⇒ treat as a takedown (${MIN_TAKEDOWN_CONFIRM_SEC}–${MAX_TAKEDOWN_CONFIRM_SEC} s).`,
+    },
+    {
+      key: 'zeroViewerSec',
+      label: 'Zero-viewer takedown (seconds)',
+      type: 'number',
+      target: 'option',
+      default: DEFAULT_ZERO_VIEWER_SEC,
+      help:
+        `Public lives only, needs auto-recover: 0 viewers this long ⇒ takedown, a new live is started ` +
+        `(0 = off, up to ${MAX_ZERO_VIEWER_SEC} s). DPRTMNT uses 5. Leave 0 if your streams sometimes really have no viewers.`,
+    },
+    {
+      key: 'links',
+      label: 'Links',
+      type: 'links',
+      target: 'option',
+      help: 'Links to attach to the live (Instagram allows one per live).',
+    },
+    {
+      key: 'linkMode',
+      label: 'Link on each live',
+      type: 'select',
+      target: 'option',
+      default: 'rotate',
+      options: [
+        { value: 'off', label: "Don't add a link" },
+        { value: 'rotate', label: 'Next link on every new live, cycling' },
+        { value: 'first', label: 'Always the first link' },
+      ],
+    },
   ],
   developerApp: null,
   titleSupport: 'browser',
@@ -75,8 +130,9 @@ export const instagramInfo: PlatformInfo = {
   notes:
     'The account must be allowed to go live from instagram.com on a computer: a public professional account with at least ' +
     '1,000 followers, in good standing. Every live gets a new stream key. The title is set when the live is created and ' +
-    "can't be changed during it. Use one Instagram destination per account. Browser automation may break when Instagram " +
-    'changes its site.',
+    "can't be changed during it. Use one Instagram destination per account. When Instagram ends a live (e.g. a copyright " +
+    'takedown), a new one is started automatically and gets the next link; viewers have to rejoin it. Browser automation ' +
+    'may break when Instagram changes its site.',
 };
 
 const NOT_LOGGED_IN =
@@ -88,6 +144,27 @@ export interface InstagramDriverOptions {
   baseUrl?: string;
   timeouts?: Partial<FlowTimeouts>;
   chat?: Partial<ChatTimings>;
+  health?: Partial<HealthTimings>;
+  /** Clock of the health watcher (tests). Default Date.now. */
+  now?: () => number;
+}
+
+/**
+ * The runner gives confirm() 180 s; going live may use most of it, a link added after going live
+ * only gets what is left of this (minus a margin).
+ */
+const CONFIRM_BUDGET_MS = 170_000;
+const MIN_LIVE_LINK_MS = 5_000;
+const MAX_LIVE_LINK_MS = 30_000;
+
+/** The live that currently owns an account's page. */
+interface Owner {
+  destinationId: string;
+  token: symbol;
+}
+
+function keyHash(key: string): string {
+  return createHash('sha256').update(key).digest('hex');
 }
 
 function isAbortLike(err: unknown, signal?: AbortSignal): boolean {
@@ -106,12 +183,19 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
   const home = `${baseUrl}/`;
   const cfg: FlowConfig = { baseUrl, timeouts: { ...DEFAULT_TIMEOUTS, ...opts.timeouts } };
   const chatTimings: ChatTimings = { ...DEFAULT_CHAT_TIMINGS, ...opts.chat };
+  const healthTimings: HealthTimings = { ...DEFAULT_HEALTH_TIMINGS, ...opts.health };
+  const now = opts.now ?? Date.now;
 
   /**
-   * accountId → destinationId of the live using that account's (single) browser page. While set,
-   * account checks must not navigate the page and another destination can't use the account.
+   * accountId → the live using that account's (single) browser page. While set, account checks
+   * must not navigate the page and another destination can't use the account. Each prepare() gets
+   * a new token, so a late end() of a killed live never touches the page of its replacement.
    */
-  const busy = new Map<string, string>();
+  const busy = new Map<string, Owner>();
+  /** destinationId → rotation index, used when the destination has no secret store. */
+  const rotationMemory = new Map<string, number>();
+  /** destinationId → hash of the last stream key (a recovery must get a new live, not the killed one). */
+  const lastKeys = new Map<string, string>();
 
   async function saveSession(ctx: DriverContext, accountId: string, log: Logger): Promise<void> {
     try {
@@ -130,53 +214,113 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
     await ctx.updateAccount({ status: 'needs-login', statusMessage: message }).catch(() => {});
   }
 
-  function prepared(
-    page: Page,
-    dest: Destination,
-    account: Account,
-    details: StreamDetails,
-    options: InstagramOptions,
-    username: string | null,
-    ctx: DriverContext,
-    log: Logger,
-  ): PreparedLive {
+  interface LiveParts {
+    page: Page;
+    account: Account;
+    details: StreamDetails;
+    options: InstagramOptions;
+    username: string | null;
+    link: LiveLink;
+    /** True while this live still owns the account's page. */
+    isCurrent: () => boolean;
+    release: () => void;
+    ctx: DriverContext;
+    log: Logger;
+  }
+
+  /** Add the link right after going live (last chance), within what is left of confirm's budget. */
+  async function addLinkAfterGoLive(parts: LiveParts, signal: AbortSignal, confirmStarted: number): Promise<void> {
+    const { link, page } = parts;
+    if (!link.pending) return;
+    const budget = Math.min(MAX_LIVE_LINK_MS, CONFIRM_BUDGET_MS - (Date.now() - confirmStarted));
+    if (budget < MIN_LIVE_LINK_MS) {
+      link.skip('no time left after going live');
+      return;
+    }
+    const linkSignal = AbortSignal.any([signal, AbortSignal.timeout(budget)]);
+    try {
+      await link.attempt(page, 'live', linkSignal, {
+        findMs: Math.min(cfg.timeouts.linkFind, Math.floor(budget / 3)),
+        stepMs: cfg.timeouts.linkStep,
+        final: true,
+      });
+    } catch (err) {
+      if (signal.aborted) throw err;
+      // Only the link's own time budget ran out. addLiveLink already tried to close the form it
+      // opened; try once more so it never stays over "End live video".
+      await closeLinkForm(page);
+      link.skip('adding it took too long');
+    }
+  }
+
+  function prepared(parts: LiveParts): PreparedLive {
+    const { page, account, details, options, username, link, isCurrent, release, ctx, log } = parts;
+    const marks: LiveMarks = { liveAt: null, sawLive: false };
     let ending: Promise<void> | null = null;
     return {
       push: { url: joinStreamUrl(details.server, details.key), mode: 'copy', feeds: ['vertical'] },
       watchUrl: options.audience === 'public' && username ? `${baseUrl}/${username}/live/` : null,
+      ...(options.autoRecover
+        ? { recovery: { pushDownConfirmMs: options.takedownConfirmSec * 1000, maxAttempts: MAX_RECOVERY_ATTEMPTS } }
+        : {}),
 
       async confirm(signal) {
+        const started = Date.now();
         try {
+          await closeLinkForm(page); // a link form left open would take the "Go live" click (no-op otherwise)
           await goLive(page, options.goLiveTimeoutSec * 1000, cfg, signal);
         } catch (err) {
           throw toDriverError(err, 'Instagram automation failed', signal); // the runner prefixes "Couldn't go live"
         }
+        marks.liveAt = now();
+        if (await visibleNow(sel.endLiveButton(page))) marks.sawLive = true;
         log.info({ audience: options.audience }, 'Instagram live started');
+        await addLinkAfterGoLive(parts, signal, started);
         await saveSession(ctx, account.id, log);
       },
 
       end() {
         ending ??= (async () => {
+          if (!isCurrent()) {
+            // A newer live (e.g. the recovery of this one) owns the page now: don't touch it.
+            log.info('Instagram page already used by a newer live; nothing to end');
+            return;
+          }
           try {
-            const result = await endLive(page, cfg);
+            await closeLinkForm(page); // never leave a link form over "End live video" (no-op otherwise)
+            const result = await endLive(page, cfg, isCurrent);
             log.info({ result }, 'Instagram live ended');
           } catch (err) {
             log.warn({ error: shortError(err) }, 'ending the Instagram live failed; leaving the live page');
           }
           try {
             // Leaving the producer also abandons a live that was never started.
-            if (!page.isClosed()) {
+            if (!page.isClosed() && isCurrent()) {
               await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 8_000 }).catch(() => {});
               await saveSession(ctx, account.id, log);
             }
           } finally {
-            if (busy.get(account.id) === dest.id) busy.delete(account.id);
+            release();
           }
         })();
         return ending;
       },
 
       chat: (signal) => instagramChat(page, signal, log, chatTimings),
+
+      health(signal) {
+        const monitor = new HealthMonitor({
+          audience: options.audience,
+          // The 0-viewer rule starts a new live, so it only applies with auto-recover (as on TikTok):
+          // without a recovery policy the runner would just end a healthy live.
+          zeroViewerSec: options.autoRecover ? options.zeroViewerSec : 0,
+          timings: healthTimings,
+          startedAt: now(),
+          marks,
+          extraWarning: () => link.warning,
+        });
+        return watchHealth(page, signal, { cfg, monitor, pollMs: healthTimings.pollMs, now, isCurrent, log });
+      },
     };
   }
 
@@ -271,13 +415,18 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
     async prepare(dest, account, title, ctx) {
       if (!account) throw new DriverError('Connect an Instagram account for this destination in Accounts', 'not-connected');
       const owner = busy.get(account.id);
-      if (owner && owner !== dest.id) {
+      if (owner && owner.destinationId !== dest.id) {
         throw new DriverError(
           'This Instagram account is already live from another destination. Use one Instagram destination per account.',
           'misconfigured',
         );
       }
-      busy.set(account.id, dest.id);
+      const token = Symbol(dest.id);
+      busy.set(account.id, { destinationId: dest.id, token });
+      const isCurrent = () => busy.get(account.id)?.token === token;
+      const release = () => {
+        if (isCurrent()) busy.delete(account.id);
+      };
 
       const log = ctx.log.child({ platform: 'instagram', destinationId: dest.id });
       const options = readOptions(dest);
@@ -285,23 +434,38 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
       let page: Page | null = null;
       let setupOpened = false;
       try {
+        const link = await LiveLink.choose(options.links, options.linkMode, ctx.destinationSecrets, rotationMemory, dest.id, log);
         page = await ctx.browser.page(account.id, home);
         const p = page;
         await requireLoggedIn(p, () => isLoggedIn(p, cfg, signal), 'Instagram');
         const username = await readUsername(p);
 
+        // Always a brand-new live (also after a takedown): Create → Live video → new key.
         setupOpened = true;
-        await openLiveSetup(p, cfg, signal); // dismisses prompts / the cookie banner first
-        await fillSetup(p, { title, audience: options.audience }, cfg, signal, log);
+        await openLiveSetup(p, cfg, signal); // dismisses prompts, the cookie banner and leftover "live ended" dialogs first
+        const linkStep = cfg.timeouts.linkStep;
+        await fillSetup(p, { title, audience: options.audience }, cfg, signal, log, async () => {
+          await link.attempt(p, 'setup', signal, { findMs: 0, stepMs: linkStep, final: false });
+          await closeLinkForm(p); // a link form left open would take the "Next" click (no-op otherwise)
+        });
         const details = await readStreamDetails(p, cfg, signal);
+        const hash = keyHash(details.key);
+        if (lastKeys.get(dest.id) === hash) {
+          log.warn('Instagram returned the same stream key as the previous live of this destination');
+        }
+        lastKeys.set(dest.id, hash);
         log.info({ audience: options.audience }, 'Instagram live created; stream URL and key read');
+        await link.attempt(p, 'producer', signal, { findMs: 1_000, stepMs: linkStep, final: false });
         await saveSession(ctx, account.id, log);
-        return prepared(p, dest, account, details, options, username, ctx, log);
+        return prepared({ page: p, account, details, options, username, link, isCurrent, release, ctx, log });
       } catch (err) {
-        if (busy.get(account.id) === dest.id) busy.delete(account.id);
+        const ownsPage = isCurrent();
+        release();
         if (err instanceof DriverError && err.code === 'needs-login') await markNeedsLogin(ctx, err.message);
         // Don't leave a half-created live behind (leaving the producer abandons it).
-        if (setupOpened && page && !page.isClosed()) void page.goto(home, { waitUntil: 'domcontentloaded' }).catch(() => {});
+        if (ownsPage && setupOpened && page && !page.isClosed()) {
+          void page.goto(home, { waitUntil: 'domcontentloaded' }).catch(() => {});
+        }
         throw toDriverError(err, 'Instagram automation failed', signal);
       }
     },

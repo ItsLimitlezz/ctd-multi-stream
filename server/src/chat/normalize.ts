@@ -1,7 +1,7 @@
 // Turns driver-produced ChatMessageInput into a safe, bounded ChatMessage.
 
 import { createHash } from 'node:crypto';
-import type { ChatMessage, PlatformId } from '../../../shared/types.js';
+import type { ChatFragment, ChatMessage, PlatformId } from '../../../shared/types.js';
 import type { ChatMessageInput } from '../platforms/types.js';
 
 export const MAX_TEXT_LENGTH = 500;
@@ -95,10 +95,114 @@ export function normalizeChatMessage(
   const avatarUrl = cleanAvatarUrl(rawAuthor.avatarUrl);
   if (avatarUrl) author.avatarUrl = avatarUrl;
 
+  const authorId = cleanText(typeof rawAuthor.id === 'number' ? String(rawAuthor.id) : rawAuthor.id, MAX_ID_LENGTH);
+  if (authorId) author.id = authorId;
+  const login = cleanText(rawAuthor.login, MAX_AUTHOR_LENGTH);
+  if (login) author.login = login;
+
   const ts = cleanTs(input.ts, now);
   const rawId = cleanText(input.id, MAX_ID_LENGTH);
   const id = `${platform}:${rawId || hashMessageId(platform, name, text, ts)}`;
   const kind: ChatMessage['kind'] = input.kind === 'event' ? 'event' : 'message';
 
-  return { id, platform, destinationId, author, text, ts, kind };
+  const msg: ChatMessage = { id, platform, destinationId, author, text, ts, kind };
+  const platformMessageId = cleanText(input.platformMessageId, MAX_ID_LENGTH);
+  if (platformMessageId) msg.platformMessageId = platformMessageId;
+  const fragments = cleanFragments(input.fragments, text);
+  if (fragments) msg.fragments = fragments;
+  if (input.action === true) msg.action = true;
+  if (input.highlighted === true) msg.highlighted = true;
+  const reply = cleanReply(input.reply);
+  if (reply) msg.reply = reply;
+  return msg;
+}
+
+export const MAX_FRAGMENTS = 200;
+const FRAGMENT_TYPES = new Set<ChatFragment['type']>(['text', 'emote', 'mention', 'link', 'cheermote']);
+
+/** Fragment text: same character rules as cleanText, but no trimming/collapsing (they must join to `text`). */
+function cleanFragmentText(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.replace(WHITESPACE_CONTROL_RE, ' ').replace(CONTROL_RE, '');
+}
+
+function cleanHttpUrl(value: unknown, httpsOnly: boolean): string | undefined {
+  if (typeof value !== 'string' || value.length > MAX_URL_LENGTH) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:' || (!httpsOnly && url.protocol === 'http:')) return url.toString();
+  } catch {
+    // not a URL
+  }
+  return undefined;
+}
+
+/**
+ * Map well-formed driver fragments onto the cleaned message text. Cleaning trims, collapses runs of
+ * spaces and truncates, and only ever drops spaces or cuts the tail, so each fragment keeps its
+ * share of `text` (the dropped spaces and the cut tail go missing from whichever fragment held them;
+ * a cut emote/mention/link becomes plain text). Joining the result always gives exactly `text`.
+ * Returns undefined when the fragments don't spell `text` (consumers then build text + links).
+ */
+function cleanFragments(value: unknown, text: string): ChatFragment[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_FRAGMENTS) return undefined;
+  const parsed: ChatFragment[] = [];
+  for (const raw of value as unknown[]) {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const f = raw as Partial<Record<keyof ChatFragment, unknown>>;
+    const type = f.type as ChatFragment['type'];
+    if (!FRAGMENT_TYPES.has(type)) return undefined;
+    const fragText = cleanFragmentText(f.text);
+    if (!fragText) continue;
+    const frag: ChatFragment = { type, text: fragText };
+    const image = cleanHttpUrl(f.image, true);
+    if (image) frag.image = image;
+    if (f.animated === true) frag.animated = true;
+    const url = cleanHttpUrl(f.url, false);
+    if (url) frag.url = url;
+    const userId = cleanText(typeof f.userId === 'number' ? String(f.userId) : f.userId, MAX_ID_LENGTH);
+    if (userId) frag.userId = userId;
+    if (typeof f.amount === 'number' && Number.isFinite(f.amount)) frag.amount = f.amount;
+    parsed.push(frag);
+  }
+
+  const out: ChatFragment[] = [];
+  let pos = 0;
+  for (const frag of parsed) {
+    if (pos >= text.length) break; // truncated away
+    let kept = '';
+    let cut = false;
+    const chars = Array.from(frag.text);
+    for (let k = 0; k < chars.length; k++) {
+      const ch = chars[k] ?? '';
+      if (pos >= text.length) {
+        cut = chars.slice(k).some((c) => c !== ' ');
+        break;
+      }
+      if (text.startsWith(ch, pos)) {
+        kept += ch;
+        pos += ch.length;
+      } else if (ch !== ' ') {
+        return undefined; // not the same text: cleaning only drops spaces or cuts the tail
+      }
+    }
+    if (!kept) continue;
+    // A truncated emote/mention/link is no longer one: keep what is left as plain text.
+    out.push(cut && frag.type !== 'text' ? { type: 'text', text: kept } : { ...frag, text: kept });
+  }
+  if (out.length === 0 || pos !== text.length) return undefined;
+  return out;
+}
+
+function cleanReply(value: unknown): ChatMessage['reply'] | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const r = value as Record<string, unknown>;
+  const reply: NonNullable<ChatMessage['reply']> = {};
+  const messageId = cleanText(r.messageId, MAX_ID_LENGTH);
+  if (messageId) reply.messageId = messageId;
+  const userName = cleanText(r.userName, MAX_AUTHOR_LENGTH);
+  if (userName) reply.userName = userName;
+  const text = cleanText(r.text, MAX_TEXT_LENGTH);
+  if (text) reply.text = text;
+  return Object.keys(reply).length > 0 ? reply : undefined;
 }

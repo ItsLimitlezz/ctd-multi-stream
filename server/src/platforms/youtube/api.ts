@@ -60,27 +60,70 @@ export interface LiveBroadcast {
   contentDetails?: { boundStreamId?: string };
 }
 
+/**
+ * Google serializes uint64 fields (amountMicros, concurrentViewers...) as JSON strings; accept
+ * numbers too.
+ */
+export type Uint64 = string | number;
+
 export interface LiveChatMessage {
   id?: string;
   snippet?: {
     type?: string;
     publishedAt?: string;
     displayMessage?: string;
+    authorChannelId?: string;
     textMessageDetails?: { messageText?: string };
-    superChatDetails?: { amountDisplayString?: string; userComment?: string };
-    superStickerDetails?: { amountDisplayString?: string; superStickerMetadata?: { altText?: string } };
+    superChatDetails?: {
+      amountMicros?: Uint64;
+      /** ISO 4217. */
+      currency?: string;
+      amountDisplayString?: string;
+      userComment?: string;
+      tier?: number;
+    };
+    superStickerDetails?: {
+      amountMicros?: Uint64;
+      currency?: string;
+      amountDisplayString?: string;
+      tier?: number;
+      superStickerMetadata?: { stickerId?: string; altText?: string; language?: string };
+    };
     newSponsorDetails?: { memberLevelName?: string; isUpgrade?: boolean };
     memberMilestoneChatDetails?: { userComment?: string; memberMonth?: number; memberLevelName?: string };
     membershipGiftingDetails?: { giftMembershipsCount?: number; giftMembershipsLevelName?: string };
+    giftMembershipReceivedDetails?: { memberLevelName?: string; gifterChannelId?: string; associatedMembershipGiftingMessageId?: string };
     giftEventDetails?: { giftMetadata?: { giftName?: string; altText?: string; comboCount?: number } };
+    /** messageDeletedEvent: the id of the removed message. */
+    messageDeletedDetails?: { deletedMessageId?: string };
+    /** userBannedEvent (ban or timeout): the user whose messages are removed. */
+    userBannedDetails?: {
+      bannedUserDetails?: { channelId?: string; channelUrl?: string; displayName?: string; profileImageUrl?: string };
+      banType?: string;
+      banDurationSeconds?: Uint64;
+    };
   };
   authorDetails?: {
+    /** The author's YouTube channel id (stable user id). */
+    channelId?: string;
+    channelUrl?: string;
     displayName?: string;
     profileImageUrl?: string;
     isVerified?: boolean;
     isChatOwner?: boolean;
     isChatSponsor?: boolean;
     isChatModerator?: boolean;
+  };
+}
+
+/** videos.list part=liveStreamingDetails (https://developers.google.com/youtube/v3/docs/videos#liveStreamingDetails). */
+export interface VideoLiveDetails {
+  id?: string;
+  liveStreamingDetails?: {
+    actualStartTime?: string;
+    actualEndTime?: string;
+    /** Absent when the live has ended or the channel hides the count. */
+    concurrentViewers?: Uint64;
   };
 }
 
@@ -434,6 +477,17 @@ export class YouTubeClient {
 
   async deleteBroadcast(id: string, signal?: AbortSignal): Promise<void> {
     await this.call<unknown>('DELETE', 'liveBroadcasts', 'deleting the unused broadcast', { query: { id }, signal });
+  }
+
+  // ---- videos: https://developers.google.com/youtube/v3/docs/videos/list (1 quota unit per call) ----
+
+  /** Live details of a broadcast's video (the broadcast id is the video id). Null when not found. */
+  async getVideoLiveDetails(videoId: string, signal?: AbortSignal): Promise<VideoLiveDetails | null> {
+    const res = await this.call<ListResponse<VideoLiveDetails>>('GET', 'videos', 'reading the viewer count', {
+      query: { part: 'liveStreamingDetails', id: videoId },
+      signal,
+    });
+    return res?.items?.find((v) => v.id === videoId) ?? res?.items?.[0] ?? null;
   }
 
   // ---- liveChatMessages: https://developers.google.com/youtube/v3/live/docs/liveChatMessages/list ----

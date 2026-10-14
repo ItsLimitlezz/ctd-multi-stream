@@ -5,7 +5,7 @@ import type { DestinationPhase } from '../../../shared/types.js';
 import type { AppServices } from '../services.js';
 
 /** Runner phases in which a driver may be using the account's browser page. */
-const ACTIVE_PHASES: ReadonlySet<DestinationPhase> = new Set(['preparing', 'connecting', 'confirming', 'live', 'retrying', 'ending']);
+const ACTIVE_PHASES: ReadonlySet<DestinationPhase> = new Set(['preparing', 'connecting', 'confirming', 'live', 'retrying', 'recovering', 'ending']);
 
 /** Message shown when a login/browser action is refused because the account is live. */
 export const ACCOUNT_LIVE_MESSAGE = 'This account is live right now. Stop the live before logging in again.';

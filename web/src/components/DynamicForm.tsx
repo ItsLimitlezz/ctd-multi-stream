@@ -1,8 +1,9 @@
 import { useId, useState } from 'react';
 import type { FieldSpec } from '@shared/types';
 import { Button } from './Button';
-import { coerceNumber, type FormValues } from './dynamic-form';
+import { coerceNumber, toLinkItems, type FormValues } from './dynamic-form';
 import { Field } from './Field';
+import { LinksEditor } from './LinksEditor';
 import { Select } from './Select';
 import { TextInput } from './TextInput';
 import { Toggle } from './Toggle';
@@ -21,7 +22,7 @@ export interface DynamicFormProps {
   idPrefix?: string;
 }
 
-/** Renders FieldSpec[] (text / secret / url / select / boolean / number) as a controlled form. */
+/** Renders FieldSpec[] (text / secret / url / select / boolean / number / links) as a controlled form. */
 export function DynamicForm({ fields, values, onChange, secretsSet = {}, errors = {}, disabled = false, idPrefix }: DynamicFormProps) {
   const autoId = useId();
   const prefix = idPrefix ?? `df${autoId}`;
@@ -64,6 +65,19 @@ const asString = (v: unknown): string => (typeof v === 'string' ? v : typeof v =
 function DynamicField({ field: f, id, value, onValue, secretSet, error, disabled }: DynamicFieldProps) {
   const common = { label: f.label, help: f.help, error, id, required: !!f.required };
   switch (f.type) {
+    case 'links':
+      return (
+        <LinksEditor
+          id={id}
+          label={f.label}
+          help={f.help}
+          error={error}
+          required={!!f.required}
+          value={toLinkItems(value)}
+          onChange={(v) => onValue(v)}
+          disabled={disabled}
+        />
+      );
     case 'boolean':
       return (
         <Field {...common} inline>

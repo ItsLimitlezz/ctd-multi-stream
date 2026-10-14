@@ -32,7 +32,8 @@ export type Role = 'admin' | 'operator';
 // can render forms without platform-specific code.
 // ---------------------------------------------------------------------------
 
-export type FieldType = 'text' | 'secret' | 'url' | 'select' | 'boolean' | 'number';
+/** 'links' = an ordered list of LinkItem ({ title, url }), stored as an array option. */
+export type FieldType = 'text' | 'secret' | 'url' | 'select' | 'boolean' | 'number' | 'links';
 
 /**
  * Where a destination field's value is stored:
@@ -42,12 +43,22 @@ export type FieldType = 'text' | 'secret' | 'url' | 'select' | 'boolean' | 'numb
  */
 export type FieldTarget = 'option' | 'ingestUrl' | 'streamKey';
 
+/** A link attached to a live (Instagram allows one per live). Value type of 'links' fields. */
+export interface LinkItem {
+  title: string;
+  url: string;
+}
+
+export const LINKS_MAX = 20;
+export const LINK_TITLE_MAX = 100;
+
 export interface FieldSpec {
   key: string;
   label: string;
   type: FieldType;
   target?: FieldTarget; // destination fields only; defaults to 'option'
   required?: boolean;
+  /** For 'links' fields the default is an empty list (omit it). */
   default?: string | number | boolean;
   placeholder?: string;
   help?: string;
@@ -85,6 +96,11 @@ export interface PlatformInfo {
   keyPerSession: boolean;
   experimental: boolean;
   notes?: string;
+  /**
+   * What session test mode does on this platform. Unsupported (or omitted) = the destination is
+   * skipped while test mode is on, so nothing goes out publicly.
+   */
+  testMode?: { supported: boolean; description: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +162,7 @@ export type DestinationPhase =
   | 'confirming' // driver confirm() running (e.g. clicking "Go Live")
   | 'live'
   | 'retrying'
+  | 'recovering' // the platform killed the live (e.g. copyright takedown); building a fresh one
   | 'ending'
   | 'error';
 
@@ -164,6 +181,12 @@ export interface DestinationState {
   watchUrl: string | null;
   retries: number;
   since: string;
+  /** Automatic takedown recoveries this session (fresh live created after the platform killed one). */
+  recoveries: number;
+  /** Most recent takedown that triggered a recovery, this session. */
+  lastRecovery: { at: string; reason: string } | null;
+  /** Current viewers on the platform, when the driver can read them (null = unknown). */
+  viewers?: number | null;
 }
 
 export type SessionStatus = 'offline' | 'starting' | 'live' | 'stopping';
@@ -174,6 +197,12 @@ export interface SessionState {
   startedAt: string | null;
   title: string;
   autoGoLive: boolean;
+  /**
+   * Test mode: every destination uses its platform's private/test setting (Twitch bandwidth test,
+   * YouTube private, Instagram Practice, Facebook only-me); platforms without one are skipped.
+   * Settings key 'session.testMode'. Can only change while offline.
+   */
+  testMode?: boolean;
   feeds: FeedState[];
   destinations: DestinationState[];
 }
@@ -194,11 +223,64 @@ export interface ChatMessage {
   id: string;
   platform: PlatformId;
   destinationId: string;
-  author: { name: string; color?: string; badges?: string[]; avatarUrl?: string };
+  author: {
+    name: string;
+    color?: string;
+    badges?: string[];
+    avatarUrl?: string;
+    /** Platform user id (unprefixed), when the platform exposes one. */
+    id?: string;
+    /** Login/handle, when different from the display name. */
+    login?: string;
+  };
   text: string;
   ts: string; // ISO timestamp
   kind: 'message' | 'event';
+  /** The platform's own message id (needed to apply deletions). */
+  platformMessageId?: string;
+  /** Text split into parts (emotes, mentions, links). Joining every part's text equals `text`. */
+  fragments?: ChatFragment[];
+  /** /me message. */
+  action?: boolean;
+  /** Highlighted / paid / pinned message. */
+  highlighted?: boolean;
+  reply?: { messageId?: string; userName?: string; text?: string } | null;
+  /**
+   * Structured alert carried by a `kind: 'event'` line (sub, gift, cheer, raid, membership, Super Chat…).
+   * Matches CTD Overlay's alert payload; the external API also emits it as `alert.<kind>`.
+   */
+  alert?: ChatAlert;
 }
+
+export type ChatAlertKind = 'follow' | 'subscription' | 'gift' | 'cheer' | 'kicks' | 'raid' | 'membership' | 'superchat' | 'tip';
+
+export interface ChatAlert {
+  kind: ChatAlertKind;
+  user: { id?: string; name: string; avatar?: string; anonymous?: boolean };
+  /** Counts as integers; money as an ISO 4217 currency + decimal string value ("5.00"), never a float. */
+  amount?:
+    | { unit: 'months' | 'count' | 'bits' | 'kicks' | 'viewers'; value: number }
+    | { unit: 'currency'; value: string; currency: string };
+  tier?: string;
+  message?: { text: string };
+  gift?: { recipients?: string[]; total?: number } | null;
+}
+
+export interface ChatFragment {
+  type: 'text' | 'emote' | 'mention' | 'link' | 'cheermote';
+  text: string;
+  image?: string;
+  animated?: boolean;
+  url?: string;
+  userId?: string;
+  amount?: number;
+}
+
+/** Moderation that removes chat (so overlays can remove it too). */
+export type ChatModeration =
+  | { kind: 'message-deleted'; platform: PlatformId; destinationId: string; ts: string; messageId: string | null; platformMessageId: string }
+  | { kind: 'user-cleared'; platform: PlatformId; destinationId: string; ts: string; userId: string | null; userName: string | null }
+  | { kind: 'cleared'; platform: PlatformId; destinationId: string; ts: string };
 
 // ---------------------------------------------------------------------------
 // Users, audit, TLS
@@ -223,7 +305,26 @@ export interface AuditEntry {
   ip: string | null;
 }
 
-export type TlsMode = 'auto' | 'letsencrypt' | 'self-signed' | 'manual' | 'off';
+// ---------------------------------------------------------------------------
+// External API tokens (other apps, e.g. CTD Overlay, reading chat/status)
+// ---------------------------------------------------------------------------
+
+/** chat:read = chat history + live chat events; status:read = stream/destination status. */
+export type ApiScope = 'chat:read' | 'status:read';
+export const API_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read'];
+
+export interface ApiTokenInfo {
+  id: string;
+  name: string;
+  scopes: ApiScope[];
+  /** First characters of the secret, to recognise it (e.g. "ctd_pat_3fK9"). */
+  prefix: string;
+  createdAt: string;
+  createdBy: string | null;
+  lastUsedAt: string | null;
+}
+
+export type TlsMode ='auto' | 'letsencrypt' | 'self-signed' | 'manual' | 'off';
 
 export interface TlsStatus {
   mode: TlsMode;

@@ -32,6 +32,12 @@ export interface ProducerScenario {
   hideKeysOnPreview: boolean;
   cookieBanner: boolean;
   chatIntervalMs: number;
+  /** Current viewers shown while LIVE ("Viewers" stat); null = no such stat (unreadable). */
+  viewers: number | null;
+  /** The server remembers a running LIVE across reloads (like TikTok): go LIVE / end / takedown update it. */
+  persistLive: boolean;
+  /** On load, a full-screen "LIVE ended" modal (OK / Share) left over from a LIVE TikTok killed. */
+  endedNotice: string | null;
 }
 
 export const DEFAULT_SCENARIO: ProducerScenario = {
@@ -45,7 +51,18 @@ export const DEFAULT_SCENARIO: ProducerScenario = {
   hideKeysOnPreview: false,
   cookieBanner: true,
   chatIntervalMs: 250,
+  viewers: 3,
+  persistLive: false,
+  endedNotice: null,
 };
+
+/**
+ * How the fixture simulates TikTok ending a LIVE (window.__fixture.takedown(mode, text)):
+ * - 'ended': back to the start page with "Your LIVE has ended" plus a dialog showing `text`.
+ * - 'silent': back to the start page, no notice at all.
+ * - 'overlay': the dashboard stays ("End LIVE" still shown) with a role=alert toast showing `text`.
+ */
+export type TakedownMode = 'ended' | 'silent' | 'overlay';
 
 const PRODUCER_SCRIPT = `(() => {
   const S = window.SCENARIO;
@@ -59,9 +76,55 @@ const PRODUCER_SCRIPT = `(() => {
   let softwareChosen = !S.sourceChoice;
   let chatTimer = null;
   let n = 0;
+  let viewers = S.viewers;
 
   const el = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
   const on = (id, fn) => { const node = document.getElementById(id); if (node) node.addEventListener('click', fn); };
+  // With persistLive the server remembers the LIVE across reloads; the page changes state once it did.
+  const persist = (live) => S.persistLive
+    ? fetch('/fixture/live?on=' + (live ? '1' : '0'), { method: 'POST' }).then(() => {}, () => {})
+    : Promise.resolve();
+  const toLive = () => persist(true).then(() => { state = 'live'; render(); });
+  const toEnded = (next) => { clearInterval(chatTimer); return persist(false).then(() => { state = next; render(); }); };
+
+  window.__fixture = {
+    state: () => state,
+    takedown(mode, text) {
+      events.push('takedown:' + mode);
+      if (mode === 'overlay') {
+        document.body.appendChild(el('<div role="alert" class="toast">' + text + '</div>'));
+        return Promise.resolve();
+      }
+      return toEnded(mode === 'ended' ? 'ended' : 'start').then(() => {
+        if (mode !== 'ended') return;
+        dialogs.appendChild(el('<div role="dialog" aria-label="LIVE ended"><h2>LIVE ended</h2><p>' + text + '</p>' +
+          '<button id="ended-dialog-ok">OK</button></div>'));
+        on('ended-dialog-ok', () => { events.push('ended-dialog-ok'); document.getElementById('ended-dialog-ok').parentElement.remove(); });
+      });
+    },
+    clearToasts() { for (const t of document.querySelectorAll('.toast')) t.remove(); },
+    setViewers(v) { viewers = v; if (state === 'live') renderStats(); },
+    comment(author, text) {
+      const list = document.getElementById('comments');
+      if (list) list.appendChild(el('<div data-e2e="chat-message"><span data-e2e="message-owner-name">' + author + '</span>' +
+        '<div class="comment-text">' + text + '</div></div>'));
+    },
+  };
+
+  function statsHtml() {
+    return (viewers === null ? '' : '<div class="stat"><span>Viewers</span><strong>' + viewers + '</strong></div>') +
+      '<div class="stat"><span>Total viewers</span><strong>57</strong></div><div class="stat"><span>Likes</span><strong>1.2K</strong></div>';
+  }
+  function renderStats() { const s = document.getElementById('stats'); if (s) s.innerHTML = statsHtml(); }
+
+  if (S.endedNotice) {
+    const modal = el('<div id="ended-backdrop" style="position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.3)">' +
+      '<div role="dialog" aria-modal="true" aria-label="LIVE ended" style="position:absolute;left:30%;top:30%;background:#fff;padding:8px">' +
+      '<p>' + S.endedNotice + '</p><button id="notice-share">Share</button><button id="notice-ok">OK</button></div></div>');
+    document.body.appendChild(modal);
+    on('notice-ok', () => { events.push('ended-notice-ok'); modal.remove(); });
+    on('notice-share', () => events.push('ended-notice-share'));
+  }
 
   if (S.cookieBanner) {
     const banner = el('<div id="cookie" role="dialog" aria-label="Cookies"><p>We use cookies.</p>' +
@@ -154,17 +217,18 @@ const PRODUCER_SCRIPT = `(() => {
       wireKeys();
       on('golive', () => {
         events.push('golive');
-        if (!S.goLiveDialog) { state = 'live'; render(); return; }
+        if (!S.goLiveDialog) { toLive(); return; }
         const d = el('<div role="dialog" aria-label="Go LIVE?"><p>Ready to go LIVE?</p>' +
           '<button id="cancel-go">Cancel</button><button id="confirm-go">Go LIVE</button></div>');
         dialogs.appendChild(d);
-        on('confirm-go', () => { events.push('golive-confirm'); state = 'live'; render(); });
+        on('confirm-go', () => { events.push('golive-confirm'); toLive(); });
         on('cancel-go', () => d.remove());
       });
       return;
     }
     if (state === 'live') {
-      app.innerHTML = '<h1>LIVE Producer</h1><span>LIVE</span><button id="end">End LIVE</button>' + keysSection() +
+      app.innerHTML = '<h1>LIVE Producer</h1><span>LIVE</span><button id="end">End LIVE</button>' +
+        '<div id="stats">' + statsHtml() + '</div>' + keysSection() +
         '<div id="comments"><div data-e2e="chat-message" data-id="m0"><span data-e2e="message-owner-name">early</span>' +
         '<div class="comment-text">before we started</div></div></div>';
       wireKeys();
@@ -173,7 +237,7 @@ const PRODUCER_SCRIPT = `(() => {
         const d = el('<div role="dialog" aria-label="End LIVE?"><p>End LIVE?</p>' +
           '<button id="cancel-end">Cancel</button><button id="confirm-end">End</button></div>');
         dialogs.appendChild(d);
-        on('confirm-end', () => { events.push('end-confirm'); clearInterval(chatTimer); state = 'ended'; render(); });
+        on('confirm-end', () => { events.push('end-confirm'); toEnded('ended'); });
         on('cancel-end', () => d.remove());
       });
       startChat();
@@ -215,6 +279,14 @@ export async function startFixtureServer(): Promise<FixtureServer> {
       res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       res.end(body);
     };
+    if (path === '/fixture/live' && req.method === 'POST') {
+      // persistLive: the page reports going LIVE / the LIVE ending, so a reload shows it like TikTok would.
+      const on = new URL(req.url ?? '/', 'http://localhost').searchParams.get('on') === '1';
+      fixture.scenario = { ...fixture.scenario, initial: on ? 'live' : 'start' };
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     if (path === '/producer') {
       if (fixture.scenario.loggedOut) {
         res.writeHead(302, { location: '/login?redirect_url=producer' });

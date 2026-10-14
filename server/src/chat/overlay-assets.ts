@@ -159,6 +159,8 @@ export const OVERLAY_JS = `(function () {
   var list = document.getElementById('chat');
   var seen = new Set();
   var seenOrder = [];
+  /** id -> { node, dest, userId, name, login } for messages on screen (moderation removes them). */
+  var shown = new Map();
   var retryMs = 1000;
   var stopped = false;
 
@@ -185,17 +187,57 @@ export const OVERLAY_JS = `(function () {
     return node;
   }
 
+  function removeNode(node) {
+    if (typeof node.ctdId === 'string' && shown.get(node.ctdId) && shown.get(node.ctdId).node === node) {
+      shown.delete(node.ctdId);
+    }
+    node.remove();
+  }
+
   function trim() {
     while (list.childElementCount > maxVisible && list.firstElementChild) {
-      list.firstElementChild.remove();
+      removeNode(list.firstElementChild);
     }
   }
 
   function scheduleFade(item, delay) {
     setTimeout(function () {
       item.classList.add('fading');
-      setTimeout(function () { item.remove(); }, FADE_OUT_MS);
+      setTimeout(function () { removeNode(item); }, FADE_OUT_MS);
     }, Math.max(0, delay));
+  }
+
+  function lower(v) {
+    return typeof v === 'string' ? v.toLowerCase() : null;
+  }
+
+  /** Remove what moderation removed: one message, one user's messages, or a destination's whole chat. */
+  function moderate(mod) {
+    if (!mod || typeof mod !== 'object' || typeof mod.destinationId !== 'string') return;
+    var victims = [];
+    if (mod.kind === 'message-deleted') {
+      shown.forEach(function (entry, id) {
+        if (entry.dest !== mod.destinationId) return;
+        if ((typeof mod.messageId === 'string' && id === mod.messageId) ||
+            (typeof mod.platformMessageId === 'string' && (entry.platformMessageId === mod.platformMessageId || id === mod.platform + ':' + mod.platformMessageId))) {
+          victims.push(entry.node);
+        }
+      });
+    } else if (mod.kind === 'user-cleared') {
+      var userId = typeof mod.userId === 'string' ? mod.userId : null;
+      var userName = lower(mod.userName);
+      shown.forEach(function (entry) {
+        if (entry.dest !== mod.destinationId) return;
+        var match = userId && entry.userId ? entry.userId === userId
+          : (userName !== null && (lower(entry.name) === userName || lower(entry.login) === userName));
+        if (match) victims.push(entry.node);
+      });
+    } else if (mod.kind === 'cleared') {
+      shown.forEach(function (entry) {
+        if (entry.dest === mod.destinationId) victims.push(entry.node);
+      });
+    }
+    victims.forEach(removeNode);
   }
 
   function render(m) {
@@ -220,6 +262,15 @@ export const OVERLAY_JS = `(function () {
     var name = el('span', 'author', typeof author.name === 'string' ? author.name : '');
     if (typeof author.color === 'string' && HEX_COLOR.test(author.color)) name.style.color = author.color;
     item.append(badge, name, el('span', 'text', m.text));
+    item.ctdId = m.id;
+    shown.set(m.id, {
+      node: item,
+      dest: m.destinationId,
+      platformMessageId: typeof m.platformMessageId === 'string' ? m.platformMessageId : null,
+      userId: typeof author.id === 'string' ? author.id : null,
+      name: author.name,
+      login: author.login
+    });
 
     list.appendChild(item);
     trim();
@@ -258,6 +309,7 @@ export const OVERLAY_JS = `(function () {
         return;
       }
       if (data && data.type === 'chat') render(data.message);
+      else if (data && data.type === 'chat-moderation') moderate(data.moderation);
     };
     ws.onclose = function (ev) {
       if (ev.code === 4401) {

@@ -90,6 +90,119 @@ describe('normalizeChatMessage', () => {
     expect(bad?.author).toEqual({ name: 'a' });
   });
 
+  it('keeps author id/login, platformMessageId, action, highlighted and reply (cleaned)', () => {
+    const m = normalizeChatMessage(
+      input({
+        id: 'abc',
+        platformMessageId: ' pm\u0000-1 ',
+        author: { name: 'Alice', id: 42 as unknown as string, login: 'alice\n' },
+        action: true,
+        highlighted: 'yes' as unknown as boolean,
+        reply: { messageId: 'p1', userName: '‮bob', text: 'x'.repeat(600) },
+      }),
+      'twitch',
+      'd',
+      NOW,
+    );
+    expect(m?.platformMessageId).toBe('pm-1');
+    expect(m?.author).toEqual({ name: 'Alice', id: '42', login: 'alice' });
+    expect(m?.action).toBe(true);
+    expect(m?.highlighted).toBeUndefined();
+    expect(m?.reply).toEqual({ messageId: 'p1', userName: 'bob', text: 'x'.repeat(MAX_TEXT_LENGTH) });
+    expect(normalizeChatMessage(input({ reply: {} }), 'x', 'd', NOW)).not.toHaveProperty('reply');
+    expect(normalizeChatMessage(input({ reply: null }), 'x', 'd', NOW)).not.toHaveProperty('reply');
+  });
+
+  it('keeps fragments only when they join to exactly the cleaned text', () => {
+    const ok = normalizeChatMessage(
+      input({
+        text: 'hi Kappa https://x.test',
+        fragments: [
+          { type: 'text', text: 'hi ' },
+          { type: 'emote', text: 'Kappa', image: 'https://cdn.test/kappa.png', animated: true, url: 'javascript:alert(1)' },
+          { type: 'text', text: ' ' },
+          { type: 'link', text: 'https://x.test', url: 'https://x.test/' },
+        ],
+      }),
+      'twitch',
+      'd',
+      NOW,
+    );
+    expect(ok?.fragments).toEqual([
+      { type: 'text', text: 'hi ' },
+      { type: 'emote', text: 'Kappa', image: 'https://cdn.test/kappa.png', animated: true },
+      { type: 'text', text: ' ' },
+      { type: 'link', text: 'https://x.test', url: 'https://x.test/' },
+    ]);
+    expect(ok?.fragments?.map((f) => f.text).join('')).toBe(ok?.text);
+
+    // http image is dropped (https only), mention keeps its user id, cheermote its amount.
+    const extras = normalizeChatMessage(
+      input({
+        text: '@bob Cheer100',
+        fragments: [
+          { type: 'mention', text: '@bob', userId: 'u1' },
+          { type: 'text', text: ' ' },
+          { type: 'cheermote', text: 'Cheer100', amount: 100, image: 'http://cdn.test/c.png' },
+        ],
+      }),
+      'twitch',
+      'd',
+      NOW,
+    );
+    expect(extras?.fragments).toEqual([
+      { type: 'mention', text: '@bob', userId: 'u1' },
+      { type: 'text', text: ' ' },
+      { type: 'cheermote', text: 'Cheer100', amount: 100 },
+    ]);
+
+    const mismatch = (fragments: unknown, text = 'hello world') =>
+      normalizeChatMessage(input({ text, fragments: fragments as never }), 'twitch', 'd', NOW)?.fragments;
+    expect(mismatch([{ type: 'text', text: 'hello' }])).toBeUndefined(); // doesn't cover the text
+    expect(mismatch([{ type: 'text', text: 'hello there' }])).toBeUndefined(); // different text
+    expect(mismatch([{ type: 'text', text: '  hello world  ' }])).toEqual([{ type: 'text', text: 'hello world' }]); // trimmed with the text
+    expect(mismatch([{ type: 'bogus', text: 'hello world' }])).toBeUndefined();
+    expect(mismatch([null])).toBeUndefined();
+    expect(mismatch('hello world')).toBeUndefined();
+    expect(mismatch([])).toBeUndefined();
+    expect(mismatch([{ type: 'text', text: 'hello world' }])).toEqual([{ type: 'text', text: 'hello world' }]);
+  });
+
+  it('keeps emotes when cleaning collapses spaces, trims or truncates the text', () => {
+    const emote = (name: string) => ({ type: 'emote' as const, text: name, image: `https://cdn.test/${name}.png` });
+    const collapsed = normalizeChatMessage(
+      input({
+        text: '  so   good  Kappa\tKappa  ',
+        fragments: [{ type: 'text', text: '  so   good  ' }, emote('Kappa'), { type: 'text', text: '\t' }, emote('Kappa'), { type: 'text', text: '  ' }],
+      }),
+      'twitch',
+      'd',
+      NOW,
+    );
+    expect(collapsed?.text).toBe('so good Kappa Kappa');
+    expect(collapsed?.fragments).toEqual([
+      { type: 'text', text: 'so good ' },
+      { type: 'emote', text: 'Kappa', image: 'https://cdn.test/Kappa.png' },
+      { type: 'text', text: ' ' },
+      { type: 'emote', text: 'Kappa', image: 'https://cdn.test/Kappa.png' },
+    ]);
+
+    // Truncated to MAX_TEXT_LENGTH: a cut emote becomes text, fragments after the cut are dropped.
+    const filler = 'a'.repeat(MAX_TEXT_LENGTH - 3);
+    const long = normalizeChatMessage(
+      input({ text: `${filler} PogChamp Kappa`, fragments: [{ type: 'text', text: `${filler} ` }, emote('PogChamp'), { type: 'text', text: ' ' }, emote('Kappa')] }),
+      'twitch',
+      'd',
+      NOW,
+    );
+    expect(long?.text).toBe(`${filler} Po`);
+    expect(long?.fragments).toEqual([
+      { type: 'text', text: `${filler} ` },
+      { type: 'text', text: 'Po' },
+    ]);
+    expect(long?.fragments?.map((f) => f.text).join('')).toBe(long?.text);
+  });
+
   it('drops messages without visible text and survives malformed input', () => {
     expect(normalizeChatMessage(input({ text: ' \n\u0000 ' }), 'x', 'd', NOW)).toBeNull();
     expect(normalizeChatMessage(null as unknown as ChatMessageInput, 'x', 'd', NOW)).toBeNull();
@@ -138,6 +251,23 @@ describe('buffers', () => {
     expect(rb.last(2)).toEqual([4, 5]);
     expect(rb.last(0)).toEqual([]);
     expect(() => new RingBuffer(0)).toThrow(RangeError);
+  });
+
+  it('RingBuffer.push reports the evicted item and removeWhere keeps the order of the rest', () => {
+    const rb = new RingBuffer<number>(4);
+    expect(rb.push(1)).toBeUndefined();
+    for (let i = 2; i <= 4; i++) rb.push(i);
+    expect(rb.push(5)).toBe(1);
+    expect(rb.push(6)).toBe(2);
+    expect(rb.last(10)).toEqual([3, 4, 5, 6]);
+    expect(rb.removeWhere((n) => n % 2 === 0)).toEqual([4, 6]);
+    expect(rb.size).toBe(2);
+    expect(rb.last(10)).toEqual([3, 5]);
+    expect(rb.removeWhere(() => false)).toEqual([]);
+    rb.push(7);
+    rb.push(8);
+    expect(rb.push(9)).toBe(3);
+    expect(rb.last(10)).toEqual([5, 7, 8, 9]);
   });
 
   it('RecentKeys forgets the oldest key past capacity', () => {

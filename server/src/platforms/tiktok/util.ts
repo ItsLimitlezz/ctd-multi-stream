@@ -39,6 +39,76 @@ export function goLiveTimeoutSec(dest: Pick<Destination, 'options'>, minSec = MI
   return Math.round(Math.min(MAX_GO_LIVE_TIMEOUT_SEC, Math.max(minSec, sec)));
 }
 
+// ---- Stream Guard options ----
+
+export const DEFAULT_TAKEDOWN_CONFIRM_SEC = 5;
+export const MIN_TAKEDOWN_CONFIRM_SEC = 2;
+export const MAX_TAKEDOWN_CONFIRM_SEC = 60;
+export const MAX_ZERO_VIEWER_SEC = 600;
+/** Back-to-back failed recoveries before the runner gives up (Stream Guard's MAX_RECOVERY_ATTEMPTS). */
+export const RECOVERY_MAX_ATTEMPTS = 3;
+
+function clampSec(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = parseOptionalNumber(raw);
+  const sec = n !== null && Number.isFinite(n) ? n : fallback;
+  return Math.round(Math.min(max, Math.max(min, sec)));
+}
+
+/** "Auto-recover" option: on unless explicitly off. */
+export function autoRecoverEnabled(dest: Pick<Destination, 'options'>): boolean {
+  return parseOptionalBoolean(dest.options.autoRecover) !== false;
+}
+
+/** Push down this long (OBS still up) ⇒ takedown. Default 5 s, 2–60 s. */
+export function takedownConfirmSec(dest: Pick<Destination, 'options'>): number {
+  return clampSec(dest.options.takedownConfirmSec, DEFAULT_TAKEDOWN_CONFIRM_SEC, MIN_TAKEDOWN_CONFIRM_SEC, MAX_TAKEDOWN_CONFIRM_SEC);
+}
+
+/** 0 viewers this long ⇒ takedown. 0 = off (default), max 600 s. */
+export function zeroViewerSec(dest: Pick<Destination, 'options'>): number {
+  return clampSec(dest.options.zeroViewerSec, 0, 0, MAX_ZERO_VIEWER_SEC);
+}
+
+/** undefined/'' → null; booleans, 1/0 and 'true'/'false'/'on'/'off'/'yes'/'no' → boolean; anything else → 'invalid'. */
+export function parseOptionalBoolean(raw: unknown): boolean | null | 'invalid' {
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (typeof raw === 'boolean') return raw;
+  if (raw === 1) return true;
+  if (raw === 0) return false;
+  if (typeof raw === 'string') {
+    const v = raw.trim().toLowerCase();
+    if (v === 'true' || v === 'on' || v === 'yes' || v === '1') return true;
+    if (v === 'false' || v === 'off' || v === 'no' || v === '0') return false;
+  }
+  return 'invalid';
+}
+
+/**
+ * A viewer count as TikTok shows it ("0", "12", "1,234", "1.2K", "3M", "1,2K") → number; anything
+ * else (empty, "--", text) → null (unreadable: the 0-viewer rule never fires on it).
+ */
+export function parseViewerCount(raw: string | null | undefined): number | null {
+  if (typeof raw !== 'string') return null;
+  const m = /^\s*(\d+(?:[.,\s]\d+)*)\s*([kmb])?\+?\s*$/i.exec(raw);
+  if (!m) return null;
+  const digits = m[1]!.replace(/\s/g, '');
+  const suffix = m[2]?.toLowerCase();
+  let value: number;
+  if (suffix) {
+    // "1.2K" / "1,2K": the separator is a decimal point.
+    const parts = digits.split(/[.,]/);
+    if (parts.length > 2) return null;
+    value = Number(parts.join('.')) * (suffix === 'k' ? 1e3 : suffix === 'm' ? 1e6 : 1e9);
+  } else if (/^\d{1,3}(?:[.,]\d{3})+$/.test(digits)) {
+    value = Number(digits.replace(/[.,]/g, '')); // thousands separators
+  } else if (/^\d+$/.test(digits)) {
+    value = Number(digits);
+  } else {
+    return null; // "1.5" viewers: not a count
+  }
+  return Number.isFinite(value) ? Math.round(value) : null;
+}
+
 /** undefined/'' → null; numbers and numeric strings → number; anything else → NaN. */
 export function parseOptionalNumber(raw: unknown): number | null {
   if (raw === undefined || raw === null || raw === '') return null;

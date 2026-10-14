@@ -2,7 +2,7 @@ import { chromium, type Browser } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withTimeout } from '../../browser/helpers.js';
 import { truncateTitle } from '../common/http.js';
-import type { ChatMessageInput, PlatformDriver } from '../types.js';
+import { isChatModeration, type ChatMessageInput, type PlatformDriver } from '../types.js';
 import { createTiktokDriver } from './index.js';
 import {
   addSessionCookie,
@@ -124,7 +124,7 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('TikTok driver against a LIVE Produ
     while (got.length < 6) {
       const r = await withTimeout(chat.next(), 8000, 'no chat message');
       if (r.done) break;
-      got.push(r.value);
+      if (!isChatModeration(r.value)) got.push(r.value);
     }
     expect(got.some((m) => m.text === 'before we started')).toBe(false);
     const messages = got.filter((m) => m.kind === 'message');

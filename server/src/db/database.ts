@@ -87,6 +87,19 @@ export const MIGRATIONS: readonly string[] = [
     ip       TEXT
   );
   `,
+  // v2: personal access tokens for the external API (/api/v1). Only a SHA-256 of the secret is stored.
+  `
+  CREATE TABLE api_tokens (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    scopes       TEXT NOT NULL DEFAULT '[]', -- JSON array of ApiScope
+    prefix       TEXT NOT NULL,              -- first 12 characters of the secret, to recognise it
+    secret_hash  TEXT NOT NULL UNIQUE,       -- sha256 hex of the secret
+    created_at   TEXT NOT NULL,
+    created_by   TEXT,
+    last_used_at TEXT
+  );
+  `,
 ];
 
 /** Run `fn` inside a transaction (BEGIN IMMEDIATE), rolling back on error. Not reentrant. */

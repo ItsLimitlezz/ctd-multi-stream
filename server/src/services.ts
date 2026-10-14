@@ -1,12 +1,16 @@
 // Service interfaces. Each implementation lives in its own module (see docs/CONTRACTS.md);
 // the composition root (main.ts) wires them together into AppServices.
 
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
 import type { Logger } from 'pino';
 import type { BrowserContext, Page } from 'playwright';
 import type { AppSettings } from '../../shared/api.js';
 import type {
   Account,
   AccountStatus,
+  ApiScope,
+  ApiTokenInfo,
   AuditEntry,
   ChatMessage,
   Destination,
@@ -22,7 +26,7 @@ import type {
 } from '../../shared/types.js';
 import type { AppConfig } from './config.js';
 import type { EventBus } from './events.js';
-import type { ChatMessageInput, DriverContext, PlatformDriver, PushPlan } from './platforms/types.js';
+import type { ChatSourceItem, DriverContext, PlatformDriver, PushPlan } from './platforms/types.js';
 
 // ---------------------------------------------------------------------------
 // Secrets
@@ -155,6 +159,16 @@ export interface AuditRepo {
   list(opts: { limit: number; before?: number }): AuditEntry[];
 }
 
+/** Personal access tokens for the external API (/api/v1). Secrets are stored hashed (SHA-256). */
+export interface ApiTokensRepo {
+  list(): ApiTokenInfo[];
+  /** Creates a token; the secret (`ctd_pat_…`) is returned once and never stored in plain text. */
+  create(input: { name: string; scopes: ApiScope[]; createdBy: string | null }): { token: ApiTokenInfo; secret: string };
+  /** Look up a presented secret; null if unknown. Updates lastUsedAt (at most once a minute). */
+  verify(secret: string): ApiTokenInfo | null;
+  delete(id: string): void;
+}
+
 export interface Repos {
   users: UsersRepo;
   authSessions: AuthSessionsRepo;
@@ -163,6 +177,7 @@ export interface Repos {
   settings: SettingsRepo;
   secrets: SecretsRepo;
   audit: AuditRepo;
+  apiTokens: ApiTokensRepo;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +262,7 @@ export interface ChatHub {
   attach(
     destinationId: string,
     platform: PlatformId,
-    source: (signal: AbortSignal) => AsyncIterable<ChatMessageInput>,
+    source: (signal: AbortSignal) => AsyncIterable<ChatSourceItem>,
     signal: AbortSignal,
   ): void;
   recent(limit?: number): ChatMessage[];
@@ -295,6 +310,18 @@ export interface TlsManager {
   start(onRenew: (m: TlsMaterial) => void): Promise<void>;
   status(): TlsStatus;
   stop(): Promise<void>;
+  /**
+   * Plain-HTTP handoff for LAN clients: the HTTP listener passes requests from private/loopback/
+   * CGNAT/ULA/link-local addresses for /api/v1, /dock and /overlay/* (and /overlay/ws upgrades) to
+   * `handler` instead of redirecting them to HTTPS. Null removes it. Optional (no-op when TLS is off).
+   */
+  setLanHandler?(handler: LanHandler | null): void;
+}
+
+/** Where the TLS module's HTTP listener hands LAN requests (the Fastify app). */
+export interface LanHandler {
+  request(req: IncomingMessage, res: ServerResponse): void;
+  upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void;
 }
 
 // ---------------------------------------------------------------------------

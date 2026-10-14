@@ -14,6 +14,7 @@ import {
   type DestinationState,
   type Feed,
   type FeedState,
+  type FieldSpec,
   type SessionState,
   type SessionStatus,
   type TitleResult,
@@ -50,7 +51,31 @@ function offlinePhase(dest: Destination): DestinationPhase {
   return dest.enabled ? 'idle' : 'disabled';
 }
 
+/**
+ * A stored option value the way a save (normalizeFields) would store it: no value (missing, null,
+ * '') → the field default; numbers and booleans read from text; text trimmed. Values a save would
+ * reject are kept as they are (so changing them still counts as a change).
+ */
+function effectiveOption(field: FieldSpec, raw: unknown): unknown {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) return field.default;
+  switch (field.type) {
+    case 'boolean':
+      if (raw === 'true' || raw === '1' || raw === 1) return true;
+      if (raw === 'false' || raw === '0' || raw === 0) return false;
+      return raw;
+    case 'number': {
+      const n = typeof raw === 'string' ? Number(raw.trim()) : raw;
+      return typeof n === 'number' && Number.isFinite(n) ? n : raw;
+    }
+    default:
+      if (typeof raw === 'string') return raw.trim();
+      return typeof raw === 'number' ? String(raw) : raw;
+  }
+}
+
 const RESET: StatePatch = { message: null, stats: null, watchUrl: null, retries: 0 };
+/** Per-session counters: cleared when a session starts (kept after it stops, for the record). */
+const SESSION_RESET: StatePatch = { recoveries: 0, lastRecovery: null };
 
 /** A runner teardown started under the session lock, awaited after releasing it. */
 type Teardown = { done: Promise<void> } | null;
@@ -113,6 +138,7 @@ class SessionOrchestrator implements Orchestrator {
       feedOnline: (feed) => this.feeds.get(feed)?.online === true,
       graceMs: () => this.graceSec() * 1000,
       endTimeoutMs: () => (this.shuttingDown ? timings.shutdownEndTimeoutMs : timings.endTimeoutMs),
+      state: (id) => this.states.get(id) ?? null,
       update: (id, patch) => this.update(id, patch),
       notice: (level, message) => this.services.bus.emit('notice', { level, message }),
     };
@@ -166,6 +192,7 @@ class SessionOrchestrator implements Orchestrator {
       this.emitSession();
 
       for (const dest of this.reconcile()) {
+        this.update(dest.id, SESSION_RESET);
         if (dest.enabled) this.launchRunner(dest);
         else this.update(dest.id, { ...RESET, phase: 'disabled' });
       }
@@ -421,7 +448,32 @@ class SessionOrchestrator implements Orchestrator {
         this.log.warn({ destinationId: dest.id, error: errorMessage(err) }, 'reading stream key for fingerprint failed');
       }
     }
-    return stableStringify([dest.platform, dest.accountId, dest.feed, dest.options, dest.ingestUrl, dest.hasStreamKey, keyHash]);
+    const options = this.restartRelevantOptions(dest);
+    return stableStringify([dest.platform, dest.accountId, dest.feed, options, dest.ingestUrl, dest.hasStreamKey, keyHash]);
+  }
+
+  /**
+   * Options whose edit must restart a running destination, as their effective values: built from
+   * the platform's option fields, a missing value counts as the field default (a save backfills
+   * defaults for fields added since the destination was created) and keys of removed fields are
+   * ignored, so a save that changes nothing effective never ends the live. 'links' fields are left
+   * out: they are read at prepare time (each new live takes the next link), so editing the list
+   * mid-session must not end the current live — the next live (or takedown recovery) picks it up.
+   */
+  private restartRelevantOptions(dest: Destination): Record<string, unknown> {
+    let fields: readonly FieldSpec[];
+    try {
+      fields = this.services.platforms.get(dest.platform).info.destinationFields;
+    } catch {
+      return dest.options;
+    }
+    const options: Record<string, unknown> = {};
+    for (const field of fields) {
+      if ((field.target ?? 'option') !== 'option' || field.type === 'links') continue;
+      const value = effectiveOption(field, dest.options[field.key]);
+      if (value !== undefined) options[field.key] = value;
+    }
+    return options;
   }
 
   // ---------------------------------------------------------------------------
@@ -527,7 +579,9 @@ class SessionOrchestrator implements Orchestrator {
       next.message === cur.message &&
       next.stats === cur.stats &&
       next.watchUrl === cur.watchUrl &&
-      next.retries === cur.retries
+      next.retries === cur.retries &&
+      next.recoveries === cur.recoveries &&
+      next.lastRecovery === cur.lastRecovery
     ) {
       return;
     }
@@ -541,7 +595,17 @@ class SessionOrchestrator implements Orchestrator {
 }
 
 function blankState(id: string, phase: DestinationPhase): DestinationState {
-  return { destinationId: id, phase, message: null, stats: null, watchUrl: null, retries: 0, since: nowIso() };
+  return {
+    destinationId: id,
+    phase,
+    message: null,
+    stats: null,
+    watchUrl: null,
+    retries: 0,
+    since: nowIso(),
+    recoveries: 0,
+    lastRecovery: null,
+  };
 }
 
 function skipped(destinationId: string, reason: string): TitleResult {

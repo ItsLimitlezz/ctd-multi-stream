@@ -115,6 +115,19 @@ export async function dismissBanners(page: Page, signal: AbortSignal): Promise<v
   await clickIfVisible(sel.benignDismiss(page), signal);
 }
 
+/**
+ * Close leftover "your LIVE ended / was interrupted / violated..." dialogs (OK / Close, never
+ * Share or Appeal), e.g. from a LIVE TikTok just killed: they would block the clicks of a new LIVE.
+ */
+export async function dismissEndedNotices(page: Page, signal?: AbortSignal): Promise<number> {
+  let closed = 0;
+  while (closed < 3 && (await clickIfVisible(sel.endedNoticeDismiss(page), signal))) {
+    closed += 1;
+    await sleep(200, signal);
+  }
+  return closed;
+}
+
 export async function detectState(page: Page, timeoutMs: number, signal: AbortSignal): Promise<ProducerState> {
   if (isLoginUrl(page.url())) return 'login';
   try {
@@ -149,12 +162,28 @@ export async function loadProducer(
   await dismissBanners(page, signal);
   const state = await detectState(page, timing.detectMs, signal);
   if (state !== 'login' && state !== 'unknown') await dismissBanners(page, signal); // late cookie banner
+  if (state !== 'login') await dismissEndedNotices(page, signal);
   return state;
 }
 
 /** True when this page shows a running LIVE ("End LIVE"). */
 export function isLiveOnPage(page: Page): Promise<boolean> {
   return visible(sel.endLive(page));
+}
+
+/**
+ * What the producer page says about the LIVE right now (one quick look, no waiting):
+ * 'live' ("End LIVE"), 'not-live' (start page, settings, a prepared LIVE or an eligibility notice),
+ * 'logged-out' (login page or prompt) or 'unknown' (loading / unrecognizable).
+ */
+export async function liveStateOnPage(page: Page): Promise<'live' | 'not-live' | 'logged-out' | 'unknown'> {
+  if (isLoginUrl(page.url())) return 'logged-out';
+  if (await visible(sel.endLive(page))) return 'live';
+  for (const notLive of [sel.goLive(page), sel.saveSettings(page), sel.keyLabel(page), sel.ineligible(page)]) {
+    if (await visible(notLive)) return 'not-live';
+  }
+  if (await visible(sel.loginPrompt(page))) return 'logged-out';
+  return 'unknown';
 }
 
 /** True when this page shows a prepared or running LIVE (credentials or "End LIVE"). */
@@ -419,8 +448,12 @@ async function afterGoLiveClick(page: Page, timeoutMs: number, signal: AbortSign
   for (;;) {
     signal.throwIfAborted();
     if (await visible(sel.endLive(page))) return 'live';
-    if (confirms < 2 && (await clickIfVisible(sel.dialogButton(page, TEXT.goLiveConfirm), signal))) {
+    const confirm = sel.dialogButton(page, TEXT.goLiveConfirm);
+    if (confirms < 2 && (await clickIfVisible(confirm, signal))) {
       confirms += 1;
+      // The dialog may stay up while TikTok starts the LIVE: don't click it again (and wait out a
+      // click timeout when it then disappears) unless it is still there after a moment.
+      for (let i = 0; i < 20 && (await visible(confirm)) && !(await visible(sel.endLive(page))); i++) await sleep(100, signal);
       continue;
     }
     if (!saved && (await clickIfVisible(sel.saveAndGoLive(page), signal))) {

@@ -1,13 +1,15 @@
 // Chat aggregation: runs each live destination's chat source, normalizes and de-duplicates
-// messages, keeps a ring buffer of recent ones and emits them on the EventBus.
+// messages, keeps a ring buffer of recent ones and emits them on the EventBus. Sources may also
+// yield moderation (deleted message, banned/timed-out user, cleared chat): the affected messages
+// leave the ring buffer and a 'chat-moderation' event tells overlays/clients to remove them.
 
 import type { Logger } from 'pino';
-import type { ChatMessage, PlatformId } from '../../../shared/types.js';
+import type { ChatMessage, ChatModeration, PlatformId } from '../../../shared/types.js';
 import type { EventBus } from '../events.js';
-import type { ChatMessageInput } from '../platforms/types.js';
+import { isChatModeration, type ChatMessageInput, type ChatModerationInput, type ChatSourceItem } from '../platforms/types.js';
 import type { ChatHub, ScopedSecrets } from '../services.js';
 import { RecentKeys, RingBuffer } from './buffers.js';
-import { normalizeChatMessage } from './normalize.js';
+import { MAX_AUTHOR_LENGTH, cleanText, normalizeChatMessage } from './normalize.js';
 import { safeErrorMessage } from './redact.js';
 import { generateOverlayToken } from './token.js';
 
@@ -21,6 +23,7 @@ export const HEALTHY_RESET_MS = 60_000;
 
 const TOKEN_KEY = 'overlayToken';
 const MIN_STORED_TOKEN_LENGTH = 32;
+const MAX_MODERATION_ID_LENGTH = 200;
 
 export interface ChatHubDeps {
   bus: EventBus;
@@ -29,7 +32,7 @@ export interface ChatHubDeps {
   secrets: ScopedSecrets;
 }
 
-type ChatSource = (signal: AbortSignal) => AsyncIterable<ChatMessageInput>;
+type ChatSource = (signal: AbortSignal) => AsyncIterable<ChatSourceItem>;
 
 const ABORTED = Symbol('aborted');
 
@@ -74,7 +77,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  * Consume one run of a source until it ends, throws, or the signal aborts. Iterates manually
  * so an abort stops us promptly even if the source ignores its signal.
  */
-async function consume(source: ChatSource, signal: AbortSignal, onMessage: (m: ChatMessageInput) => void): Promise<void> {
+async function consume(source: ChatSource, signal: AbortSignal, onItem: (m: ChatSourceItem) => void): Promise<void> {
   const it = source(signal)[Symbol.asyncIterator]();
   const aborted = abortPromise(signal);
   let finished = false;
@@ -82,7 +85,7 @@ async function consume(source: ChatSource, signal: AbortSignal, onMessage: (m: C
     while (!signal.aborted) {
       const next = it.next();
       next.catch(() => {}); // the race may abandon this promise; never leave it unhandled
-      let result: IteratorResult<ChatMessageInput> | typeof ABORTED;
+      let result: IteratorResult<ChatSourceItem> | typeof ABORTED;
       try {
         result = await Promise.race([next, aborted.promise]);
       } catch (err) {
@@ -94,7 +97,7 @@ async function consume(source: ChatSource, signal: AbortSignal, onMessage: (m: C
         finished = true;
         return;
       }
-      onMessage(result.value);
+      onItem(result.value);
     }
   } finally {
     aborted.dispose();
@@ -108,10 +111,47 @@ async function consume(source: ChatSource, signal: AbortSignal, onMessage: (m: C
   }
 }
 
+/** The platform's own id for a stored message (explicit, else the unprefixed hub id). */
+function platformIdOf(msg: ChatMessage): string {
+  return msg.platformMessageId ?? msg.id.slice(msg.platform.length + 1);
+}
+
+const indexKey = (destinationId: string, platformMessageId: string) => `${destinationId}\n${platformMessageId}`;
+
+/** Does `msg` belong to the user a 'user-cleared' moderation names? Ids win; names are case-insensitive. */
+export function messageFromUser(msg: Pick<ChatMessage, 'author'>, userId: string | null, userName: string | null): boolean {
+  if (userId && msg.author.id) return msg.author.id === userId;
+  if (userId && !userName) return false;
+  if (!userName) return false;
+  const name = userName.toLowerCase();
+  return msg.author.name.toLowerCase() === name || msg.author.login?.toLowerCase() === name;
+}
+
 export function createChatHub({ bus, log, secrets }: ChatHubDeps): ChatHub {
   const buffer = new RingBuffer<ChatMessage>(RING_SIZE);
   const seen = new RecentKeys(DEDUPE_SIZE);
   const attachments = new Map<string, AbortController>();
+  /** destination + platform message id -> hub message id (bounded, insertion order). */
+  const byPlatformId = new Map<string, string>();
+
+  function index(msg: ChatMessage): void {
+    const key = indexKey(msg.destinationId, platformIdOf(msg));
+    byPlatformId.delete(key);
+    byPlatformId.set(key, msg.id);
+    if (byPlatformId.size > DEDUPE_SIZE) {
+      const oldest = byPlatformId.keys().next();
+      if (!oldest.done) byPlatformId.delete(oldest.value);
+    }
+  }
+
+  /** A throwing listener must not be mistaken for a source failure. */
+  function safely(fn: () => void): void {
+    try {
+      fn();
+    } catch (err) {
+      log.error({ reason: safeErrorMessage(err) }, 'chat listener failed');
+    }
+  }
 
   function push(destinationId: string, platform: PlatformId, input: ChatMessageInput): void {
     let msg: ChatMessage | null;
@@ -122,12 +162,52 @@ export function createChatHub({ bus, log, secrets }: ChatHubDeps): ChatHub {
     }
     if (!msg || !seen.add(msg.id)) return;
     buffer.push(msg);
-    try {
-      bus.emit('chat', msg);
-    } catch (err) {
-      // A throwing listener must not be mistaken for a source failure.
-      log.error({ reason: safeErrorMessage(err) }, 'chat listener failed');
+    index(msg);
+    const message = msg;
+    safely(() => bus.emit('chat', message));
+  }
+
+  function moderate(destinationId: string, platform: PlatformId, input: ChatModerationInput): void {
+    const ts = new Date().toISOString();
+    let moderation: ChatModeration;
+    switch (input.kind) {
+      case 'message-deleted': {
+        const platformMessageId = cleanText(input.platformMessageId, MAX_MODERATION_ID_LENGTH);
+        if (!platformMessageId) return;
+        const prefixed = `${platform}:${platformMessageId}`;
+        const removed = buffer.removeWhere(
+          (m) => m.destinationId === destinationId && (m.platformMessageId === platformMessageId || m.id === prefixed),
+        );
+        const key = indexKey(destinationId, platformMessageId);
+        // Unknown message (never seen, or forgotten): the id it would have had under the hub's scheme.
+        const messageId = removed[0]?.id ?? byPlatformId.get(key) ?? prefixed;
+        byPlatformId.delete(key);
+        moderation = { kind: 'message-deleted', platform, destinationId, ts, messageId, platformMessageId };
+        break;
+      }
+      case 'user-cleared': {
+        const userId = cleanText(typeof input.userId === 'number' ? String(input.userId) : input.userId, MAX_MODERATION_ID_LENGTH) || null;
+        const userName = cleanText(input.userName, MAX_AUTHOR_LENGTH) || null;
+        if (!userId && !userName) return;
+        buffer.removeWhere((m) => m.destinationId === destinationId && messageFromUser(m, userId, userName));
+        moderation = { kind: 'user-cleared', platform, destinationId, ts, userId, userName };
+        break;
+      }
+      case 'cleared':
+        buffer.removeWhere((m) => m.destinationId === destinationId);
+        moderation = { kind: 'cleared', platform, destinationId, ts };
+        break;
+      default:
+        return;
     }
+    const event = moderation;
+    safely(() => bus.emit('chat-moderation', event));
+  }
+
+  function onItem(destinationId: string, platform: PlatformId, item: ChatSourceItem): void {
+    if (!item || typeof item !== 'object') return;
+    if (isChatModeration(item)) moderate(destinationId, platform, item);
+    else push(destinationId, platform, item);
   }
 
   async function run(destinationId: string, platform: PlatformId, source: ChatSource, signal: AbortSignal): Promise<void> {
@@ -136,7 +216,7 @@ export function createChatHub({ bus, log, secrets }: ChatHubDeps): ChatHub {
       const startedAt = Date.now();
       let reason = 'source ended';
       try {
-        await consume(source, signal, (m) => push(destinationId, platform, m));
+        await consume(source, signal, (item) => onItem(destinationId, platform, item));
       } catch (err) {
         reason = safeErrorMessage(err);
       }
