@@ -87,6 +87,36 @@ By default the app **goes live automatically when OBS starts streaming** (the **
 - Platforms driven by the built-in browser (Instagram, TikTok) create a new live with a new key every time, wait for the preview to arrive and then click "Go live". That takes a little longer than API platforms.
 - A failing destination retries on its own and never blocks the others.
 
+## Test mode
+
+To rehearse without going public, turn on **Test mode** on the dashboard (next to **Go live**) before you start. While it is on, every destination streams with its platform's private or test setting, and destinations whose platform has none are skipped, so nothing goes out publicly:
+
+| Platform | In test mode |
+|---|---|
+| Twitch | Bandwidth test: Twitch receives the stream, but nobody sees it |
+| YouTube | Private broadcast: only you can see it |
+| Instagram | Practice audience: only you can see it |
+| Facebook Page | Only you can see it |
+| Facebook profile, Kick, TikTok, X, custom RTMP | Skipped (not started at all) |
+
+- The switch can only change while no session runs: end the stream first, then switch.
+- The dashboard shows an orange **TEST MODE** banner with what happens on each destination, and skipped destinations say "Skipped — *platform* has no test mode".
+- Auto go-live still applies: if test mode is on when OBS starts streaming, the session starts in test mode. Turn it off before the real show.
+- While test mode is on, the app never changes a channel title (Twitch, Kick): a channel title is public even during a Twitch bandwidth test. Your title is saved and used when you go live outside test mode. YouTube, Instagram and Facebook Page test lives get the title as usual, since only you can see them.
+- Twitch in **OBS sends Dual Format directly** mode is not covered: OBS streams to Twitch itself, so the app can't make it private. For a private Twitch test in that mode, add `?bandwidthtest=true` to the end of the stream key in OBS's own Twitch settings (if your OBS version lets you edit it), or don't start OBS's Twitch output.
+
+## OBS dock
+
+The app's status and the merged chat can live inside OBS as a dock:
+
+1. In CTD Multi-Stream, open **Settings → API** (admins) and use **OBS dock**. It creates a read-only API token (`status:read` + `chat:read`) named "OBS dock" and shows the dock URL, like `http://192.168.1.20:30080/dock#token=ctd_pat_…`. Copy it.
+2. In OBS: **Docks → Custom Browser Docks…** (older OBS versions: **View → Docks → Custom Browser Docks…**). Enter a name (for example `CTD`), paste the URL and click **Apply**.
+3. Place the dock where you like. It shows the session (with a TEST badge in test mode), feed bitrates, every destination (red when it is down, with the reason; tick **Alert** to also flash and beep), viewers, and the chat from every platform.
+
+- The URL contains a token: treat it like a password. If it leaks, revoke the "OBS dock" token in **Settings → API** and create a new dock.
+- The dock uses the NAS's LAN address over plain HTTP (no certificate needed in OBS). If **Settings → API** has no LAN address, open the web UI through the NAS's LAN IP (for example `https://192.168.1.20:30443`) or set the `LAN_HTTP_HOST` environment variable, then create the dock again.
+- With `LAN_HTTP=off` the dock URL is HTTPS. With a self-signed certificate OBS's browser may refuse to load it, so prefer the LAN HTTP URL where it is safe (see [SECURITY.md](SECURITY.md#lan-plain-http)).
+
 ## Twitch Dual Format
 
 Twitch can show viewers a landscape and a vertical version of the same stream ("Dual Format"). It uses Enhanced Broadcasting: several video tracks in one connection. Check your Twitch dashboard's stream settings to see whether Dual Format is available for your channel. Each Twitch destination has a **Dual Format** option with three modes. If you want Dual Format, use **OBS sends Dual Format directly**.

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessageInput } from '../types.js';
+import { isChatModeration, type ChatMessageInput, type ChatSourceItem } from '../types.js';
 import { API_BASE, STREAM_API_BASE, YouTubeClient, type LiveChatMessage } from './api.js';
 import {
   createChatSource,
@@ -7,7 +7,9 @@ import {
   JsonStreamParser,
   pollGapMs,
   SseJsonParser,
+  toChatItem,
   toChatMessage,
+  toModeration,
   type ChatTimings,
 } from './chat.js';
 import { FetchStub, googleError, json, silentLog, streamingResponse } from './test-utils.js';
@@ -47,15 +49,23 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Collect `n` messages from the source (or until `ms` elapse), then abort it. */
+/** Collect `n` items from the source (or until `ms` elapse), then abort it. */
 async function take(
-  source: (signal: AbortSignal) => AsyncIterable<ChatMessageInput>,
+  source: (signal: AbortSignal) => AsyncIterable<ChatSourceItem>,
   n: number,
   ms = 3_000,
 ): Promise<ChatMessageInput[]> {
+  return (await takeItems(source, n, ms)) as ChatMessageInput[];
+}
+
+async function takeItems(
+  source: (signal: AbortSignal) => AsyncIterable<ChatSourceItem>,
+  n: number,
+  ms = 3_000,
+): Promise<ChatSourceItem[]> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), ms);
-  const out: ChatMessageInput[] = [];
+  const out: ChatSourceItem[] = [];
   try {
     for await (const m of source(ctl.signal)) {
       out.push(m);
@@ -81,11 +91,20 @@ describe('toChatMessage', () => {
     );
     expect(m).toEqual({
       id: 'm1',
+      platformMessageId: 'm1',
       kind: 'message',
       text: 'hello',
       ts: '2026-10-11T12:00:05Z',
       author: { name: 'Viewer', avatarUrl: 'https://yt3.ggpht.com/a.jpg', badges: ['owner', 'moderator', 'member', 'verified'] },
     });
+  });
+
+  it('sets the author id from the channel id (authorDetails, else snippet.authorChannelId)', () => {
+    expect(toChatMessage(text('m1', 'hi', '2026-10-11T12:00:05Z', { channelId: ' UCviewer ' }))?.author.id).toBe('UCviewer');
+    const fallback = text('m2', 'hi', '2026-10-11T12:00:05Z');
+    fallback.snippet!.authorChannelId = 'UCsnippet';
+    expect(toChatMessage(fallback)).toMatchObject({ platformMessageId: 'm2', author: { id: 'UCsnippet' } });
+    expect(toChatMessage(text('m3', 'hi', '2026-10-11T12:00:05Z'))?.author.id).toBeUndefined();
   });
 
   it('maps paid and membership events', () => {
@@ -109,10 +128,142 @@ describe('toChatMessage', () => {
   it('drops types we do not show and malformed items', () => {
     expect(toChatMessage({ id: 't', snippet: { type: 'tombstone' } })).toBeNull();
     expect(toChatMessage({ id: 'b', snippet: { type: 'userBannedEvent', displayMessage: 'x was banned' } })).toBeNull();
+    expect(toChatMessage({ id: 'd', snippet: { type: 'messageDeletedEvent', messageDeletedDetails: { deletedMessageId: 'm1' } } })).toBeNull();
+    expect(toChatMessage({ id: 'g', snippet: { type: 'giftMembershipReceivedEvent', giftMembershipReceivedDetails: { memberLevelName: 'Gold' } } })).toBeNull();
     expect(toChatMessage({ snippet: { type: 'textMessageEvent', displayMessage: 'no id' } })).toBeNull();
     expect(toChatMessage(null)).toBeNull();
     expect(toChatMessage({ id: 'n', snippet: { type: 'textMessageEvent' } })).toBeNull();
     expect(toChatMessage({ id: 'a', snippet: { type: 'textMessageEvent', displayMessage: 'hi' } })?.author).toEqual({ name: 'YouTube user' });
+  });
+
+  it('plain messages carry no alert and are not highlighted', () => {
+    const m = toChatMessage(text('m1', 'hello', '2026-10-11T12:00:05Z', { channelId: 'UC1' }))!;
+    expect(m.alert).toBeUndefined();
+    expect(m.highlighted).toBeUndefined();
+  });
+});
+
+describe('alerts', () => {
+  const author = { channelId: 'UCfan', displayName: 'Fan', profileImageUrl: 'https://yt3.ggpht.com/fan.jpg' };
+  const user = { id: 'UCfan', name: 'Fan', avatar: 'https://yt3.ggpht.com/fan.jpg' };
+  const ev = (snippet: NonNullable<LiveChatMessage['snippet']>, a: NonNullable<LiveChatMessage['authorDetails']> = author) =>
+    toChatMessage({ id: 'e1', snippet: { publishedAt: '2026-10-11T12:00:05Z', ...snippet }, authorDetails: a });
+
+  it('Super Chat → superchat with the exact amount as a decimal string, tier and comment', () => {
+    const m = ev({
+      type: 'superChatEvent',
+      superChatDetails: { amountMicros: '5000000', currency: 'USD', amountDisplayString: '$5.00', userComment: ' great stream ', tier: 2 },
+    });
+    expect(m).toEqual({
+      id: 'e1',
+      platformMessageId: 'e1',
+      kind: 'event',
+      text: 'Super Chat $5.00: great stream',
+      ts: '2026-10-11T12:00:05Z',
+      highlighted: true,
+      author: { id: 'UCfan', name: 'Fan', avatarUrl: 'https://yt3.ggpht.com/fan.jpg' },
+      alert: { kind: 'superchat', user, amount: { unit: 'currency', value: '5.00', currency: 'USD' }, tier: '2', message: { text: 'great stream' } },
+    });
+    // Never a float, whatever the currency's minor units are.
+    expect(ev({ type: 'superChatEvent', superChatDetails: { amountMicros: '500000000', currency: 'JPY' } })?.alert?.amount).toEqual({
+      unit: 'currency',
+      value: '500',
+      currency: 'JPY',
+    });
+    expect(ev({ type: 'superChatEvent', superChatDetails: { amountMicros: 1_990_000, currency: 'eur' } })?.alert?.amount).toEqual({
+      unit: 'currency',
+      value: '1.99',
+      currency: 'EUR',
+    });
+  });
+
+  it('Super Chat without a usable amount still alerts, without amount', () => {
+    const m = ev({ type: 'superChatEvent', superChatDetails: { amountDisplayString: '$5.00' } });
+    expect(m?.alert).toEqual({ kind: 'superchat', user });
+    expect(ev({ type: 'superChatEvent', superChatDetails: { amountMicros: '-5', currency: 'USD' } })?.alert?.amount).toBeUndefined();
+  });
+
+  it('Super Sticker → superchat (the sticker alt text is not a viewer message)', () => {
+    const m = ev({
+      type: 'superStickerEvent',
+      superStickerDetails: { amountMicros: '2000000', currency: 'EUR', amountDisplayString: '€2.00', tier: 1, superStickerMetadata: { altText: 'Cat' } },
+    });
+    expect(m).toMatchObject({ kind: 'event', text: 'Super Sticker €2.00: Cat', highlighted: true });
+    expect(m?.alert).toEqual({ kind: 'superchat', user, amount: { unit: 'currency', value: '2.00', currency: 'EUR' }, tier: '1' });
+  });
+
+  it('new members and upgrades → membership (1 month, level as tier)', () => {
+    expect(ev({ type: 'newSponsorEvent', newSponsorDetails: { memberLevelName: 'Gold' } })?.alert).toEqual({
+      kind: 'membership',
+      user,
+      amount: { unit: 'months', value: 1 },
+      tier: 'Gold',
+    });
+    expect(ev({ type: 'newSponsorEvent', newSponsorDetails: { isUpgrade: true } })?.alert).toEqual({
+      kind: 'membership',
+      user,
+      amount: { unit: 'months', value: 1 },
+    });
+    expect(ev({ type: 'newSponsorEvent' })?.highlighted).toBeUndefined();
+  });
+
+  it('member milestones → membership with the months and the comment', () => {
+    const m = ev({ type: 'memberMilestoneChatEvent', memberMilestoneChatDetails: { memberMonth: 12, memberLevelName: 'Gold', userComment: 'a year!' } });
+    expect(m?.alert).toEqual({ kind: 'membership', user, amount: { unit: 'months', value: 12 }, tier: 'Gold', message: { text: 'a year!' } });
+    expect(ev({ type: 'memberMilestoneChatEvent', memberMilestoneChatDetails: { memberMonth: 1.5 } })?.alert).toEqual({ kind: 'membership', user });
+  });
+
+  it('gifted memberships → gift with an integer count', () => {
+    expect(ev({ type: 'membershipGiftingEvent', membershipGiftingDetails: { giftMembershipsCount: 5, giftMembershipsLevelName: 'Gold' } })?.alert).toEqual({
+      kind: 'gift',
+      user,
+      amount: { unit: 'count', value: 5 },
+      tier: 'Gold',
+      gift: { total: 5 },
+    });
+    expect(ev({ type: 'membershipGiftingEvent' })?.alert).toMatchObject({ amount: { unit: 'count', value: 1 }, gift: { total: 1 } });
+  });
+
+  it('paid gifts (giftEvent) are plain event lines without an alert (alert.gift means gifted memberships)', () => {
+    const m = ev({ type: 'giftEvent', giftEventDetails: { giftMetadata: { giftName: 'Rose', comboCount: 3 } } });
+    expect(m).toMatchObject({ kind: 'event', text: 'Sent Rose ×3' });
+    expect(m?.alert).toBeUndefined();
+    expect(m?.highlighted).toBeUndefined();
+  });
+
+  it('anonymous authors get a name but no id', () => {
+    expect(ev({ type: 'newSponsorEvent' }, {})?.alert?.user).toEqual({ name: 'YouTube user' });
+  });
+});
+
+describe('moderation', () => {
+  it('messageDeletedEvent → message-deleted with the deleted message id', () => {
+    const item: LiveChatMessage = { id: 'x1', snippet: { type: 'messageDeletedEvent', messageDeletedDetails: { deletedMessageId: 'm1' } } };
+    expect(toModeration(item)).toEqual({ kind: 'message-deleted', platformMessageId: 'm1' });
+    expect(toChatItem(item)).toEqual({ kind: 'message-deleted', platformMessageId: 'm1' });
+    expect(toModeration({ id: 'x2', snippet: { type: 'messageDeletedEvent' } })).toBeNull();
+  });
+
+  it('userBannedEvent (ban or timeout) → user-cleared with channel id and name', () => {
+    const item: LiveChatMessage = {
+      id: 'x3',
+      snippet: {
+        type: 'userBannedEvent',
+        userBannedDetails: { banType: 'temporary', banDurationSeconds: '300', bannedUserDetails: { channelId: 'UCbad', displayName: 'Troll' } },
+      },
+    };
+    expect(toChatItem(item)).toEqual({ kind: 'user-cleared', userId: 'UCbad', userName: 'Troll' });
+    expect(toModeration({ id: 'x4', snippet: { type: 'userBannedEvent', userBannedDetails: { bannedUserDetails: { displayName: 'Troll' } } } })).toEqual({
+      kind: 'user-cleared',
+      userName: 'Troll',
+    });
+    expect(toModeration({ id: 'x5', snippet: { type: 'userBannedEvent', userBannedDetails: {} } })).toBeNull();
+  });
+
+  it('chat messages are not moderation', () => {
+    const item = text('m1', 'hi', '2026-10-11T12:00:05Z');
+    expect(toModeration(item)).toBeNull();
+    expect(isChatModeration(toChatItem(item)!)).toBe(false);
   });
 });
 
@@ -230,6 +381,32 @@ describe('chat source', () => {
     const msgs = await take(source(), 1, 150);
     expect(msgs).toEqual([]);
     expect(stub.calls).toHaveLength(1);
+  });
+
+  it('yields moderation and alerts in stream order, skipping backlog moderation', async () => {
+    const at = (s: string) => `2026-10-11T12:00:0${s}Z`;
+    const items: LiveChatMessage[] = [
+      { id: 'old-del', snippet: { type: 'messageDeletedEvent', publishedAt: '2026-10-11T11:00:00Z', messageDeletedDetails: { deletedMessageId: 'x' } } },
+      text('m1', 'one', at('1'), { channelId: 'UCa' }),
+      { id: 'd1', snippet: { type: 'messageDeletedEvent', publishedAt: at('2'), messageDeletedDetails: { deletedMessageId: 'm1' } } },
+      {
+        id: 'sc',
+        snippet: { type: 'superChatEvent', publishedAt: at('3'), superChatDetails: { amountMicros: '10000000', currency: 'GBP', amountDisplayString: '£10.00' } },
+        authorDetails: { channelId: 'UCb', displayName: 'Bee' },
+      },
+      { id: 'b1', snippet: { type: 'userBannedEvent', publishedAt: at('4'), userBannedDetails: { bannedUserDetails: { channelId: 'UCa', displayName: 'Viewer' } } } },
+    ];
+    stub.on('GET', STREAM, json([{ nextPageToken: 't1', items }]));
+    const out = await takeItems(source(), 4);
+    expect(out.map((i) => (isChatModeration(i) ? i.kind : `${i.kind}:${i.platformMessageId}`))).toEqual([
+      'message:m1',
+      'message-deleted',
+      'event:sc',
+      'user-cleared',
+    ]);
+    expect(out[1]).toEqual({ kind: 'message-deleted', platformMessageId: 'm1' });
+    expect((out[2] as ChatMessageInput).alert).toMatchObject({ kind: 'superchat', user: { id: 'UCb' }, amount: { value: '10.00', currency: 'GBP' } });
+    expect(out[3]).toEqual({ kind: 'user-cleared', userId: 'UCa', userName: 'Viewer' });
   });
 
   it('stops on a chatEndedEvent', async () => {

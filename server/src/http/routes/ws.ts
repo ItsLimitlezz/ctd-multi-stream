@@ -47,6 +47,7 @@ export class WsHub {
       bus.on('feed', (feed) => this.broadcast({ type: 'feed', feed })),
       bus.on('destination', (state) => this.broadcast({ type: 'destination', state })),
       bus.on('chat', (message) => this.broadcast({ type: 'chat', message })),
+      bus.on('chat-moderation', (moderation) => this.broadcast({ type: 'chat-moderation', moderation })),
       bus.on('account', (account) => this.broadcast({ type: 'account', account })),
       bus.on('destinations-changed', () => this.broadcast({ type: 'destinations-changed' })),
       bus.on('notice', (n) => this.broadcast({ type: 'notice', level: n.level, message: n.message })),

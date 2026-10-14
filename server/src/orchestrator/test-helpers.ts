@@ -16,7 +16,7 @@ import type {
   SessionState,
 } from '../../../shared/types.js';
 import { EventBus, type PushEvent, type PushStatus } from '../events.js';
-import type { ChatMessageInput, DriverContext, PlatformDriver, PreparedLive, PushPlan } from '../platforms/types.js';
+import type { ChatSourceItem, DriverContext, PlatformDriver, PreparedLive, PushPlan } from '../platforms/types.js';
 import type {
   AppServices,
   BrowserManager,
@@ -102,7 +102,7 @@ export class FakeChat implements ChatHub {
   attach(
     destinationId: string,
     platform: PlatformId,
-    _source: (signal: AbortSignal) => AsyncIterable<ChatMessageInput>,
+    _source: (signal: AbortSignal) => AsyncIterable<ChatSourceItem>,
     signal: AbortSignal,
   ): void {
     this.attaches.push({ id: destinationId, platform, signal });

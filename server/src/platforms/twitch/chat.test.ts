@@ -1,7 +1,7 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket as ServerSocket } from 'ws';
-import type { ChatMessageInput } from '../types.js';
+import type { ChatSourceItem } from '../types.js';
 import { readTwitchChat } from './chat.js';
 
 /** A tiny fake of irc-ws.chat.twitch.tv on 127.0.0.1. */
@@ -65,7 +65,7 @@ afterEach(async () => {
 });
 
 /** Collect messages into an array in the background; resolves with the error/end. */
-function consume(it: AsyncIterable<ChatMessageInput>, into: ChatMessageInput[]): Promise<unknown> {
+function consume(it: AsyncIterable<ChatSourceItem>, into: ChatSourceItem[]): Promise<unknown> {
   return (async () => {
     try {
       for await (const m of it) into.push(m);
@@ -79,7 +79,7 @@ function consume(it: AsyncIterable<ChatMessageInput>, into: ChatMessageInput[]):
 describe('readTwitchChat', () => {
   it('logs in anonymously, answers PING and yields chat messages', async () => {
     const ctl = new AbortController();
-    const messages: ChatMessageInput[] = [];
+    const messages: ChatSourceItem[] = [];
     const done = consume(readTwitchChat('TwitchDev', ctl.signal, { url: irc.url }), messages);
 
     await irc.until(() => irc.received.length >= 4);
@@ -93,20 +93,34 @@ describe('readTwitchChat', () => {
 
     irc.send(
       ':tmi.twitch.tv 001 justinfan1 :Welcome, GLHF!\r\n' +
-        '@badges=subscriber/6;color=#1E90FF;display-name=Viewer;id=m1;tmi-sent-ts=1700000000000 ' +
+        '@badges=subscriber/6;color=#1E90FF;display-name=Viewer;id=m1;tmi-sent-ts=1700000000000;user-id=99 ' +
         ':viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #twitchdev :hello\r\n' +
-        '@display-name=Raider;id=m2;login=raider;msg-id=raid;system-msg=5\\sraiders\\sfrom\\sRaider\\shave\\sjoined! ' +
-        ':tmi.twitch.tv USERNOTICE #twitchdev\r\n',
+        '@display-name=Raider;id=m2;login=raider;msg-id=raid;msg-param-viewerCount=5;system-msg=5\\sraiders\\sfrom\\sRaider\\shave\\sjoined! ' +
+        ':tmi.twitch.tv USERNOTICE #twitchdev\r\n' +
+        '@login=viewer;target-msg-id=m1 :tmi.twitch.tv CLEARMSG #twitchdev :hello\r\n' +
+        '@target-user-id=99 :tmi.twitch.tv CLEARCHAT #twitchdev :viewer\r\n' +
+        ':tmi.twitch.tv CLEARCHAT #twitchdev\r\n',
     );
-    await irc.until(() => messages.length >= 2);
+    await irc.until(() => messages.length >= 5);
     expect(messages[0]).toEqual({
-      author: { name: 'Viewer', color: '#1E90FF', badges: ['subscriber'] },
+      author: { name: 'Viewer', color: '#1E90FF', badges: ['subscriber'], id: '99', login: 'viewer' },
       text: 'hello',
       kind: 'message',
       id: 'm1',
+      platformMessageId: 'm1',
       ts: new Date(1700000000000).toISOString(),
     });
-    expect(messages[1]).toMatchObject({ text: '5 raiders from Raider have joined!', kind: 'event', id: 'm2' });
+    expect(messages[1]).toMatchObject({
+      text: '5 raiders from Raider have joined!',
+      kind: 'event',
+      id: 'm2',
+      alert: { kind: 'raid', user: { name: 'Raider' }, amount: { unit: 'viewers', value: 5 } },
+    });
+    expect(messages.slice(2)).toEqual([
+      { kind: 'message-deleted', platformMessageId: 'm1' },
+      { kind: 'user-cleared', userId: '99', userName: 'viewer' },
+      { kind: 'cleared' },
+    ]);
 
     ctl.abort();
     expect(await done).toBe('ended');

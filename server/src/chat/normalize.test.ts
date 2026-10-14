@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import type { ChatAlert } from '../../../shared/types.js';
 import type { ChatMessageInput } from '../platforms/types.js';
 import { RecentKeys, RingBuffer } from './buffers.js';
-import { MAX_AUTHOR_LENGTH, MAX_TEXT_LENGTH, cleanText, normalizeChatMessage, truncate } from './normalize.js';
+import { MAX_AUTHOR_LENGTH, MAX_TEXT_LENGTH, cleanAlertAmount, cleanText, normalizeChatMessage, truncate } from './normalize.js';
 import { safeErrorMessage } from './redact.js';
 import { generateOverlayToken, tokensEqual } from './token.js';
 
@@ -208,6 +209,88 @@ describe('normalizeChatMessage', () => {
     expect(normalizeChatMessage(null as unknown as ChatMessageInput, 'x', 'd', NOW)).toBeNull();
     const noAuthor = normalizeChatMessage({ text: 'hi' } as unknown as ChatMessageInput, 'x', 'd', NOW);
     expect(noAuthor?.author.name).toBe('unknown');
+  });
+});
+
+describe('alerts', () => {
+  function eventLine(alert: unknown, over: Partial<ChatMessageInput> = {}): ChatMessageInput {
+    return input({ kind: 'event', author: { name: 'DJFan', id: '144552210' }, text: 'subscribed for 12 months', alert: alert as ChatAlert, ...over });
+  }
+
+  it('keeps a valid alert on an event line', () => {
+    const alert: ChatAlert = {
+      kind: 'subscription',
+      user: { id: '144552210', name: 'DJFan' },
+      amount: { unit: 'months', value: 12 },
+      tier: '1000',
+      message: { text: 'a year of DPRTMNT!' },
+    };
+    expect(normalizeChatMessage(eventLine(alert), 'twitch', 'd', NOW)?.alert).toEqual(alert);
+    const superchat: ChatAlert = {
+      kind: 'superchat',
+      user: { id: 'UCx9', name: 'Night Owl', avatar: 'https://yt3.ggpht.com/a.jpg' },
+      amount: { unit: 'currency', value: '5.00', currency: 'USD' },
+      tier: '2',
+    };
+    expect(normalizeChatMessage(eventLine(superchat), 'youtube', 'd', NOW)?.alert).toEqual(superchat);
+  });
+
+  it('drops the alert on a plain message, for an unknown kind, or when it is not an object', () => {
+    const sub = { kind: 'subscription', user: { name: 'DJFan' } };
+    expect(normalizeChatMessage(eventLine(sub, { kind: 'message' }), 'twitch', 'd', NOW)).not.toHaveProperty('alert');
+    expect(normalizeChatMessage(eventLine(sub, { kind: undefined }), 'twitch', 'd', NOW)).not.toHaveProperty('alert');
+    for (const bad of [{ kind: 'donation', user: { name: 'x' } }, { user: { name: 'x' } }, 'subscription', ['subscription'], null, 7]) {
+      const m = normalizeChatMessage(eventLine(bad), 'twitch', 'd', NOW);
+      expect(m?.kind).toBe('event'); // the line itself stays
+      expect(m).not.toHaveProperty('alert');
+    }
+  });
+
+  it('never passes money as a float, negative or fractional counts, or unknown units', () => {
+    const amountOf = (amount: unknown) => normalizeChatMessage(eventLine({ kind: 'superchat', user: { name: 'x' }, amount }), 'youtube', 'd', NOW)?.alert;
+    expect(amountOf({ unit: 'currency', value: 5, currency: 'USD' })).toEqual({ kind: 'superchat', user: { name: 'x' } });
+    expect(amountOf({ unit: 'currency', value: ' 1000 ', currency: 'jpy' })?.amount).toEqual({ unit: 'currency', value: '1000', currency: 'JPY' });
+    expect(amountOf({ unit: 'currency', value: '5,00', currency: 'EUR' })).not.toHaveProperty('amount');
+    expect(amountOf({ unit: 'bits', value: -1 })).not.toHaveProperty('amount');
+    expect(amountOf({ unit: 'bits', value: 1.5 })).not.toHaveProperty('amount');
+    expect(amountOf({ unit: 'seconds', value: 3 })).not.toHaveProperty('amount');
+    expect(amountOf({ unit: 'kicks', value: 500 })?.amount).toEqual({ unit: 'kicks', value: 500 });
+  });
+
+  it('cleans and caps every text, keeps https avatars only, and anonymous users lose their id', () => {
+    const recipients = Array.from({ length: 150 }, (_, i) => `viewer${i}`);
+    const m = normalizeChatMessage(
+      eventLine({
+        kind: 'gift',
+        user: { id: 999, name: '', anonymous: true, avatar: 'http://example.com/a.png' },
+        amount: { unit: 'count', value: 5 },
+        tier: 'x'.repeat(100),
+        message: { text: `hi\u{202E}there\n${'y'.repeat(600)}` },
+        gift: { recipients: ['a\u{202E}b', '', 7, ...recipients], total: 5.5 },
+      }),
+      'twitch',
+      'd',
+      NOW,
+    );
+    expect(m?.alert?.user).toEqual({ name: 'Anonymous', anonymous: true });
+    expect(m?.alert?.tier).toHaveLength(32);
+    expect(m?.alert?.message?.text.startsWith('hithere ')).toBe(true);
+    expect(m?.alert?.message?.text).toHaveLength(MAX_TEXT_LENGTH);
+    expect(m?.alert?.gift).toEqual({ recipients: ['ab', ...recipients.slice(0, 99)] });
+
+    // A named user: control characters stripped, numeric id as text, author name as fallback.
+    const named = normalizeChatMessage(eventLine({ kind: 'raid', user: { id: 42, name: 'R\naider' } }), 'twitch', 'd', NOW);
+    expect(named?.alert?.user).toEqual({ id: '42', name: 'R aider' });
+    const unnamed = normalizeChatMessage(eventLine({ kind: 'raid', user: {} }), 'twitch', 'd', NOW);
+    expect(unnamed?.alert?.user).toEqual({ name: 'DJFan' });
+    const noUser = normalizeChatMessage(eventLine({ kind: 'follow' }), 'twitch', 'd', NOW);
+    expect(noUser?.alert).toEqual({ kind: 'follow', user: { name: 'DJFan' } });
+  });
+
+  it('cleanAlertAmount is the shared money/count check', () => {
+    expect(cleanAlertAmount({ unit: 'currency', value: '0.99', currency: 'EUR' })).toEqual({ unit: 'currency', value: '0.99', currency: 'EUR' });
+    expect(cleanAlertAmount({ unit: 'months', value: 3 })).toEqual({ unit: 'months', value: 3 });
+    expect(cleanAlertAmount([1])).toBeUndefined();
   });
 });
 

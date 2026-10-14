@@ -1,11 +1,21 @@
-// Twitch driver: device-code login (public client), title + stream key over Helix, anonymous IRC chat,
-// and three Dual Format modes (relay one feed / OBS direct / experimental multitrack relay).
+// Twitch driver: device-code login (public client), title + stream key + viewer count over Helix,
+// anonymous IRC chat (with moderation and alerts), and three Dual Format modes (relay one feed / OBS
+// direct / experimental multitrack relay). Session test mode streams as a bandwidth test and leaves
+// the (public) channel title alone; it can't reach OBS's own output in "OBS direct" mode, so that
+// destination carries a warning on its card instead.
 
 import type { ConnectPoll, ConnectStart } from '../../../../shared/api.js';
 import type { Account, Destination, Feed, PlatformInfo } from '../../../../shared/types.js';
 import { PlatformHttpError, truncateTitle } from '../common/http.js';
 import { pollDeviceToken, saveTokens, startDeviceFlow } from '../common/oauth.js';
-import { DriverError, type DriverContext, type PlatformDriver, type PreparedLive, type PushPlan } from '../types.js';
+import {
+  DriverError,
+  type DriverContext,
+  type LiveHealthEvent,
+  type PlatformDriver,
+  type PreparedLive,
+  type PushPlan,
+} from '../types.js';
 import {
   DEVICE_ENDPOINT,
   forgetValidation,
@@ -19,6 +29,7 @@ import {
 } from './api.js';
 import { readTwitchChat } from './chat.js';
 import { prepareMultitrack } from './multitrack.js';
+import { pollViewers } from './viewers.js';
 import {
   buildIngestUrl,
   DEFAULT_INGEST,
@@ -124,7 +135,19 @@ export const twitchInfo: PlatformInfo = {
     '"Relay both feeds" (experimental) combines both feeds into one Enhanced RTMP multitrack connection (FFmpeg 8 or newer, bundled). Twitch must accept one pass-through track per feed (set the feed formats). As of October 2026 Twitch\'s Enhanced Broadcasting service also asks for the encoding GPU, which a relay does not have, so it usually refuses this mode; Twitch may also drop the stream because the relay cannot re-encode or add OBS\'s performance metrics. If it fails, use OBS direct.',
     'Bandwidth test streams without going live. Sign-ins expire after about 30 days without use.',
   ].join(' '),
+  testMode: {
+    supported: true,
+    description:
+      'Bandwidth test — Twitch receives the stream but nobody sees it, and the channel title is left unchanged. Not private with "OBS sends Dual Format directly": OBS streams to Twitch itself, publicly.',
+  },
 };
+
+/**
+ * Shown on an "OBS direct" destination's card while test mode is on: the video never passes through
+ * this app, so the bandwidth test can't apply to it.
+ */
+export const OBS_DIRECT_TEST_WARNING =
+  "Not private: OBS streams to Twitch itself, so test mode can't hide it. Stop OBS's own Twitch output for a private rehearsal.";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -188,6 +211,22 @@ async function applyTitle(client: TwitchClient, broadcasterId: string, title: st
   if (!t) return false;
   await client.setTitle(broadcasterId, t);
   return true;
+}
+
+/** `options` with session test mode applied: test mode always streams as a bandwidth test. */
+function effectiveOptions(options: TwitchDestinationOptions, ctx: DriverContext): TwitchDestinationOptions {
+  return ctx.testMode === true && !options.bandwidthTest ? { ...options, bandwidthTest: true } : options;
+}
+
+/** `events` preceded by a standing warning (the viewer watcher never yields 'ok', so it stays). */
+async function* warnFirst(
+  message: string,
+  events: AsyncIterable<LiveHealthEvent>,
+  signal: AbortSignal,
+): AsyncGenerator<LiveHealthEvent, void, undefined> {
+  if (signal.aborted) return;
+  yield { type: 'warning', message };
+  yield* events;
 }
 
 async function pushPlan(
@@ -399,34 +438,54 @@ export const twitchDriver: PlatformDriver = {
   },
 
   async prepare(dest: Destination, account: Account | null, title: string, ctx: DriverContext): Promise<PreparedLive> {
-    const { options, problems } = readOptions(dest);
-    if (problems.length > 0) throw new DriverError(problems.join('; '), 'misconfigured');
+    const parsed = readOptions(dest);
+    if (parsed.problems.length > 0) throw new DriverError(parsed.problems.join('; '), 'misconfigured');
+    const options = effectiveOptions(parsed.options, ctx);
+    const testMode = ctx.testMode === true;
+    // Test mode can't reach OBS's own Twitch output: warn here and on the destination card (health).
+    const publicInTest = testMode && options.dualFormat === 'obs-direct';
+    if (publicInTest) {
+      ctx.log.warn(
+        { destinationId: dest.id },
+        'twitch: test mode does not affect "OBS sends Dual Format directly" — OBS streams to Twitch itself, publicly',
+      );
+    }
     const client = makeClient(ctx, account);
     try {
       const info = await identity(client, ctx, account!);
 
-      // The title is not essential to go live: log and continue unless the login itself is broken.
-      try {
-        await applyTitle(client, info.userId, title);
-      } catch (err) {
-        const e = toDriverError(err, 'the title');
-        if (isAuthProblem(e) || (err instanceof Error && err.name === 'AbortError')) throw e;
-        ctx.log.warn({ destinationId: dest.id, error: message(e) }, 'twitch: setting the title failed; continuing');
+      if (testMode) {
+        // The channel title is public even during a bandwidth test: a rehearsal leaves it alone.
+        ctx.log.info({ destinationId: dest.id }, 'twitch: test mode leaves the channel title unchanged');
+      } else {
+        // The title is not essential to go live: log and continue unless the login itself is broken.
+        try {
+          await applyTitle(client, info.userId, title);
+        } catch (err) {
+          const e = toDriverError(err, 'the title');
+          if (isAuthProblem(e) || (err instanceof Error && err.name === 'AbortError')) throw e;
+          ctx.log.warn({ destinationId: dest.id, error: message(e) }, 'twitch: setting the title failed; continuing');
+        }
       }
 
       const push = await pushPlan(dest, options, client, info, ctx);
       ctx.log.info(
-        { destinationId: dest.id, mode: options.dualFormat, bandwidthTest: options.bandwidthTest },
+        { destinationId: dest.id, mode: options.dualFormat, bandwidthTest: options.bandwidthTest, testMode },
         'twitch: live prepared',
       );
 
       // The live outlives prepare's signal: later calls rely on fetch timeouts instead.
       const liveClient = makeClient(ctx, account, null);
       const login = info.login;
+      const broadcasterId = info.userId;
       return {
         push,
         watchUrl: `https://www.twitch.tv/${login}`,
         async setTitle(next: string): Promise<void> {
+          if (testMode) {
+            ctx.log.info({ destinationId: dest.id }, 'twitch: test mode leaves the channel title unchanged');
+            return;
+          }
           try {
             const current = await liveClient.validate(); // hourly validation while live
             await applyTitle(liveClient, current.userId, next);
@@ -435,6 +494,19 @@ export const twitchDriver: PlatformDriver = {
           }
         },
         chat: (signal: AbortSignal) => readTwitchChat(login, signal, { log: ctx.log }),
+        // Viewers only (GET /helix/streams every 30 s); never 'ended': Twitch lives aren't recovered.
+        // validate() is cached for an hour: it keeps up Twitch's hourly validation during long lives.
+        health: (signal: AbortSignal) => {
+          const viewers = pollViewers(
+            async (s) => {
+              await liveClient.validate();
+              return liveClient.viewerCount(broadcasterId, s);
+            },
+            signal,
+            { log: ctx.log, logContext: { destinationId: dest.id, platform: 'twitch' } },
+          );
+          return publicInTest ? warnFirst(OBS_DIRECT_TEST_WARNING, viewers, signal) : viewers;
+        },
         // No end(): a Twitch stream ends when the video stops.
       };
     } catch (err) {

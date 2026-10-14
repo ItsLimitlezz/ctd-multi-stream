@@ -1,6 +1,7 @@
-// Kick driver: OAuth 2.1 (authorization code + PKCE, paste-back), stream title + stream key through
-// the official public API (https://docs.kick.com), read-only chat through Kick's public Pusher
-// websocket (unofficial, see chat.ts). Only the title is ever changed — never the category.
+// Kick driver: OAuth 2.1 (authorization code + PKCE, paste-back), stream title + stream key + viewer
+// count through the official public API (https://docs.kick.com), read-only chat (with moderation and
+// alerts) through Kick's public Pusher websocket (unofficial, see chat.ts). Only the title is ever
+// changed — never the category. Kick has no test mode: it is skipped while session test mode is on.
 
 import crypto from 'node:crypto';
 import type { ConnectPoll, ConnectStart } from '../../../../shared/api.js';
@@ -15,6 +16,7 @@ import {
   KICK_AUTHORIZE_URL,
   KICK_SCOPES,
   KICK_TOKEN_URL,
+  liveViewerCount,
   mapKickError,
   patchTitle,
   requireApp,
@@ -26,6 +28,7 @@ import { kickChat } from './chat-source.js';
 import { fetchChatroomDirect } from './chatroom.js';
 import { buildPushUrl, chooseIngestServer, KICK_DEFAULT_INGEST, normalizeIngestServer, usableStreamKey } from './ingest.js';
 import { mergeOptions, readOptions, sameSlug, updateOptions } from './options.js';
+import { pollViewers } from './viewers.js';
 
 /**
  * Kick doesn't document a stream_title maximum (docs.kick.com/apis/channels: minLength 1 only); we use
@@ -34,6 +37,7 @@ import { mergeOptions, readOptions, sameSlug, updateOptions } from './options.js
 export const KICK_TITLE_MAX = 140;
 const PKCE_TTL_MS = 30 * 60 * 1000;
 const LIVE_TITLE_TIMEOUT_MS = 20_000;
+const VIEWERS_TIMEOUT_MS = 20_000;
 
 const MISSING_KEY = 'Paste your Kick stream key in this destination (Kick dashboard → Settings → Stream URL & Key)';
 const MISSING_API_KEY =
@@ -88,6 +92,7 @@ export const kickInfo: PlatformInfo = {
   experimental: false,
   notes:
     "Title and stream key use Kick's official API; the category is never changed. Chat is read from Kick's public chat websocket (unofficial), so it can break when Kick changes it.",
+  testMode: { supported: false, description: 'Kick has no test mode — skipped while testing' },
 };
 
 // ---------------------------------------------------------------------------
@@ -319,6 +324,8 @@ async function applyTitle(account: Account, channel: KickChannel, title: string,
 }
 
 async function prepare(dest: Destination, account: Account | null, title: string, ctx: DriverContext): Promise<PreparedLive> {
+  // The orchestrator skips Kick in test mode; never go out publicly if it ever asks anyway.
+  if (ctx.testMode === true) throw new DriverError(kickInfo.testMode!.description, 'not-eligible');
   const manualKey = await readManualKey(ctx);
   const channel = account ? await channelOrFallback(account, ctx, manualKey !== null) : null;
 
@@ -343,8 +350,20 @@ async function prepare(dest: Destination, account: Account | null, title: string
   if (account) {
     prepared.setTitle = (t) => updateTitle(ctx, account, t, AbortSignal.timeout(LIVE_TITLE_TIMEOUT_MS));
     if (slug) prepared.chat = (signal) => kickChat({ ctx, account, slug, signal });
+    // Viewers only (GET /public/v1/channels every 30 s); never 'ended': Kick lives aren't recovered.
+    prepared.health = (signal) =>
+      pollViewers((s) => readViewers(ctx, account, s), signal, {
+        log: ctx.log,
+        logContext: { destinationId: dest.id, platform: 'kick' },
+      });
   }
   return prepared;
+}
+
+async function readViewers(ctx: DriverContext, account: Account, signal: AbortSignal): Promise<number | null> {
+  const bounded = AbortSignal.any([signal, AbortSignal.timeout(VIEWERS_TIMEOUT_MS)]);
+  const channel = await withKickToken(ctx, account.id, bounded, 'reading the viewer count', (token) => getMyChannel(token, bounded));
+  return liveViewerCount(channel);
 }
 
 export const kickDriver: PlatformDriver = {

@@ -10,7 +10,7 @@
 // - Validate: https://dev.twitch.tv/docs/authentication/validate-tokens/ — "Authorization: OAuth <token>";
 //   apps must validate tokens at start-up and hourly afterwards.
 // - Helix: https://dev.twitch.tv/docs/api/reference/#modify-channel-information (title ≤ 140 chars, not empty),
-//   #get-stream-key, #get-users.
+//   #get-stream-key, #get-users, #get-streams (viewer_count; empty `data` while not live).
 
 import type { Logger } from 'pino';
 import type { ScopedSecrets } from '../../services.js';
@@ -236,6 +236,23 @@ export class TwitchClient {
         signal: this.opts.signal,
       }),
     );
+  }
+
+  /**
+   * Current viewers of the channel's live stream (GET /helix/streams?user_id=). Null while the
+   * stream isn't listed yet (Twitch takes a minute or two after going live) or isn't live.
+   */
+  async viewerCount(broadcasterId: string, signal?: AbortSignal): Promise<number | null> {
+    const json = await this.authed((token) =>
+      fetchJson<{ data?: { type?: string; viewer_count?: unknown }[] }>(
+        `${HELIX}/streams?user_id=${encodeURIComponent(broadcasterId)}`,
+        { headers: this.helixHeaders(token), signal: signal ?? this.opts.signal },
+      ),
+    );
+    const stream = json?.data?.[0];
+    if (!stream || (stream.type && stream.type !== 'live')) return null;
+    const n = stream.viewer_count;
+    return typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? n : null;
   }
 
   async streamKey(broadcasterId: string): Promise<string> {

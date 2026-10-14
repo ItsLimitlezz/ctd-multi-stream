@@ -9,6 +9,7 @@ import { setQuery, useQuery } from '../router';
 import { useApi, type ApiResource } from '../state/hooks';
 import type { SettingsResponse } from '@shared/api';
 import { AboutTab } from './settings/AboutTab';
+import { ApiTab } from './settings/ApiTab';
 import { AuditTab } from './settings/AuditTab';
 import { DeveloperAppsTab } from './settings/DeveloperAppsTab';
 import { GeneralTab } from './settings/GeneralTab';
@@ -37,7 +38,7 @@ export default function SettingsPage() {
       <div className="page-header">
         <div>
           <h1>Settings</h1>
-          <p>Server, security and OBS configuration.</p>
+          <p>Server, security, OBS and API configuration.</p>
         </div>
       </div>
       <Tabs
@@ -68,6 +69,8 @@ function TabContent({ tab, settings }: { tab: SettingsTabId; settings: ApiResour
       return <UsersTab />;
     case 'overlay':
       return <OverlayTab />;
+    case 'api':
+      return <ApiTab />;
     case 'audit':
       return <AuditTab />;
     case 'about':

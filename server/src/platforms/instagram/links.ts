@@ -2,7 +2,7 @@
 //
 // Best effort everywhere: a link that can't be added never fails the live. The rotation position is
 // kept per destination in destinationSecrets ('linkRotation' → { index }) and advances only when a
-// link was actually added.
+// link was actually added (never for a test-mode live).
 
 import type { Logger } from 'pino';
 import type { Locator, Page } from 'playwright';
@@ -275,6 +275,7 @@ export class LiveLink {
   /**
    * Pick the link for a new live: `rotate` uses links[index % n] (index from destinationSecrets,
    * or `memory` when there is no secret store), `first` links[0], `off`/empty list none.
+   * `advance: false` (test mode): the link is still added, but the rotation position is left as is.
    */
   static async choose(
     links: LinkItem[],
@@ -283,6 +284,7 @@ export class LiveLink {
     memory: Map<string, number>,
     destinationId: string,
     log: Logger,
+    opts: { advance?: boolean } = {},
   ): Promise<LiveLink> {
     let stored: unknown = memory.get(destinationId);
     if (mode === 'rotate' && links.length > 0 && secrets) {
@@ -293,7 +295,8 @@ export class LiveLink {
       }
     }
     const pick = pickLink(links, mode, stored);
-    return new LiveLink(pick?.link ?? null, pick?.nextIndex ?? null, secrets, memory, destinationId, log);
+    const nextIndex = opts.advance === false ? null : (pick?.nextIndex ?? null);
+    return new LiveLink(pick?.link ?? null, nextIndex, secrets, memory, destinationId, log);
   }
 
   get pending(): boolean {

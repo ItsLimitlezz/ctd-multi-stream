@@ -95,6 +95,11 @@ describe('xDriver info', () => {
     expect(byKey.sourceName).toMatchObject({ type: 'text', required: false });
   });
 
+  it('has no test mode (skipped while testing)', () => {
+    expect(xDriver.info.testMode).toEqual({ supported: false, description: 'X has no test mode — skipped while testing' });
+    expect(xDriver.supportsTestMode).toBeUndefined();
+  });
+
   it('starts a browser login at the X login flow', async () => {
     const { ctx } = setup();
     const start = await xDriver.startConnect!(xAccount(), ctx);
@@ -177,6 +182,22 @@ describe('xDriver destinations', () => {
     expect((err as DriverError).code).toBe('needs-login');
     expect((err as DriverError).message).toMatch(/Go live automatically/);
     expect(updates).toEqual([{ status: 'needs-login', statusMessage: SESSION_EXPIRED }]);
+  });
+
+  it('never pushes or goes live when prepared in test mode', async () => {
+    const { ctx, updates, saves } = setup({ cookies: [cookie('auth_token', 'secret')] });
+    ctx.testMode = true;
+    for (const [dest, account] of [
+      [xDestination({ accountId: null }), null],
+      [xDestination(), xAccount()],
+    ] as const) {
+      const err = await xDriver.prepare(dest, account, 'Title', ctx).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DriverError);
+      expect((err as DriverError).code).toBe('not-eligible');
+      expect((err as DriverError).message).toBe('X has no test mode — skipped while testing');
+    }
+    expect(updates).toEqual([]);
+    expect(saves).toEqual([]);
   });
 
   it('rejects a missing key as misconfigured', async () => {

@@ -28,7 +28,7 @@ import {
   type FlowTimeouts,
   type StreamDetails,
 } from './flow.js';
-import { DEFAULT_HEALTH_TIMINGS, HealthMonitor, watchHealth, type HealthTimings, type LiveMarks } from './health.js';
+import { DEFAULT_HEALTH_TIMINGS, HealthMonitor, ViewerReporter, watchHealth, type HealthTimings, type LiveMarks } from './health.js';
 import { closeLinkForm, LiveLink } from './links.js';
 import { IG_ORIGIN, LOGIN_PATH, sel } from './selectors.js';
 import {
@@ -43,7 +43,7 @@ import {
   MIN_GO_LIVE_TIMEOUT_SEC,
   MIN_TAKEDOWN_CONFIRM_SEC,
   optionProblems,
-  readOptions,
+  readLiveOptions,
   shortError,
   type InstagramOptions,
 } from './util.js';
@@ -131,8 +131,9 @@ export const instagramInfo: PlatformInfo = {
     'The account must be allowed to go live from instagram.com on a computer: a public professional account with at least ' +
     '1,000 followers, in good standing. Every live gets a new stream key. The title is set when the live is created and ' +
     "can't be changed during it. Use one Instagram destination per account. When Instagram ends a live (e.g. a copyright " +
-    'takedown), a new one is started automatically and gets the next link; viewers have to rejoin it. Browser automation ' +
-    'may break when Instagram changes its site.',
+    'takedown), a new one is started automatically and gets the next link; viewers have to rejoin it. Test mode always ' +
+    "uses the Practice audience (and doesn't move the link rotation). Browser automation may break when Instagram changes its site.",
+  testMode: { supported: true, description: 'Practice audience — only you can see it' },
 };
 
 const NOT_LOGGED_IN =
@@ -319,7 +320,8 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
           marks,
           extraWarning: () => link.warning,
         });
-        return watchHealth(page, signal, { cfg, monitor, pollMs: healthTimings.pollMs, now, isCurrent, log });
+        const viewers = new ViewerReporter(healthTimings.viewersReportMs, healthTimings.viewersHoldMs);
+        return watchHealth(page, signal, { cfg, monitor, viewers, pollMs: healthTimings.pollMs, now, isCurrent, log });
       },
     };
   }
@@ -429,12 +431,17 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
       };
 
       const log = ctx.log.child({ platform: 'instagram', destinationId: dest.id });
-      const options = readOptions(dest);
+      // Test mode: Practice audience whatever the destination says (also on Stream Guard recoveries,
+      // which prepare again with the same context); a test live doesn't move the link rotation.
+      const testMode = ctx.testMode === true;
+      const options = readLiveOptions(dest, testMode);
       const { signal } = ctx;
       let page: Page | null = null;
       let setupOpened = false;
       try {
-        const link = await LiveLink.choose(options.links, options.linkMode, ctx.destinationSecrets, rotationMemory, dest.id, log);
+        const link = await LiveLink.choose(options.links, options.linkMode, ctx.destinationSecrets, rotationMemory, dest.id, log, {
+          advance: !testMode,
+        });
         page = await ctx.browser.page(account.id, home);
         const p = page;
         await requireLoggedIn(p, () => isLoggedIn(p, cfg, signal), 'Instagram');
@@ -454,7 +461,7 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
           log.warn('Instagram returned the same stream key as the previous live of this destination');
         }
         lastKeys.set(dest.id, hash);
-        log.info({ audience: options.audience }, 'Instagram live created; stream URL and key read');
+        log.info({ audience: options.audience, testMode }, 'Instagram live created; stream URL and key read');
         await link.attempt(p, 'producer', signal, { findMs: 1_000, stepMs: linkStep, final: false });
         await saveSession(ctx, account.id, log);
         return prepared({ page: p, account, details, options, username, link, isCurrent, release, ctx, log });

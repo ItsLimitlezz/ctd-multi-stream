@@ -69,12 +69,23 @@ describe('comment parsing', () => {
     expect(parseGraphTime('nope')).toBeUndefined();
     expect(commentToChat({ id: 'c1', message: ' hi ', created_time: '2026-10-11T18:04:05+0000', from: { id: '9', name: 'Ana' } })).toEqual({
       id: 'c1',
-      author: { name: 'Ana' },
+      platformMessageId: 'c1',
+      author: { name: 'Ana', id: '9' },
       text: 'hi',
       ts: '2026-10-11T18:04:05.000Z',
     });
-    expect(commentToChat({ id: 'c2', message: 'anon' })).toEqual({ id: 'c2', author: { name: 'Facebook user' }, text: 'anon' });
+    expect(commentToChat({ id: 'c2', message: 'anon' })).toEqual({ id: 'c2', platformMessageId: 'c2', author: { name: 'Facebook user' }, text: 'anon' });
     expect(commentToChat({ id: 'c3', message: '   ', from: { name: 'X' } })).toBeNull();
+  });
+
+  it('fills the author id only when Meta shares the commenter', () => {
+    expect(commentToChat({ id: 'c4', message: 'x', from: { id: ' 123 ', name: 'Bo' } })?.author).toEqual({ name: 'Bo', id: '123' });
+    expect(commentToChat({ id: 'c5', message: 'x', from: { id: 456, name: 'Cy' } })?.author).toEqual({ name: 'Cy', id: '456' });
+    expect(commentToChat({ id: 'c6', message: 'x', from: { name: 'Di' } })?.author).toEqual({ name: 'Di' });
+    expect(commentToChat({ id: 'c7', message: 'x', from: { id: '', name: 'Ed' } })?.author).toEqual({ name: 'Ed' });
+    expect(commentToChat({ id: 'c8', message: 'x', from: null })?.author).toEqual({ name: 'Facebook user' });
+    // No comment id: no platformMessageId (the hub derives a stable id).
+    expect(commentToChat({ message: 'x' })).toEqual({ author: { name: 'Facebook user' }, text: 'x' });
   });
 });
 
@@ -140,9 +151,9 @@ describe('liveComments', () => {
     const ac = new AbortController();
     const msgs = await collect(liveComments(options(), ac.signal), 10);
     expect(msgs).toEqual([
-      { id: 'c1', author: { name: 'Ana' }, text: 'Hello 👋', ts: '2026-10-11T18:04:05.000Z' },
-      { id: 'c2', author: { name: 'Facebook user' }, text: 'line two' },
-      { id: 'c3', author: { name: 'Facebook user' }, text: 'no from' },
+      { id: 'c1', platformMessageId: 'c1', author: { name: 'Ana', id: '1' }, text: 'Hello 👋', ts: '2026-10-11T18:04:05.000Z' },
+      { id: 'c2', platformMessageId: 'c2', author: { name: 'Facebook user' }, text: 'line two' },
+      { id: 'c3', platformMessageId: 'c3', author: { name: 'Facebook user' }, text: 'no from' },
     ]);
     expect(calls).toHaveLength(1);
     const url = calls[0]!.url;

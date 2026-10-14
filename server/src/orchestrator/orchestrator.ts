@@ -4,6 +4,8 @@
 // Session-level operations (start/stop/destination edits) are serialized on one queue; each
 // runner serializes its own steps. Runner teardown (push stop + end()) happens outside the
 // session queue but is chained per destination, so a restarted runner never races the old one.
+// Test mode ('session.testMode', see test-mode.ts) is fixed for a session: it can only change
+// while offline, and each runner skips (or prepares privately) its destination accordingly.
 
 import { createHash, randomUUID } from 'node:crypto';
 import type { Logger } from 'pino';
@@ -28,6 +30,7 @@ import {
   type RunnerHost,
   type StatePatch,
 } from './destination-runner.js';
+import { TEST_MODE_CHANNEL_TITLE, TEST_MODE_SETTING, testModeLockedError } from './test-mode.js';
 
 export { DEFAULT_TIMINGS, type OrchestratorTimings } from './destination-runner.js';
 
@@ -73,7 +76,7 @@ function effectiveOption(field: FieldSpec, raw: unknown): unknown {
   }
 }
 
-const RESET: StatePatch = { message: null, stats: null, watchUrl: null, retries: 0 };
+const RESET: StatePatch = { message: null, stats: null, watchUrl: null, retries: 0, viewers: null };
 /** Per-session counters: cleared when a session starts (kept after it stops, for the record). */
 const SESSION_RESET: StatePatch = { recoveries: 0, lastRecovery: null };
 
@@ -109,6 +112,8 @@ class SessionOrchestrator implements Orchestrator {
   private startedAt: string | null = null;
   private title = '';
   private autoGoLive = true;
+  /** Session test mode ('session.testMode'); only changes while offline, so it is fixed per session. */
+  private testMode = false;
 
   private readonly feeds = new Map<Feed, FeedState>();
   private readonly states = new Map<string, DestinationState>();
@@ -135,6 +140,7 @@ class SessionOrchestrator implements Orchestrator {
       timings,
       log: this.log,
       title: () => this.title,
+      testMode: () => this.testMode,
       feedOnline: (feed) => this.feeds.get(feed)?.online === true,
       graceMs: () => this.graceSec() * 1000,
       endTimeoutMs: () => (this.shuttingDown ? timings.shutdownEndTimeoutMs : timings.endTimeoutMs),
@@ -176,6 +182,7 @@ class SessionOrchestrator implements Orchestrator {
       startedAt: this.startedAt,
       title: this.title,
       autoGoLive: this.autoGoLive,
+      testMode: this.testMode,
       feeds: FEEDS.map((f) => this.feeds.get(f) ?? offlineFeed(f)),
       destinations,
     };
@@ -188,7 +195,7 @@ class SessionOrchestrator implements Orchestrator {
       this.sessionId = randomUUID();
       this.startedAt = nowIso();
       this.status = 'starting';
-      this.log.info({ sessionId: this.sessionId, trigger }, 'session starting');
+      this.log.info({ sessionId: this.sessionId, trigger, testMode: this.testMode }, 'session starting');
       this.emitSession();
 
       for (const dest of this.reconcile()) {
@@ -268,6 +275,22 @@ class SessionOrchestrator implements Orchestrator {
     this.autoGoLive = value;
     this.emitSession();
     if (value) this.maybeAutoStart();
+  }
+
+  /**
+   * Test mode applies to a whole session, so it only changes while none runs ('starting',
+   * 'live' and 'stopping' → 409 session_live). start() and stop() change the status synchronously
+   * inside their locked task, so this check can't interleave with a session starting.
+   */
+  setTestMode(value: boolean): void {
+    this.ensureLoaded();
+    if (this.status !== 'offline') throw testModeLockedError();
+    const next = value === true;
+    this.services.repos.settings.set(TEST_MODE_SETTING, next);
+    if (next === this.testMode) return;
+    this.testMode = next;
+    this.log.info({ testMode: next }, 'test mode changed');
+    this.emitSession();
   }
 
   // The three methods below do their bookkeeping under the session lock but wait for the runner
@@ -490,6 +513,9 @@ class SessionOrchestrator implements Orchestrator {
     }
     const setOffline = driver.setTitleOffline?.bind(driver);
     if (!setOffline) return skipped(dest.id, 'Applied when the stream goes live');
+    // An offline title is the channel's own (Twitch, Kick): public even while the stream is a
+    // private test, so test mode never changes it (supported platform or skipped one alike).
+    if (this.testMode) return skipped(dest.id, TEST_MODE_CHANNEL_TITLE);
     try {
       await awaitBounded(
         async (signal) => {
@@ -522,6 +548,7 @@ class SessionOrchestrator implements Orchestrator {
     const title = settings.get<unknown>('session.title', '');
     this.title = typeof title === 'string' ? title : '';
     this.autoGoLive = settings.get<unknown>('session.autoGoLive', true) !== false;
+    this.testMode = settings.get<unknown>(TEST_MODE_SETTING, false) === true;
     for (const f of this.mediaFeeds()) this.feeds.set(f.feed, f);
   }
 
@@ -581,7 +608,8 @@ class SessionOrchestrator implements Orchestrator {
       next.watchUrl === cur.watchUrl &&
       next.retries === cur.retries &&
       next.recoveries === cur.recoveries &&
-      next.lastRecovery === cur.lastRecovery
+      next.lastRecovery === cur.lastRecovery &&
+      (next.viewers ?? null) === (cur.viewers ?? null)
     ) {
       return;
     }
@@ -605,6 +633,7 @@ function blankState(id: string, phase: DestinationPhase): DestinationState {
     since: nowIso(),
     recoveries: 0,
     lastRecovery: null,
+    viewers: null,
   };
 }
 

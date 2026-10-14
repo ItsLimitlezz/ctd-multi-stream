@@ -2,6 +2,7 @@
 
 import type {
   ApiError,
+  ApiTokensResponse,
   AppSettings,
   AuditResponse,
   ChangePasswordRequest,
@@ -9,6 +10,8 @@ import type {
   ConnectPoll,
   ConnectStart,
   CreateAccountRequest,
+  CreateApiTokenRequest,
+  CreateApiTokenResponse,
   CreateDestinationRequest,
   CreateUserRequest,
   IngestInfo,
@@ -166,6 +169,8 @@ export const api = {
   stopSession: () => post<SessionState>('/api/session/stop'),
   setTitle: (title: string) => put<TitleResponse>('/api/session/title', { title }),
   setAutoGoLive: (autoGoLive: boolean) => put<SessionState>('/api/session/auto', { autoGoLive }),
+  /** 409 code 'session_live' while a session runs (test mode only changes while offline). */
+  setTestMode: (testMode: boolean) => put<SessionState>('/api/session/test-mode', { testMode }),
 
   // ingest
   ingest: () => get<IngestInfo>('/api/ingest'),
@@ -181,6 +186,12 @@ export const api = {
   putSettings: (body: Partial<AppSettings>) => put<SettingsResponse>('/api/settings', body),
   audit: (limit = 100, before?: number) =>
     get<AuditResponse>(`/api/audit?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`),
+
+  // external API tokens (Settings → API)
+  apiTokens: () => get<ApiTokensResponse>('/api/tokens'),
+  /** The response carries the secret: show it once, never store or log it. */
+  createApiToken: (body: CreateApiTokenRequest) => post<CreateApiTokenResponse>('/api/tokens', body),
+  deleteApiToken: (id: string) => del<object>(`/api/tokens/${encodeURIComponent(id)}`),
 
   // browser login viewer
   browserOpen: (accountId: string, url?: string) =>

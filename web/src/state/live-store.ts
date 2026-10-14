@@ -2,9 +2,19 @@
 // WebSocket client. React bindings live in live.tsx.
 
 import type { WsServerMessage } from '@shared/api';
-import type { Account, ChatMessage, SessionState } from '@shared/types';
+import type { Account, ChatMessage, ChatModeration, SessionState } from '@shared/types';
 
 export const CHAT_LIMIT = 500;
+/**
+ * The most messages a 'hello' carries (server: `chat.recent(200)` in server/src/http/routes/ws.ts). A
+ * shorter snapshot is the server's whole chat buffer. Raising it on the server is safe; lowering it below
+ * this would make the client treat a partial snapshot as complete (and drop older messages).
+ */
+export const HELLO_CHAT_LIMIT = 200;
+/** A full snapshot's window starts no later than the newest ts among its first this-many messages. */
+export const HELLO_WINDOW_EDGE = 10;
+/** How many moderated (removed) message ids are remembered so a later history merge can't re-add them. */
+export const REMOVED_CHAT_LIMIT = 1000;
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 15_000;
 
@@ -16,6 +26,11 @@ export interface LiveState {
   session: SessionState | null;
   /** Combined chat, oldest first, capped at CHAT_LIMIT. */
   chat: ChatMessage[];
+  /**
+   * Ids of messages removed by chat moderation (most recent REMOVED_CHAT_LIMIT). A history snapshot
+   * taken before the removal (REST or a reconnect) must not bring them back.
+   */
+  removedChat: ReadonlySet<string>;
   /** Latest account updates pushed by the server, by id. */
   accounts: Readonly<Record<string, Account>>;
   /** Bumped on every 'account' message and on reconnect. */
@@ -29,6 +44,7 @@ export const initialLiveState: LiveState = {
   connections: 0,
   session: null,
   chat: [],
+  removedChat: new Set(),
   accounts: {},
   accountsVersion: 0,
   destinationsVersion: 0,
@@ -63,6 +79,10 @@ export function parseServerMessage(raw: unknown): WsServerMessage | null {
       return isObject(d.state) ? (d as WsServerMessage) : null;
     case 'chat':
       return isObject(d.message) ? (d as WsServerMessage) : null;
+    case 'chat-moderation':
+      return isObject(d.moderation) && typeof d.moderation.kind === 'string' && typeof d.moderation.destinationId === 'string'
+        ? (d as WsServerMessage)
+        : null;
     case 'account':
       return isObject(d.account) ? (d as WsServerMessage) : null;
     case 'destinations-changed':
@@ -74,18 +94,28 @@ export function parseServerMessage(raw: unknown): WsServerMessage | null {
   }
 }
 
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 function tsOf(m: ChatMessage): number {
   const t = Date.parse(m.ts);
   return Number.isNaN(t) ? 0 : t;
 }
 
-/** Append new messages (deduplicated by id), keep chronological order, cap the length. */
-export function mergeChat(existing: ChatMessage[], incoming: readonly ChatMessage[], limit = CHAT_LIMIT): ChatMessage[] {
+/**
+ * Append new messages (deduplicated by id), keep chronological order, cap the length. Ids in
+ * `removed` (moderated messages) are never added back.
+ */
+export function mergeChat(
+  existing: ChatMessage[],
+  incoming: readonly ChatMessage[],
+  limit = CHAT_LIMIT,
+  removed: ReadonlySet<string> = EMPTY_SET,
+): ChatMessage[] {
   if (incoming.length === 0) return existing;
   const seen = new Set(existing.map((m) => m.id));
   const added: ChatMessage[] = [];
   for (const m of incoming) {
-    if (seen.has(m.id)) continue;
+    if (seen.has(m.id) || removed.has(m.id)) continue;
     seen.add(m.id);
     added.push(m);
   }
@@ -101,6 +131,129 @@ export function mergeChat(existing: ChatMessage[], incoming: readonly ChatMessag
   }
   if (!ordered) merged.sort((a, b) => tsOf(a) - tsOf(b));
   return merged.length > limit ? merged.slice(merged.length - limit) : merged;
+}
+
+/** The message's time, or null when it has none we can read. */
+function validTs(m: ChatMessage): number | null {
+  const t = Date.parse(m.ts);
+  return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * Apply a server chat snapshot (a 'hello'). The server's buffer is the source of truth: chat moderation
+ * that happened while the socket was down (sleep, network drop, server restart) shows up only as
+ * messages missing from it, so those are dropped here before the snapshot is merged.
+ *
+ * - A snapshot shorter than HELLO_CHAT_LIMIT is the server's whole buffer: every held message missing
+ *   from it is gone on the server (moderated, or the server restarted) and is dropped.
+ * - A full snapshot is only the newest messages in server arrival order, and older held messages may
+ *   simply have fallen out of it. `ts` is the platform's time, not arrival order (platforms are polled
+ *   with different delays), so only held messages that are clearly inside the window are dropped: newer
+ *   than the oldest snapshot message of the same destination (one platform's messages arrive in time
+ *   order), or, for a destination with nothing in the snapshot, newer than the window's first messages.
+ *   A moderation near the start of the window can be missed; a message that was not moderated is not
+ *   dropped unless a platform reorders its own messages.
+ *
+ * Dropped ids are not added to the removed-id memory: they may not have been moderated, and after a
+ * server restart a platform can deliver the same messages again.
+ */
+export function reconcileChat(
+  existing: ChatMessage[],
+  snapshot: readonly ChatMessage[],
+  limit = CHAT_LIMIT,
+  removed: ReadonlySet<string> = EMPTY_SET,
+): ChatMessage[] {
+  const inSnapshot = new Set(snapshot.map((m) => m.id));
+  let keep: (m: ChatMessage) => boolean;
+  if (snapshot.length < HELLO_CHAT_LIMIT) {
+    keep = (m) => inSnapshot.has(m.id);
+  } else {
+    // Per destination: the time of its first message in the snapshot (snapshot order = arrival order).
+    const marks = new Map<string, number>();
+    let start: number | null = null;
+    for (let i = 0; i < snapshot.length; i++) {
+      const m = snapshot[i] as ChatMessage;
+      const t = validTs(m);
+      if (t === null) continue;
+      if (!marks.has(m.destinationId)) marks.set(m.destinationId, t);
+      if (i < HELLO_WINDOW_EDGE) start = start === null ? t : Math.max(start, t);
+    }
+    const windowStart = start;
+    keep = (m) => {
+      if (inSnapshot.has(m.id)) return true;
+      const t = validTs(m);
+      const mark = marks.get(m.destinationId) ?? windowStart;
+      // Unknown times: keep (never drop a message we can't place).
+      return t === null || mark === null || t <= mark;
+    };
+  }
+  const kept = existing.filter(keep);
+  return mergeChat(kept.length === existing.length ? existing : kept, snapshot, limit, removed);
+}
+
+/**
+ * Does `msg` belong to the user a 'user-cleared' moderation names? Same rule as the server's chat hub:
+ * ids win when both sides have one; otherwise the display name or login, case-insensitively.
+ */
+export function messageFromUser(msg: Pick<ChatMessage, 'author'>, userId: string | null, userName: string | null): boolean {
+  const author = msg.author ?? {};
+  if (userId && author.id) return author.id === userId;
+  if (!userName) return false;
+  const name = userName.toLowerCase();
+  const lower = (v: unknown) => (typeof v === 'string' ? v.toLowerCase() : null);
+  return lower(author.name) === name || lower(author.login) === name;
+}
+
+const str = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
+
+/** Whether a moderation event removes this message. Always scoped to the moderated destination. */
+export function moderationRemoves(mod: ChatModeration, m: ChatMessage): boolean {
+  if (m.destinationId !== mod.destinationId) return false;
+  switch (mod.kind) {
+    case 'message-deleted': {
+      const messageId = str(mod.messageId);
+      const platformMessageId = str(mod.platformMessageId);
+      if (messageId !== null && m.id === messageId) return true;
+      if (platformMessageId === null) return false;
+      // Hub ids are "<platform>:<platform message id>" when the driver gave no explicit id.
+      return m.platformMessageId === platformMessageId || m.id === `${mod.platform}:${platformMessageId}`;
+    }
+    case 'user-cleared':
+      return m.platform === mod.platform && messageFromUser(m, str(mod.userId), str(mod.userName));
+    case 'cleared':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Remove what a moderation event removed: one message, one user's messages, or a destination's
+ * whole chat. Returns the same array when nothing matched.
+ */
+export function applyModeration(chat: ChatMessage[], mod: ChatModeration): { chat: ChatMessage[]; removedIds: string[] } {
+  const removedIds: string[] = [];
+  const kept = chat.filter((m) => {
+    if (!moderationRemoves(mod, m)) return true;
+    removedIds.push(m.id);
+    return false;
+  });
+  return removedIds.length ? { chat: kept, removedIds } : { chat, removedIds };
+}
+
+/** Remember removed ids (bounded, oldest forgotten first). */
+export function rememberRemoved(removed: ReadonlySet<string>, ids: readonly string[], limit = REMOVED_CHAT_LIMIT): ReadonlySet<string> {
+  if (ids.length === 0) return removed;
+  const next = new Set(removed);
+  for (const id of ids) {
+    next.delete(id);
+    next.add(id);
+  }
+  for (const id of next) {
+    if (next.size <= limit) break;
+    next.delete(id);
+  }
+  return next;
 }
 
 function upsert<T>(list: readonly T[], item: T, same: (x: T) => boolean): T[] {
@@ -120,7 +273,8 @@ export function reduceLive(state: LiveState, msg: WsServerMessage): LiveState {
         ...state,
         connections: state.connections + 1,
         session: msg.session,
-        chat: mergeChat(state.chat, msg.chat),
+        // Reconciled, not just merged: messages moderated while we were away are missing from it.
+        chat: reconcileChat(state.chat, msg.chat, CHAT_LIMIT, state.removedChat),
         accountsVersion: state.accountsVersion + bump,
         destinationsVersion: state.destinationsVersion + bump,
       };
@@ -147,8 +301,21 @@ export function reduceLive(state: LiveState, msg: WsServerMessage): LiveState {
         },
       };
     case 'chat': {
-      const chat = mergeChat(state.chat, [msg.message]);
+      const chat = mergeChat(state.chat, [msg.message], CHAT_LIMIT, state.removedChat);
       return chat === state.chat ? state : { ...state, chat };
+    }
+    case 'chat-moderation': {
+      const { chat, removedIds } = applyModeration(state.chat, msg.moderation);
+      // A deleted message we never received (or already dropped) is remembered too, by both id forms.
+      const ids = removedIds.slice();
+      if (msg.moderation.kind === 'message-deleted') {
+        const m = msg.moderation;
+        if (typeof m.messageId === 'string' && m.messageId) ids.push(m.messageId);
+        if (typeof m.platformMessageId === 'string' && m.platformMessageId) ids.push(`${m.platform}:${m.platformMessageId}`);
+      }
+      const removedChat = rememberRemoved(state.removedChat, ids);
+      if (chat === state.chat && removedChat === state.removedChat) return state;
+      return { ...state, chat, removedChat };
     }
     case 'account':
       return {
@@ -218,7 +385,7 @@ export class LiveStore {
   }
 
   mergeChat(messages: readonly ChatMessage[]): void {
-    const chat = mergeChat(this.state.chat, messages);
+    const chat = mergeChat(this.state.chat, messages, CHAT_LIMIT, this.state.removedChat);
     if (chat !== this.state.chat) this.set({ ...this.state, chat });
   }
 

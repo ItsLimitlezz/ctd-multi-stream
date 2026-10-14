@@ -155,6 +155,20 @@ export class GraphClient {
     }
   }
 
+  /** DELETE a node (token as query params, like GET; never logged). */
+  async delete<T>(path: string, token: string | null, signal?: AbortSignal): Promise<T> {
+    try {
+      return await fetchJson<T>(this.url(path, this.authParams(token)), {
+        method: 'DELETE',
+        headers: { accept: 'application/json' },
+        signal,
+        timeoutMs: this.timeoutMs,
+      });
+    } catch (err) {
+      throw toDriverError(err, signal);
+    }
+  }
+
   /** POST form-encoded params (token in the body, not the URL). */
   async post<T>(path: string, token: string | null, form: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
     try {

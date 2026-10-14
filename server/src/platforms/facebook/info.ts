@@ -40,7 +40,7 @@ export const facebookInfo: PlatformInfo = {
         { value: 'public', label: 'Public' },
         { value: 'self', label: 'Only me (test)' },
       ],
-      help: 'Page mode: who can see the live video. "Only me" is for test streams.',
+      help: 'Page mode: who can see the live video. "Only me" is for test streams (the dashboard\'s test mode always uses it).',
     },
     {
       key: 'ingestUrl',
@@ -86,5 +86,11 @@ export const facebookInfo: PlatformInfo = {
   keyPerSession: false,
   experimental: false,
   notes:
-    'Page mode creates a new live video through the Graph API for every stream (title + chat via API). Profile mode is experimental: video goes to your persistent stream key and the title, the "Go live" click and chat are automated in Facebook Live Producer (English UI) on a best-effort basis. Facebook requires accounts to be at least 60 days old and Pages/professional profiles to have at least 100 followers to go live.',
+    'Page mode creates a new live video through the Graph API for every stream (title, chat and viewer count via API). Profile mode is experimental: video goes to your persistent stream key and the title, the "Go live" click and chat are automated in Facebook Live Producer (English UI) on a best-effort basis. Facebook requires accounts to be at least 60 days old and Pages/professional profiles to have at least 100 followers to go live.',
+  testMode: {
+    supported: true,
+    description:
+      'Pages: the live is posted as "Only me" so only you can see it (if Facebook refuses that for the Page, it is created unpublished — a preview nobody sees). ' +
+      'Personal profiles and persistent-key destinations have no test mode and are skipped while testing.',
+  },
 };

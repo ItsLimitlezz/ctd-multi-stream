@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import pino from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WsServerMessage } from '../../../../shared/api.js';
-import type { ChatMessage, SessionState, User } from '../../../../shared/types.js';
+import type { Account, ChatMessage, ChatModeration, SessionState, User } from '../../../../shared/types.js';
 import { EventBus } from '../../events.js';
 import type { AppServices } from '../../services.js';
 import wsRoutes, { WS_MAX_BUFFERED_BYTES, WsHub, type HubSocket } from './ws.js';
@@ -26,6 +26,26 @@ const CHAT: ChatMessage = {
   text: 'hi',
   ts: '2026-01-01T00:00:00.000Z',
   kind: 'message',
+};
+
+const MODERATION: ChatModeration = {
+  kind: 'message-deleted',
+  platform: 'twitch',
+  destinationId: 'd1',
+  ts: '2026-01-01T00:00:01.000Z',
+  messageId: 'twitch:1',
+  platformMessageId: '1',
+};
+
+const ACCOUNT: Account = {
+  id: 'a1',
+  platform: 'twitch',
+  label: 'dprtmnt',
+  status: 'connected',
+  statusMessage: null,
+  options: {},
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
 const USER: User = {
@@ -77,12 +97,29 @@ describe('WsHub', () => {
     bus.emit('feed', { feed: 'landscape', online: true, since: null, video: null, audio: null, bitrateKbps: 5000 });
     bus.emit('destination', { destinationId: 'd1', phase: 'live', message: null, stats: null, watchUrl: null, retries: 0, since: 'x', recoveries: 0, lastRecovery: null });
     bus.emit('chat', CHAT);
+    bus.emit('chat-moderation', MODERATION);
+    bus.emit('account', ACCOUNT);
     bus.emit('destinations-changed');
     bus.emit('notice', { level: 'warn', message: 'careful' });
     bus.emit('push', { id: 'd1', status: 'running', message: null, stats: null, attempt: 0 }); // internal: not forwarded
-    expect(s.sent.map((m) => m.type)).toEqual(['hello', 'session', 'feed', 'destination', 'chat', 'destinations-changed', 'notice']);
+    expect(s.sent.map((m) => m.type)).toEqual([
+      'hello',
+      'session',
+      'feed',
+      'destination',
+      'chat',
+      'chat-moderation',
+      'account',
+      'destinations-changed',
+      'notice',
+    ]);
+    // Moderation goes out unchanged, so the dashboard removes deleted / banned / cleared chat.
+    expect(s.sent[5]).toEqual({ type: 'chat-moderation', moderation: MODERATION });
     expect(s.sent.at(-1)).toEqual({ type: 'notice', level: 'warn', message: 'careful' });
     hub.close();
+    // Closed: no more forwarding.
+    bus.emit('chat-moderation', MODERATION);
+    expect(s.sent.filter((m) => m.type === 'chat-moderation')).toHaveLength(1);
   });
 
   it('terminates clients that miss a pong', () => {

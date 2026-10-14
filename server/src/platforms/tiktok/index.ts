@@ -18,7 +18,15 @@ import {
   type PlatformDriver,
   type PreparedLive,
 } from '../types.js';
-import { createHealthTracker, HEALTH_POLL_MS, VIEWER_GRACE_MS, watchProducerHealth } from './health.js';
+import {
+  createHealthTracker,
+  createViewerReporter,
+  HEALTH_POLL_MS,
+  VIEWER_GRACE_MS,
+  VIEWERS_HOLD_MS,
+  VIEWERS_REPORT_MS,
+  watchProducerHealth,
+} from './health.js';
 import {
   detectState,
   dismissEndedNotices,
@@ -70,6 +78,10 @@ export interface TiktokDriverOptions {
     healthPollMs: number;
     /** Viewer-rule grace after going LIVE. */
     healthGraceMs: number;
+    /** Viewer count reported on every change and at least this often. */
+    viewersReportMs: number;
+    /** An unreadable viewer count shorter than this keeps the last known count. */
+    viewersHoldMs: number;
   };
 }
 
@@ -89,6 +101,8 @@ const DEFAULT_OPTIONS: TiktokDriverOptions = {
     minGoLiveTimeoutSec: MIN_GO_LIVE_TIMEOUT_SEC,
     healthPollMs: HEALTH_POLL_MS,
     healthGraceMs: VIEWER_GRACE_MS,
+    viewersReportMs: VIEWERS_REPORT_MS,
+    viewersHoldMs: VIEWERS_HOLD_MS,
   },
 };
 
@@ -99,6 +113,8 @@ const NOT_ELIGIBLE = "This TikTok account doesn't have LIVE stream key access ye
 const NOT_ELIGIBLE_UNSURE =
   `${NOT_ELIGIBLE}, or TikTok LIVE Producer looks different than expected. ` +
   'Open LIVE Producer in the browser view (Accounts) to check.';
+
+const TEST_MODE_SKIPPED = 'TikTok has no test mode — skipped while testing';
 
 const CONNECT_INSTRUCTIONS = [
   '1. Log in to TikTok in the browser view below, the same way you normally do (including any code or puzzle TikTok asks for).',
@@ -166,6 +182,7 @@ export const TIKTOK_INFO: PlatformInfo = {
     'The app never changes the LIVE topic: if TikTok requires one and none is selected, pick it once yourself in LIVE Producer. ' +
     'When TikTok ends a LIVE (e.g. for copyright or Community Guidelines), the app can start a new one automatically; ' +
     'viewers have to rejoin it.',
+  testMode: { supported: false, description: TEST_MODE_SKIPPED },
 };
 
 /**
@@ -305,6 +322,7 @@ export function createTiktokDriver(overrides: TiktokDriverOverrides = {}): Platf
         pollMs: timing.healthPollMs,
         detectMs: Math.min(timing.detectMs, 15_000),
         tracker,
+        viewers: createViewerReporter(timing.viewersReportMs, timing.viewersHoldMs),
         isCurrent: () => !superseded(accountId, live) && !live.takenDown,
         log: ctx.log,
       },
@@ -422,6 +440,8 @@ export function createTiktokDriver(overrides: TiktokDriverOverrides = {}): Platf
     },
 
     async prepare(dest, account, title, ctx): Promise<PreparedLive> {
+      // The orchestrator skips TikTok in test mode; never create a public LIVE if a destination gets here anyway.
+      if (ctx.testMode) throw new DriverError(TEST_MODE_SKIPPED, 'not-eligible');
       if (!account) throw new DriverError('Choose a connected TikTok account for this destination', 'not-connected');
       const { signal, log } = ctx;
       const accountId = account.id;

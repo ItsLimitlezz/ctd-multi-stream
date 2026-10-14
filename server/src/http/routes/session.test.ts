@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TitleResponse } from '../../../../shared/api.js';
 import type { SessionState, TitleResult, User } from '../../../../shared/types.js';
 import { EventBus } from '../../events.js';
+import { testModeLockedError } from '../../orchestrator/test-mode.js';
 import type { AppServices, Orchestrator } from '../../services.js';
 import sessionRoutes from './session.js';
 
@@ -33,6 +34,10 @@ function fakeOrchestrator() {
     }),
     setAutoGoLive: vi.fn((v: boolean) => {
       state.autoGoLive = v;
+    }),
+    setTestMode: vi.fn((v: boolean) => {
+      if (state.status !== 'offline') throw testModeLockedError();
+      state.testMode = v;
     }),
     destinationChanged: vi.fn(async () => {}),
     destinationRemoved: vi.fn(async () => {}),
@@ -92,6 +97,7 @@ describe('session routes', () => {
       ['POST', '/api/session/stop'],
       ['PUT', '/api/session/title'],
       ['PUT', '/api/session/auto'],
+      ['PUT', '/api/session/test-mode'],
     ] as const) {
       const res = await app.inject({ method, url });
       expect(res.statusCode, `${method} ${url}`).toBe(401);
@@ -148,5 +154,44 @@ describe('session routes', () => {
     expect(res.json<SessionState>().autoGoLive).toBe(false);
     expect(orchestrator.setAutoGoLive).toHaveBeenCalledWith(false);
     expect(audits.at(-1)).toMatchObject({ action: 'session.auto', detail: 'off' });
+  });
+
+  it('PUT /api/session/test-mode validates, toggles, audits and returns the state', async () => {
+    const { app, orchestrator, audits } = await build();
+    for (const payload of [{}, { testMode: 'yes' }, { testMode: 1 }]) {
+      const bad = await app.inject({ method: 'PUT', url: '/api/session/test-mode', headers: auth, payload });
+      expect(bad.statusCode).toBe(400);
+      expect(bad.json<{ code: string }>().code).toBe('invalid');
+    }
+    expect(orchestrator.setTestMode).not.toHaveBeenCalled();
+
+    const on = await app.inject({ method: 'PUT', url: '/api/session/test-mode', headers: auth, payload: { testMode: true } });
+    expect(on.statusCode).toBe(200);
+    expect(on.json<SessionState>().testMode).toBe(true);
+    expect(orchestrator.setTestMode).toHaveBeenCalledWith(true);
+    expect(audits.at(-1)).toMatchObject({ action: 'session.test_mode', detail: 'on', userId: 'u1' });
+
+    const off = await app.inject({ method: 'PUT', url: '/api/session/test-mode', headers: auth, payload: { testMode: false } });
+    expect(off.json<SessionState>().testMode).toBe(false);
+    expect(audits.at(-1)).toMatchObject({ action: 'session.test_mode', detail: 'off' });
+  });
+
+  it('PUT /api/session/test-mode answers 409 session_live while a session runs (no audit)', async () => {
+    const { app, audits } = await build();
+    await app.inject({ method: 'POST', url: '/api/session/start', headers: auth });
+    const before = audits.length;
+    const res = await app.inject({ method: 'PUT', url: '/api/session/test-mode', headers: auth, payload: { testMode: true } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: expect.stringContaining('End the stream first'), code: 'session_live' });
+    expect(audits).toHaveLength(before);
+  });
+
+  it('PUT /api/session/test-mode passes other orchestrator failures to the error handler', async () => {
+    const { app, orchestrator } = await build();
+    orchestrator.setTestMode.mockImplementationOnce(() => {
+      throw new Error('disk I/O error');
+    });
+    const res = await app.inject({ method: 'PUT', url: '/api/session/test-mode', headers: auth, payload: { testMode: true } });
+    expect(res.statusCode).toBe(500);
   });
 });

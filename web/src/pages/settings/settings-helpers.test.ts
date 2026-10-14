@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { AuditEntry, FieldSpec } from '@shared/types';
 import {
+  apiSiteRoot,
   appendAudit,
   appFormValues,
   appSubmitValues,
   auditCursor,
+  dockUrl,
+  dockUrlFor,
   expiryTone,
+  orderedScopes,
+  validateTokenForm,
   fieldForMessage,
   generalChanges,
   generalDraft,
@@ -15,6 +20,11 @@ import {
   parseWholeNumber,
   relativeTime,
   settingsTab,
+  tokenModalDismissible,
+  tokenModalInitial,
+  tokenModalReducer,
+  type TokenModalAction,
+  type TokenModalState,
   validateGeneral,
   validateNewUser,
   validatePassword,
@@ -26,6 +36,7 @@ const settings = { publicBaseUrl: '', ingestHost: '', disconnectGraceSec: 15 };
 describe('settings helpers', () => {
   it('reads the tab from the query', () => {
     expect(settingsTab('apps')).toBe('apps');
+    expect(settingsTab('api')).toBe('api');
     expect(settingsTab('nope')).toBe('general');
     expect(settingsTab(null)).toBe('general');
   });
@@ -116,6 +127,65 @@ describe('settings helpers', () => {
     expect(auditCursor(first)).toBe(8);
     expect(auditCursor([])).toBeUndefined();
     expect(appendAudit(first, [e(8), e(7)]).map((x) => x.id)).toEqual([10, 9, 8, 7]);
+  });
+
+  it('builds the OBS dock URL from the LAN address, else the HTTPS one', () => {
+    const secret = 'ctd_pat_3fK9wQ1v-_abc';
+    expect(dockUrl({ lanBaseUrl: 'http://192.168.1.20:30080/api/v1', baseUrl: 'https://203.0.113.7/api/v1' }, secret)).toEqual({
+      url: 'http://192.168.1.20:30080/dock#token=ctd_pat_3fK9wQ1v-_abc',
+      lan: true,
+    });
+    // The container can't tell its LAN address: fall back to the HTTPS base.
+    expect(dockUrl({ lanBaseUrl: null, baseUrl: 'https://203.0.113.7/api/v1' }, secret)).toEqual({
+      url: 'https://203.0.113.7/dock#token=ctd_pat_3fK9wQ1v-_abc',
+      lan: false,
+    });
+    expect(dockUrl({ lanBaseUrl: 'not a url', baseUrl: 'https://h.example:8443/api/v1/' }, secret)?.url).toBe('https://h.example:8443/dock#token=ctd_pat_3fK9wQ1v-_abc');
+    expect(dockUrl({ lanBaseUrl: null, baseUrl: 'ftp://x/api/v1' }, secret)).toBeNull();
+    // Behind a reverse proxy on a sub-path, the prefix stays.
+    expect(dockUrlFor('https://example.com/ctd/api/v1', secret)).toBe('https://example.com/ctd/dock#token=ctd_pat_3fK9wQ1v-_abc');
+    // Anything unusual in the token is encoded the way the dock decodes it (URLSearchParams).
+    const odd = dockUrlFor('http://nas.local/api/v1', 'a+b&c=d#e') ?? '';
+    expect(new URLSearchParams(new URL(odd).hash.slice(1)).get('token')).toBe('a+b&c=d#e');
+    expect(apiSiteRoot('https://u:p@203.0.113.7/api/v1?x=1#y')).toBe('https://203.0.113.7');
+    expect(apiSiteRoot('http://[fe80::1]:30080/api/v1')).toBe('http://[fe80::1]:30080');
+    expect(apiSiteRoot(null)).toBeNull();
+  });
+
+  it('validates new API tokens like the server', () => {
+    expect(validateTokenForm('CTD Overlay', ['chat:read'])).toEqual({});
+    expect(validateTokenForm('  ', [])).toEqual({ name: expect.any(String), scopes: expect.any(String) });
+    expect(validateTokenForm('x'.repeat(61), ['status:read']).name).toMatch(/60/);
+    expect(validateTokenForm('bad‮name', ['status:read']).name).toMatch(/control/);
+    expect(validateTokenForm('ok', ['nope' as never]).scopes).toBeDefined();
+    expect(orderedScopes(['status:read', 'chat:read', 'admin'])).toEqual(['chat:read', 'status:read']);
+  });
+
+  it('new-token modal: no close while creating, the secret is never lost or shown again later', () => {
+    type S = TokenModalState<string>;
+    const run = (s: S, ...actions: TokenModalAction<string>[]) => actions.reduce<S>(tokenModalReducer, s);
+    const closed = tokenModalInitial<string>();
+    const open = run(closed, { type: 'open' });
+    expect(open).toEqual({ open: true, busy: false, created: null });
+    expect(tokenModalDismissible(open)).toBe(true);
+    expect(run(open, { type: 'close' })).toEqual(closed);
+
+    // Escape / backdrop / × while the request is in flight: stays open, then shows the secret.
+    const creating = run(open, { type: 'busy', busy: true });
+    expect(tokenModalDismissible(creating)).toBe(false);
+    expect(run(creating, { type: 'close' })).toBe(creating);
+    const shown = run(creating, { type: 'close' }, { type: 'created', result: 'secret-1' });
+    expect(shown).toEqual({ open: true, busy: false, created: 'secret-1' });
+    expect(tokenModalDismissible(shown)).toBe(false); // only Done / × close it
+    // A failed request makes it closable again.
+    expect(run(creating, { type: 'busy', busy: false }, { type: 'close' })).toEqual(closed);
+
+    // Done, then New token again: the form, not the old secret.
+    const reopened = run(shown, { type: 'close' }, { type: 'open' });
+    expect(reopened).toEqual({ open: true, busy: false, created: null });
+    // Even if a secret was somehow left behind, opening starts fresh.
+    expect(run({ open: false, busy: false, created: 'stale' }, { type: 'open' }).created).toBeNull();
+    expect(run(closed, { type: 'close' })).toBe(closed);
   });
 
   it('matches server messages to fields by label', () => {

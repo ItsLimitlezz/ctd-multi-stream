@@ -24,9 +24,18 @@
 // count, so a recovery that worked never counts as a failure, however soon the platform ends it.
 // Separately, a create/kill loop guard: once the platform has ended recoveryLoopMax lives within
 // recoveryLoopWindowMs (each new live notifies followers), the runner stops recovering → 'error'.
+//
+// The health watcher runs for every live whose driver has one (with or without a recovery policy):
+// it also reports viewer counts (DestinationState.viewers).
+//
+// Session test mode: a destination whose platform has no private/test setting is skipped (phase
+// 'disabled', never prepared); the others are prepared with ctx.testMode = true. A channel title
+// (Twitch) is public even during a private test, so those destinations are prepared with an empty
+// title and get no live title changes (see test-mode.ts).
 
 import type { Logger } from 'pino';
 import type {
+  Account,
   Destination,
   DestinationPhase,
   DestinationState,
@@ -44,6 +53,7 @@ import {
 } from '../platforms/types.js';
 import type { AppServices } from '../services.js';
 import { awaitBounded, errorMessage, redactText, SerialQueue, sleep, TimeoutError } from './async-utils.js';
+import { hasChannelTitle, supportsTestMode, TEST_MODE_CHANNEL_TITLE, testModeSkipMessage } from './test-mode.js';
 
 export interface OrchestratorTimings {
   prepareTimeoutMs: number;
@@ -107,6 +117,8 @@ export interface RunnerHost {
   log: Logger;
   timings: OrchestratorTimings;
   title(): string;
+  /** Session test mode (constant while a session runs). */
+  testMode(): boolean;
   feedOnline(feed: Feed): boolean;
   graceMs(): number;
   /** Current end() budget (shorter while the server shuts down). */
@@ -159,6 +171,11 @@ function cleanText(value: unknown, max = 200): string {
   return chars.length <= max ? s : `${chars.slice(0, max - 1).join('')}…`;
 }
 
+/** A driver-reported viewer count: a non-negative integer, or null when unknown. */
+export function viewerCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+}
+
 function secs(ms: number): string {
   return `${Math.round(ms / 1000)} s`;
 }
@@ -206,6 +223,8 @@ export class DestinationRunner {
   /** While recovering: the current attempt's deadline (see onAttemptDeadline). */
   private attemptTimer: ReturnType<typeof setTimeout> | null = null;
   private failed = false;
+  /** Skipped by session test mode: the platform has no private/test setting. Nothing ever runs. */
+  private skipped = false;
   private halted = false;
   private finished = false;
   private stopping: Promise<void> | null = null;
@@ -239,9 +258,40 @@ export class DestinationRunner {
         this.fail(errorMessage(err));
         return;
       }
-      this.set({ message: null, stats: null, watchUrl: null, retries: 0 });
+      const skip = this.host.testMode() ? this.testModeSkip(this.driver) : null;
+      if (skip) {
+        this.skipped = true;
+        this.host.log.info({ destinationId: this.id, platform: this.dest.platform }, 'skipped: test mode is on and the platform has none');
+        this.set({ phase: 'disabled', message: skip, stats: null, watchUrl: null, retries: 0, viewers: null });
+        return;
+      }
+      this.set({ message: null, stats: null, watchUrl: null, retries: 0, viewers: null });
       return this.evaluate();
     });
+  }
+
+  /** Test mode leaves this platform's (public) channel title alone. */
+  private keepsChannelTitle(driver: PlatformDriver | null | undefined): boolean {
+    return this.host.testMode() && !!driver && hasChannelTitle(driver);
+  }
+
+  /** The title a prepare uses: the session title, or '' (leave it as it is) for a channel title in test mode. */
+  private prepareTitle(driver: PlatformDriver): string {
+    return this.keepsChannelTitle(driver) ? '' : this.host.title();
+  }
+
+  /** Skip message when test mode is on and this destination can't stream privately, else null. */
+  private testModeSkip(driver: PlatformDriver): string | null {
+    let supported: boolean;
+    try {
+      const account = this.dest.accountId ? this.host.services.repos.accounts.get(this.dest.accountId) : null;
+      supported = supportsTestMode(driver, this.dest, account);
+    } catch (err) {
+      // Can't tell: skip it (test mode must never stream publicly).
+      this.host.log.warn({ destinationId: this.id, error: errorMessage(err) }, 'checking test mode support failed; skipping');
+      supported = false;
+    }
+    return supported ? null : testModeSkipMessage(driver.info.name);
   }
 
   feedsChanged(): void {
@@ -271,6 +321,12 @@ export class DestinationRunner {
 
   /** Live title change. Not prepared yet (or recovering) → skipped (the next prepare uses the new title). */
   async setTitle(title: string): Promise<TitleResult> {
+    if (this.skipped) {
+      return { destinationId: this.id, ok: true, skipped: true, error: 'Skipped in test mode' };
+    }
+    if (this.keepsChannelTitle(this.driver)) {
+      return { destinationId: this.id, ok: true, skipped: true, error: TEST_MODE_CHANNEL_TITLE };
+    }
     const prepared = this.prepared;
     if (this.halted || !prepared || prepared === this.recovery?.killed) {
       return { destinationId: this.id, ok: true, skipped: true, error: 'Not live yet; the new title is used when it goes live' };
@@ -295,7 +351,7 @@ export class DestinationRunner {
   // ---------------------------------------------------------------------------
 
   private async evaluate(): Promise<void> {
-    if (this.halted || this.failed || !this.driver) return;
+    if (this.halted || this.failed || this.skipped || !this.driver) return;
     if (this.requiredOnline()) {
       this.clearGrace();
       if (this.prepared) await this.resume(this.prepared);
@@ -357,7 +413,7 @@ export class DestinationRunner {
 
   private launchPrepare(driver: PlatformDriver): void {
     this.preparing = true;
-    const title = this.host.title();
+    const title = this.prepareTitle(driver);
     if (this.recovery) {
       this.recovery.kicked = false;
       this.setRecovering('Starting a new one…', { stats: null, watchUrl: null });
@@ -385,6 +441,18 @@ export class DestinationRunner {
       signal,
     });
     const account = dest.accountId ? services.repos.accounts.get(dest.accountId) : null;
+    if (this.host.testMode()) {
+      // Re-checked with the current destination/account (e.g. a Facebook account switched to
+      // profile mode mid-session): test mode must never fall back to a public live.
+      let supported: boolean;
+      try {
+        supported = supportsTestMode(driver, dest, account);
+      } catch {
+        supported = false;
+      }
+      if (!supported) throw new DriverError(`${testModeSkipMessage(driver.info.name)}: not streaming while test mode is on`, 'not-eligible');
+      ctx.testMode = true;
+    }
     if (driver.validateDestination) {
       const problems = await driver.validateDestination(dest, account, ctx);
       if (problems.length > 0) throw new DriverError(problems.join('; '), 'misconfigured');
@@ -407,7 +475,7 @@ export class DestinationRunner {
     this.set({ watchUrl: prepared.watchUrl ?? null, retries: 0, ...(this.recovery ? {} : { message: null }) });
 
     // The title changed while preparing: apply the current one.
-    const current = this.host.title();
+    const current = this.driver ? this.prepareTitle(this.driver) : this.host.title();
     if (current !== usedTitle && prepared.setTitle) {
       void this.setTitle(current).then((r) => {
         if (!r.ok) this.host.log.warn({ destinationId: this.id, error: r.error }, 'title update after prepare failed');
@@ -654,6 +722,10 @@ export class DestinationRunner {
       case 'ended':
         await this.takedown(cleanText(ev.reason) || 'ended by the platform');
         return;
+      case 'viewers':
+        // Unchanged counts emit nothing (the orchestrator drops no-op updates).
+        this.set({ viewers: viewerCount(ev.count) });
+        return;
       default:
         return;
     }
@@ -828,6 +900,7 @@ export class DestinationRunner {
     this.healthCtl?.abort();
     this.healthCtl = null;
     this.healthWarning = null;
+    this.set({ viewers: null }); // nobody watches a live that is gone (no-op when already unknown)
     this.confirmCtl?.abort();
     this.confirmCtl = null;
     this.confirmState = 'none';

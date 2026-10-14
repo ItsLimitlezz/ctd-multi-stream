@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import type https from 'node:https';
 import path from 'node:path';
-import pino from 'pino';
+import pino, { type Logger } from 'pino';
 import type { AppSettings } from '../../shared/api.js';
 import { eventHubFor } from './api/event-hub.js';
 import { createLanHandler } from './api/lan.js';
@@ -16,6 +16,7 @@ import { EventBus } from './events.js';
 import { buildApp } from './http/app.js';
 import { createPushSupervisor } from './media/ffmpeg-supervisor.js';
 import { createMediaServer } from './media/mediamtx.js';
+import { errorMessage, redactText } from './orchestrator/async-utils.js';
 import { createOrchestrator } from './orchestrator/orchestrator.js';
 import { createPlatformRegistry } from './platforms/registry.js';
 import type { DriverContext } from './platforms/types.js';
@@ -61,6 +62,48 @@ async function saveBrowserSessions(services: AppServices): Promise<void> {
       ),
     ),
   );
+}
+
+/** Secret-free log fields for something thrown (messages and stacks can embed RTMP URLs with keys). */
+function crashFields(err: unknown): { error: string; name?: string; stack?: string } {
+  if (!(err instanceof Error)) return { error: errorMessage(err) };
+  return { error: errorMessage(err), name: err.name, ...(err.stack ? { stack: redactText(err.stack) } : {}) };
+}
+
+/**
+ * Process-level safety net. An uncaught exception leaves the process in an unknown state: log it
+ * and exit non-zero, so Docker (restart: unless-stopped) or TrueNAS restarts the app. An unhandled
+ * promise rejection is only logged (Node's default would kill the process for it). Returns a
+ * function that removes the handlers (tests).
+ */
+export function installProcessHandlers(
+  log: Pick<Logger, 'fatal' | 'error'>,
+  exit: (code: number) => void = (code) => process.exit(code),
+): () => void {
+  let exiting = false;
+  const onException = (err: unknown, origin: string): void => {
+    try {
+      log.fatal({ ...crashFields(err), origin }, 'uncaught exception; exiting so the app is restarted');
+    } catch {
+      console.error('uncaught exception; exiting', errorMessage(err));
+    }
+    if (exiting) return;
+    exiting = true;
+    exit(1);
+  };
+  const onRejection = (reason: unknown): void => {
+    try {
+      log.error(crashFields(reason), 'unhandled promise rejection');
+    } catch {
+      console.error('unhandled promise rejection', errorMessage(reason));
+    }
+  };
+  process.on('uncaughtException', onException);
+  process.on('unhandledRejection', onRejection);
+  return () => {
+    process.off('uncaughtException', onException);
+    process.off('unhandledRejection', onRejection);
+  };
 }
 
 function hostForUrl(host: string): string {
@@ -143,6 +186,7 @@ export async function main(): Promise<void> {
   const config = loadConfig(process.env, readVersion());
   const services = await createServices(config);
   const { log } = services;
+  installProcessHandlers(log);
 
   // External API event buffer: subscribe before anything starts emitting.
   const apiEvents = eventHubFor(services);

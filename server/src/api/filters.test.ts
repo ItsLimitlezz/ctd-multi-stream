@@ -3,6 +3,7 @@ import type { ApiScope } from '../../../shared/types.js';
 import { globMatch, resolveTypes } from './filters.js';
 
 const ALL: ApiScope[] = ['chat:read', 'status:read'];
+const ALERTS = ['alert.cheer', 'alert.follow', 'alert.gift', 'alert.kicks', 'alert.membership', 'alert.raid', 'alert.subscription', 'alert.superchat', 'alert.tip'];
 
 function types(raw: string, scopes: ApiScope[] = ALL): string[] {
   const r = resolveTypes(raw, scopes);
@@ -36,7 +37,17 @@ describe('resolveTypes', () => {
     expect(types('*.down')).toEqual(['destination.down', 'system.reset']);
     expect(types('destination.*')).toEqual(['destination.down', 'destination.status', 'destination.up', 'system.reset']);
     expect(types('chat.message')).toEqual(['chat.message', 'system.reset']);
-    expect(types('*', ['chat:read'])).toEqual(['chat.cleared', 'chat.message', 'chat.message.deleted', 'chat.user.cleared', 'system.reset']);
+    expect(types('*', ['chat:read'])).toEqual([...ALERTS, 'chat.cleared', 'chat.message', 'chat.message.deleted', 'chat.user.cleared', 'system.reset']);
+  });
+
+  it('alert.* needs chat:read and is not part of chat.*', () => {
+    expect(types('alert.*')).toEqual([...ALERTS, 'system.reset']);
+    expect(types('alert.superchat,alert.cheer')).toEqual(['alert.cheer', 'alert.superchat', 'system.reset']);
+    expect(types('chat.*')).not.toContain('alert.gift');
+    expect(resolveTypes('alert.*', ['status:read'])).toMatchObject({ ok: false, status: 403, code: 'missing_scope' });
+    // Default (no types=): whatever the scopes allow.
+    expect(types('', ['status:read']).some((t) => t.startsWith('alert.'))).toBe(false);
+    expect(types('', ['chat:read']).filter((t) => t.startsWith('alert.'))).toEqual(ALERTS);
   });
 
   it('pathological globs are answered in milliseconds (no regex backtracking)', () => {

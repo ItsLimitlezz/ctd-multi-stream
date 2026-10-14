@@ -227,4 +227,15 @@ describe('tiktok driver info', () => {
       code: 'not-connected',
     });
   });
+
+  it('has no test mode: skipped while testing, and never touches TikTok if prepared in test mode', async () => {
+    expect(TIKTOK_INFO.testMode).toEqual({ supported: false, description: 'TikTok has no test mode — skipped while testing' });
+    expect(tiktokDriver.supportsTestMode).toBeUndefined();
+    // A bare context: any browser access would throw a TypeError instead of the DriverError.
+    await expect(tiktokDriver.prepare(makeDestination(), makeAccount('a'), 't', { testMode: true } as never)).rejects.toMatchObject({
+      name: 'DriverError',
+      code: 'not-eligible',
+      message: 'TikTok has no test mode — skipped while testing',
+    });
+  });
 });

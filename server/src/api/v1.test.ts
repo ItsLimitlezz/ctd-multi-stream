@@ -259,6 +259,75 @@ describe('GET /events/poll', () => {
   });
 });
 
+describe('alert.*', () => {
+  it('chat:read tokens get alert envelopes after the chat line; status-only tokens never do', async () => {
+    const chatOnly = t.token(['chat:read']);
+    const statusOnly = t.token(['status:read']);
+    const start = (await get('/api/v1/events/poll', both)).json();
+    t.bus.emit('chat', {
+      ...chat(7),
+      kind: 'event',
+      text: 'viewer7 sent a $5.00 Super Chat',
+      platform: 'youtube',
+      id: 'youtube:7',
+      alert: { kind: 'superchat', user: { id: 'UC7', name: 'viewer7' }, amount: { unit: 'currency', value: '5.00', currency: 'USD' }, message: { text: 'gg' } },
+    });
+
+    const page = (await get(`/api/v1/events/poll?after=${start.next}`, chatOnly)).json();
+    expect(page.items.map((e: { type: string }) => e.type)).toEqual(['chat.message', 'alert.superchat']);
+    expect(page.items[1]).toMatchObject({
+      type: 'alert.superchat',
+      src: { connector: 'ctd-multi-stream', connection: 'd1', platform: 'youtube' },
+      data: {
+        kind: 'superchat',
+        user: { id: 'youtube:UC7', name: 'viewer7' },
+        amount: { unit: 'currency', value: '5.00', currency: 'USD' },
+        message: { text: 'gg' },
+        platform: 'youtube',
+        destinationId: 'd1',
+        messageId: 'youtube:7',
+      },
+    });
+
+    const alertsOnly = (await get(`/api/v1/events/poll?after=${start.next}&types=alert.*`, both)).json();
+    expect(alertsOnly.items.map((e: { type: string }) => e.type)).toEqual(['alert.superchat']);
+    const status = (await get(`/api/v1/events/poll?after=${start.next}`, statusOnly)).json();
+    expect(status.items).toEqual([]);
+    expectProblem(await get('/api/v1/events/poll?types=alert.*', statusOnly), 403, 'missing_scope');
+  });
+
+  it('the OpenAPI document lists the alert event types and the Alert schema', async () => {
+    const doc = (await get('/api/v1/openapi.json')).json();
+    expect(doc.components.schemas.Envelope.properties.type.enum).toEqual(expect.arrayContaining(['alert.superchat', 'alert.subscription', 'alert.tip']));
+    expect(doc.components.schemas.Alert.properties.kind.enum).toHaveLength(9);
+    expect(doc.info.version).toMatch(/^1\.1 /);
+  });
+});
+
+describe('GET /status (test mode, viewers)', () => {
+  it('reports session.testMode, per-destination viewers and the per-platform sum of known counts', async () => {
+    const a = t.repos.destinations.create({ platform: 'twitch', accountId: null, name: 'Twitch A', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    const b = t.repos.destinations.create({ platform: 'twitch', accountId: null, name: 'Twitch B', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    const k = t.repos.destinations.create({ platform: 'kick', accountId: null, name: 'Kick', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    t.state.current = session({
+      testMode: true,
+      destinations: [
+        dstate(a.id, 'live', { viewers: 3 }),
+        dstate(b.id, 'live', { viewers: null }),
+        dstate(k.id, 'disabled', { message: 'Skipped — Kick has no test mode' }),
+      ],
+    });
+    const body = (await get('/api/v1/status', both)).json();
+    expect(body.session.testMode).toBe(true);
+    expect(body.destinations.map((d: { viewers: number | null }) => d.viewers)).toEqual([3, null, null]);
+    expect(body.destinations[2]).toMatchObject({ phase: 'disabled', down: false, message: 'Skipped — Kick has no test mode' });
+    expect(body.platforms).toEqual([
+      expect.objectContaining({ platform: 'twitch', viewers: 3 }),
+      expect.objectContaining({ platform: 'kick', viewers: null, live: false, error: null }),
+    ]);
+  });
+});
+
 describe('chat.message.deleted', () => {
   it('always carries a messageId, derived for messages the server never saw', async () => {
     const start = (await get('/api/v1/events/poll', both)).json();

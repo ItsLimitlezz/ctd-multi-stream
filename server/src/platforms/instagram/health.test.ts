@@ -8,6 +8,7 @@ import {
   PAGE_CLOSED_WARNING,
   SESSION_EXPIRED_WARNING,
   VIEWERS_UNAVAILABLE_WARNING,
+  ViewerReporter,
   type HealthSnapshot,
   type LiveMarks,
   type MonitorConfig,
@@ -134,6 +135,12 @@ describe('HealthMonitor', () => {
     expect(run(m, { closed: true }, 0, 20_000)).toEqual([[0, { type: 'warning', message: PAGE_CLOSED_WARNING }]]);
   });
 
+  it('a viewer count never changes the decisions (viewers are reported separately)', () => {
+    const m = monitor({ zeroViewerSec: 0 });
+    expect(run(m, { viewers: 12 }, 0, 10_000)).toEqual([]);
+    expect(run(m, { viewers: null }, 12_000, 200_000)).toEqual([]); // rule off: no "unavailable" warning
+  });
+
   it('soft notices and the link problem are warnings; ok once they clear', () => {
     let linkProblem: string | null = "Couldn't add the link";
     const m = monitor({ extraWarning: () => linkProblem });
@@ -145,5 +152,56 @@ describe('HealthMonitor', () => {
     linkProblem = null;
     expect(m.step(LIVE, 6_000)).toEqual([{ type: 'ok' }]);
     expect(m.step(LIVE, 8_000)).toEqual([]);
+  });
+});
+
+describe('ViewerReporter', () => {
+  /** Feed counts every 2 s from `t0`; returns [time, count] for every report. */
+  function feed(r: ViewerReporter, counts: (number | null)[], t0 = 0): [number, number | null][] {
+    const out: [number, number | null][] = [];
+    counts.forEach((c, i) => {
+      const ev = r.step(c, t0 + i * 2_000);
+      if (ev) out.push([t0 + i * 2_000, ev.count]);
+    });
+    return out;
+  }
+
+  it('reports the first read and every change at once', () => {
+    const r = new ViewerReporter(30_000, 6_000);
+    expect(feed(r, [4, 4, 5, 5, 5, 3, 0, 0, 12])).toEqual([
+      [0, 4],
+      [4_000, 5],
+      [10_000, 3],
+      [12_000, 0],
+      [16_000, 12],
+    ]);
+  });
+
+  it('repeats an unchanged count at least every reportMs', () => {
+    const r = new ViewerReporter(30_000, 6_000);
+    expect(feed(r, Array.from({ length: 36 }, () => 7))).toEqual([
+      [0, 7],
+      [30_000, 7],
+      [60_000, 7],
+    ]);
+  });
+
+  it('a short unreadable spell keeps the last count; a longer one reports null; a read reports the count again', () => {
+    const r = new ViewerReporter(30_000, 6_000);
+    // t=0: 9; 2–4 s unreadable (held); 6 s readable again (same count, no event).
+    expect(feed(r, [9, null, null, 9])).toEqual([[0, 9]]);
+    // From 8 s unreadable: held until 6 s have passed (14 s), then null; null repeated after 30 s.
+    expect(feed(r, Array.from({ length: 20 }, () => null), 8_000)).toEqual([
+      [14_000, null],
+      [44_000, null],
+    ]);
+    expect(feed(r, [9], 48_000)).toEqual([[48_000, 9]]);
+  });
+
+  it('reports null at once when nothing was ever readable (never invents a 0)', () => {
+    const r = new ViewerReporter(30_000, 6_000);
+    expect(r.step(null, 0)).toEqual({ type: 'viewers', count: null });
+    expect(r.step(null, 2_000)).toBeNull();
+    expect(r.step(0, 4_000)).toEqual({ type: 'viewers', count: 0 });
   });
 });

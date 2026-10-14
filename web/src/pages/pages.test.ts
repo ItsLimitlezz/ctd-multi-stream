@@ -111,6 +111,16 @@ describe('dashboard status', () => {
     applySessionResult('stop', session({ status: 'offline', autoGoLive: true }), store);
     expect(store.getState().session?.status).toBe('offline');
   });
+
+  it('the test-mode toggle only merges the flag (an auto start may already be under way)', () => {
+    const store = new LiveStore();
+    store.dispatch({ type: 'hello', session: session({ testMode: false }), chat: [] } as WsServerMessage);
+    store.dispatch({ type: 'session', session: session({ status: 'starting', sessionId: 's2', testMode: true }) });
+    applySessionResult('test', session({ status: 'offline', testMode: true }), store);
+    expect(store.getState().session).toMatchObject({ status: 'starting', sessionId: 's2', testMode: true });
+    applySessionResult('test', session({ status: 'offline' }), store); // older server without the field
+    expect(store.getState().session?.testMode).toBe(false);
+  });
 });
 
 describe('destination card: takedown recoveries', () => {

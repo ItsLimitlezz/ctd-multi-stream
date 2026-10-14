@@ -350,3 +350,54 @@
 .number-input {
   max-width: 160px;
 }
+
+/* ---------------------------------------------------------------- API tokens */
+
+.check-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.check-group legend {
+  margin-bottom: 6px;
+  padding: 0;
+}
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+.check-row:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.check-row input {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.check-help {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+.token-prefix {
+  font-size: 0.82rem;
+}
+.break-all {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}

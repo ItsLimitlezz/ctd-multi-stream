@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import type { Destination, DestinationPhase, DestinationState, Feed, FeedState, SessionState, TitleResult } from '@shared/types';
+import { useEffect, useId, useMemo, useState, type FormEvent } from 'react';
+import type { Account, Destination, DestinationPhase, DestinationState, Feed, FeedState, SessionState, TitleResult } from '@shared/types';
 import { FEEDS } from '@shared/types';
 import { api } from '../api';
 import { AlertToggle } from '../components/AlertToggle';
@@ -22,7 +22,7 @@ import {
   formatResolution,
   plural,
 } from '../components/format';
-import { BroadcastIcon, ExternalIcon, LandscapeIcon, RetryIcon, ShieldIcon, VerticalIcon } from '../components/icons';
+import { BroadcastIcon, ExternalIcon, EyeIcon, FlaskIcon, LandscapeIcon, RetryIcon, ShieldIcon, VerticalIcon } from '../components/icons';
 import { PhaseBadge } from '../components/PhaseBadge';
 import { PlatformBadge, platformName } from '../components/PlatformBadge';
 import { Spinner } from '../components/Spinner';
@@ -34,8 +34,20 @@ import { cx, safeHttpUrl, type Tone } from '../components/utils';
 import { Link } from '../router';
 import { useAuth } from '../state/auth';
 import { errorMessage } from '../state/errors';
-import { useDestinations, useNow } from '../state/hooks';
-import { useChat, useLiveActions, useSession, type LiveActions } from '../state/live';
+import { useApi, useDestinations, useNow } from '../state/hooks';
+import { useAccountsVersion, useChat, useLiveActions, useSession, type LiveActions } from '../state/live';
+import {
+  destinationViewers,
+  formatViewers,
+  TEST_MODE_BADGE,
+  TEST_MODE_LOCKED,
+  testModePlan,
+  testModeSummary,
+  totalViewers,
+  viewersLabel,
+  type TestModeContext,
+  type TestModeEntry,
+} from './dashboard-helpers';
 
 export const TITLE_MAX = 140;
 const FEED_LABEL: Record<Feed, string> = { landscape: 'Landscape', vertical: 'Vertical' };
@@ -63,9 +75,20 @@ export default function DashboardPage() {
     if (!hasSession) api.session().then(seedSession, () => undefined);
   }, [seedSession]);
 
+  const testMode = session?.testMode === true;
+  const running = session !== null && session.status !== 'offline';
+  const info = useTestModeInfo(testMode, isAdmin);
+  const states = session?.destinations;
+  const plan = useMemo(() => {
+    if (!testMode || !dests.data) return null;
+    const ctx: TestModeContext = { platforms: info.platforms, accounts: info.accounts, states, running };
+    return testModePlan(dests.data, ctx);
+  }, [testMode, dests.data, info.platforms, info.accounts, states, running]);
+
   return (
     <div className="dash">
       <div className="dash-main">
+        {testMode && <TestModeBanner plan={plan} running={running} loadError={dests.data ? null : dests.error} />}
         <StatusCard session={session} />
         <FeedsRow feeds={session?.feeds ?? null} />
         <TitleCard session={session} destinations={dests.data ?? []} />
@@ -75,6 +98,7 @@ export default function DashboardPage() {
           error={dests.error}
           reload={dests.reload}
           states={session?.destinations ?? []}
+          testPlan={plan}
           isAdmin={isAdmin}
           onUpdated={(d) => dests.setData((list) => list?.map((x) => (x.id === d.id ? d : x)))}
         />
@@ -83,6 +107,74 @@ export default function DashboardPage() {
         <ChatPanel />
       </aside>
     </div>
+  );
+}
+
+/**
+ * Platform info (test-mode support) and, for admins, accounts (Facebook Page vs profile), loaded only
+ * while test mode is on.
+ */
+function useTestModeInfo(enabled: boolean, isAdmin: boolean): Pick<TestModeContext, 'platforms' | 'accounts'> {
+  const accountsVersion = useAccountsVersion();
+  const platforms = useApi(() => (enabled ? api.platforms() : Promise.resolve(null)), [enabled]);
+  const accounts = useApi(() => (enabled && isAdmin ? api.accounts() : Promise.resolve(null)), [enabled, isAdmin, accountsVersion]);
+  const byId = useMemo(() => {
+    if (!accounts.data) return undefined;
+    const map: Record<string, Account> = {};
+    for (const a of accounts.data) map[a.id] = a;
+    return map;
+  }, [accounts.data]);
+  return { platforms: platforms.data ?? null, accounts: byId };
+}
+
+// ---------------------------------------------------------------------------
+// Test mode banner
+// ---------------------------------------------------------------------------
+
+/** Orange banner while test mode is on: what happens on every enabled destination. */
+export function TestModeBanner({
+  plan,
+  running,
+  loadError = null,
+}: {
+  plan: readonly TestModeEntry[] | null;
+  running: boolean;
+  /** Destinations couldn't be loaded (the list below says why). */
+  loadError?: string | null;
+}) {
+  return (
+    <section className="test-banner" aria-labelledby="test-banner-title">
+      <div className="test-banner-head">
+        <h2 id="test-banner-title" className="test-banner-tag">
+          <FlaskIcon width={16} height={16} />
+          TEST MODE
+        </h2>
+        <p className="test-banner-summary">
+          <strong>Nothing goes out publicly.</strong>{' '}
+          {plan ? testModeSummary(plan) : loadError ? "Couldn't load the destinations." : 'Loading destinations…'}
+        </p>
+      </div>
+      {plan && plan.length > 0 && (
+        <ul className="test-plan" aria-label="What test mode does on each destination">
+          {plan.map((e) => {
+            const badge = TEST_MODE_BADGE[e.action];
+            return (
+              <li key={e.destinationId} className={cx('test-plan-item', `is-${e.action}`)}>
+                <PlatformBadge platform={e.platform} size="sm" />
+                <span className="test-plan-name truncate" title={e.name}>
+                  {e.name}
+                </span>
+                <Badge tone={badge.tone}>{badge.label}</Badge>
+                <span className="test-plan-text">{e.text}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <p className="test-banner-foot">
+        {running ? 'Test mode stays on until this stream ends.' : 'Turn test mode off before you go live for real.'}
+      </p>
+    </section>
   );
 }
 
@@ -120,13 +212,13 @@ export function statusSubtitle(session: SessionState): string {
   }
 }
 
-type SessionAction = 'start' | 'stop' | 'auto';
+type SessionAction = 'start' | 'stop' | 'auto' | 'test';
 
 /**
- * Push a start / stop / auto-toggle response into the live store. Start and stop answer once the
+ * Push a start / stop / toggle response into the live store. Start and stop answer once the
  * operation is done, so their snapshot is current. The auto toggle answers before the auto start it
  * may trigger has run, so its snapshot can be older than WebSocket 'session' messages that already
- * arrived ('live'): only merge the flag.
+ * arrived ('live'): only merge the flag. Same for the test-mode toggle (an auto start can follow it).
  */
 export function applySessionResult(
   kind: SessionAction,
@@ -134,14 +226,16 @@ export function applySessionResult(
   actions: Pick<LiveActions, 'applySession' | 'patchSession'>,
 ): void {
   if (kind === 'auto') actions.patchSession({ autoGoLive: res.autoGoLive });
+  else if (kind === 'test') actions.patchSession({ testMode: res.testMode === true });
   else actions.applySession(res);
 }
 
-function StatusCard({ session }: { session: SessionState | null }) {
+export function StatusCard({ session }: { session: SessionState | null }) {
   const actions = useLiveActions();
   const [busy, setBusy] = useState<SessionAction | null>(null);
   const live = session?.status === 'live';
   const now = useNow(live ? 1000 : null);
+  const testId = useId();
 
   if (!session) {
     return (
@@ -165,8 +259,11 @@ function StatusCard({ session }: { session: SessionState | null }) {
   };
 
   const ui = STATUS_TEXT[session.status];
+  const testMode = session.testMode === true;
+  const running = session.status !== 'offline';
+  const viewers = totalViewers(session.destinations);
   return (
-    <Card className={cx('status-card', `is-${session.status}`)} aria-label="Stream status">
+    <Card className={cx('status-card', `is-${session.status}`, testMode && 'is-test')} aria-label="Stream status">
       <div className="status-row">
         <div className="status-main">
           <StatusDot tone={ui.tone} pulse={ui.pulse} />
@@ -174,11 +271,38 @@ function StatusCard({ session }: { session: SessionState | null }) {
             <div className="status-label" role="status">
               {ui.label}
               {live && <span className="status-elapsed">{formatDuration(elapsedSeconds(session.startedAt, now))}</span>}
+              {testMode && running && <span className="status-test">Test</span>}
             </div>
-            <p className="status-sub">{statusSubtitle(session)}</p>
+            <p className="status-sub">
+              {statusSubtitle(session)}
+              {viewers !== null && (
+                <span className="status-viewers" title="Viewers across platforms that report them">
+                  <EyeIcon width={14} height={14} />
+                  {viewersLabel(viewers)}
+                </span>
+              )}
+            </p>
           </div>
         </div>
         <div className="status-actions">
+          <div className={cx('test-switch', testMode && 'is-on')} title={running ? TEST_MODE_LOCKED : undefined}>
+            <Toggle
+              checked={testMode}
+              busy={busy === 'test'}
+              disabled={running}
+              onChange={(v) => void run('test', () => api.setTestMode(v))}
+              aria-label="Test mode"
+              aria-describedby={`${testId}-help`}
+              label={
+                <span className="test-switch-text">
+                  <strong id={`${testId}-name`}>Test mode</strong>
+                  <span id={`${testId}-help`}>
+                    {running ? 'Locked while the stream runs' : 'Stream privately where possible, skip the rest'}
+                  </span>
+                </span>
+              }
+            />
+          </div>
           {session.status === 'offline' ? (
             <Button
               variant="primary"
@@ -410,12 +534,15 @@ interface DestinationsSectionProps {
   error: string | null;
   reload: () => void;
   states: DestinationState[];
+  /** Test mode on: what happens to each enabled destination. */
+  testPlan: readonly TestModeEntry[] | null;
   isAdmin: boolean;
   onUpdated: (d: Destination) => void;
 }
 
-function DestinationsSection({ destinations, loading, error, reload, states, isAdmin, onUpdated }: DestinationsSectionProps) {
+function DestinationsSection({ destinations, loading, error, reload, states, testPlan, isAdmin, onUpdated }: DestinationsSectionProps) {
   const stateById = useMemo(() => new Map(states.map((s) => [s.destinationId, s])), [states]);
+  const testById = useMemo(() => new Map((testPlan ?? []).map((e) => [e.destinationId, e])), [testPlan]);
 
   let body;
   if (!destinations) {
@@ -463,7 +590,7 @@ function DestinationsSection({ destinations, loading, error, reload, states, isA
     body = (
       <div className="dest-grid">
         {destinations.map((d) => (
-          <DestinationCard key={d.id} dest={d} state={stateById.get(d.id) ?? null} onUpdated={onUpdated} />
+          <DestinationCard key={d.id} dest={d} state={stateById.get(d.id) ?? null} testMode={testById.get(d.id) ?? null} onUpdated={onUpdated} />
         ))}
       </div>
     );
@@ -504,10 +631,13 @@ export function recoverySummary(state: Pick<DestinationState, 'recoveries' | 'la
 export function DestinationCard({
   dest,
   state,
+  testMode = null,
   onUpdated,
 }: {
   dest: Destination;
   state: DestinationState | null;
+  /** Set while session test mode is on (enabled destinations only). */
+  testMode?: TestModeEntry | null;
   onUpdated: (d: Destination) => void;
 }) {
   const [toggling, setToggling] = useState(false);
@@ -520,6 +650,10 @@ export function DestinationCard({
   const hasRecoveries = (state?.recoveries ?? 0) > 0;
   const now = useNow(hasRecoveries ? 30_000 : null);
   const recovery = recoverySummary(state, now);
+  const viewers = destinationViewers(state);
+  // Test mode skips platforms without a private/test setting: the server parks them as 'disabled'.
+  const skipped = dest.enabled && testMode?.action === 'skip' && (phase === 'idle' || phase === 'disabled');
+  const privateTest = dest.enabled && testMode?.action === 'test' && !skipped;
 
   const toggle = async (enabled: boolean) => {
     setToggling(true);
@@ -549,6 +683,7 @@ export function DestinationCard({
       className={cx(
         'card dest-card',
         !dest.enabled && 'is-disabled',
+        skipped && 'is-skipped',
         phase === 'live' && 'is-live',
         phase === 'recovering' && 'is-recovering',
         phase === 'error' && 'is-error',
@@ -570,11 +705,33 @@ export function DestinationCard({
           />
         </div>
         <div className="dest-meta">
-          <PhaseBadge phase={phase} />
+          {skipped ? (
+            <Badge tone="neutral" title={testMode?.text}>
+              Skipped in test mode
+            </Badge>
+          ) : (
+            <PhaseBadge phase={phase} />
+          )}
+          {privateTest && (
+            <Badge tone="warn" title={testMode?.text}>
+              Private test
+            </Badge>
+          )}
           <Badge tone="neutral">{FEED_LABEL[dest.feed]}</Badge>
+          {viewers !== null && (
+            <span className="dest-viewers" title={viewersLabel(viewers)}>
+              <EyeIcon width={14} height={14} />
+              {formatViewers(viewers)}
+              <span className="sr-only"> {viewers === 1 ? 'viewer' : 'viewers'}</span>
+            </span>
+          )}
           {state && state.retries > 0 && phase !== 'live' && <span className="faint small">attempt {state.retries + 1}</span>}
         </div>
-        {state?.message && <p className={cx('dest-message', phase === 'error' && 'is-error')}>{state.message}</p>}
+        {state?.message ? (
+          <p className={cx('dest-message', phase === 'error' && 'is-error')}>{state.message}</p>
+        ) : (
+          skipped && testMode && <p className="dest-message">{testMode.text}</p>
+        )}
         {recovery && (
           <p className="dest-recovery" title={state?.lastRecovery ? `Last takedown: ${formatDateTime(state.lastRecovery.at)}` : undefined}>
             <ShieldIcon width={14} height={14} />

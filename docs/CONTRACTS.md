@@ -44,7 +44,7 @@ Every route file default-exports `FastifyPluginAsync<RouteOptions>` and receives
 
 ## Storage conventions
 
-- **Settings** (`repos.settings`, JSON): `'app'` → `Partial<AppSettings>`; `'session.title'` → string; `'session.autoGoLive'` → boolean (default `true`); `'tls.acme'` → `{ identifier, failures, nextAttemptAt, lastError }` (Let's Encrypt backoff, survives restarts).
+- **Settings** (`repos.settings`, JSON): `'app'` → `Partial<AppSettings>`; `'session.title'` → string; `'session.autoGoLive'` → boolean (default `true`); `'session.testMode'` → boolean (default `false`, changeable only while offline); `'tls.acme'` → `{ identifier, failures, nextAttemptAt, lastError }` (Let's Encrypt backoff, survives restarts).
 - **Secrets** (`repos.secrets.scoped(scope)`, AES-256-GCM encrypted):
 
 | Scope | Key | Value |

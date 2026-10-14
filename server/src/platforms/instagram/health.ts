@@ -9,7 +9,7 @@
 // - softer notices ("will be removed if you continue", "interrupted") → `warning`, `ok` when gone.
 // The runner's push-down rule is the primary signal; this only adds what Instagram shows.
 // It also reports the viewer count (`viewers`) on every change and at least every 30 s, null when
-// it can't be read (ViewerReporter).
+// it can't be read (ViewerReporter) — for every audience, also with the 0-viewer rule off.
 
 import type { Logger } from 'pino';
 import type { Page } from 'playwright';
@@ -262,6 +262,8 @@ function untilAborted(signal: AbortSignal): Promise<void> {
 export interface WatchOptions {
   cfg: FlowConfig;
   monitor: HealthMonitor;
+  /** Viewer count reporting (`viewers` events); omitted = none. */
+  viewers?: ViewerReporter;
   pollMs: number;
   now: () => number;
   /** False once a newer live owns the page: stop reading it (and stay quiet until aborted). */
@@ -270,8 +272,9 @@ export interface WatchOptions {
 }
 
 /**
- * Polls the page every `pollMs` and yields the monitor's events until `signal` aborts. After an
- * `ended` it stays open (quiet) until aborted, so the runner never sees an early end.
+ * Polls the page every `pollMs` and yields the monitor's events (then the viewer count, when it is
+ * due) until `signal` aborts. After an `ended` it stays open (quiet) until aborted, so the runner
+ * never sees an early end.
  */
 export async function* watchHealth(page: Page, signal: AbortSignal, opts: WatchOptions): AsyncGenerator<LiveHealthEvent> {
   while (!signal.aborted) {
@@ -281,7 +284,8 @@ export async function* watchHealth(page: Page, signal: AbortSignal, opts: WatchO
     }
     const snapshot = await probeHealth(page, opts.cfg);
     if (signal.aborted || !opts.isCurrent()) continue;
-    for (const ev of opts.monitor.step(snapshot, opts.now())) {
+    const now = opts.now();
+    for (const ev of opts.monitor.step(snapshot, now)) {
       if (ev.type === 'ended') opts.log.warn({ reason: ev.reason }, 'Instagram ended the live');
       else if (ev.type === 'warning') opts.log.info({ message: ev.message }, 'Instagram live warning');
       yield ev;
@@ -290,6 +294,8 @@ export async function* watchHealth(page: Page, signal: AbortSignal, opts: WatchO
         return;
       }
     }
+    const viewers = opts.viewers?.step(snapshot.viewers, now);
+    if (viewers && !signal.aborted) yield viewers;
     try {
       await humanPause(opts.pollMs, opts.pollMs, signal);
     } catch {

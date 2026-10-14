@@ -19,6 +19,8 @@ export interface XDriverOptions {
   timings?: Partial<XTimings>;
 }
 
+const TEST_MODE_SKIPPED = 'X has no test mode — skipped while testing';
+
 const info: PlatformInfo = {
   id: 'x',
   name: 'X',
@@ -72,6 +74,7 @@ const info: PlatformInfo = {
     'Create a source once in Live Studio and paste its URL and key. Streaming alone does not go live on X: with a linked ' +
     'account the app creates the livestream and presses "Go live" (experimental browser automation; chat and live title ' +
     'edits need it too). Without one, press "Go live" in Live Studio yourself. Vertical video is untested on X.',
+  testMode: { supported: false, description: TEST_MODE_SKIPPED },
 };
 
 /** True when the cookies contain a live X session (`auth_token`). */
@@ -195,6 +198,8 @@ export function createXDriver(opts: XDriverOptions = {}): PlatformDriver {
     },
 
     async prepare(dest, account, title, ctx): Promise<PreparedLive> {
+      // The orchestrator skips X in test mode; never push (or go live) if a destination gets here anyway.
+      if (ctx.testMode) throw new DriverError(TEST_MODE_SKIPPED, 'not-eligible');
       const problems = await destinationProblems(dest, ctx);
       if (problems.length > 0) throw new DriverError(`${problems.join('; ')}. Edit the destination.`, 'misconfigured');
       const push: PushPlan = { url: joinIngestUrl(dest.ingestUrl!, await readKey(ctx)), mode: 'copy', feeds: [dest.feed] };

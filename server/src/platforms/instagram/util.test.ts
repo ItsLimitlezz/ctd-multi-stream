@@ -13,6 +13,7 @@ import {
   parseViewerCount,
   pickLink,
   readLinks,
+  readLiveOptions,
   readOptions,
   shortError,
   TITLE_MAX,
@@ -71,6 +72,29 @@ describe('instagram info', () => {
 
   it('has no live title editing (title is set at creation)', () => {
     expect('setTitleOffline' in instagramDriver).toBe(false);
+  });
+
+  it('supports session test mode (Practice) for every destination', () => {
+    expect(instagramInfo.testMode).toEqual({ supported: true, description: 'Practice audience — only you can see it' });
+    // No per-destination override: the default (info.testMode.supported) applies.
+    expect(instagramDriver.supportsTestMode).toBeUndefined();
+  });
+});
+
+describe('test mode options', () => {
+  it('forces the Practice audience in test mode and changes nothing else', () => {
+    const options = { audience: 'public', zeroViewerSec: 5, autoRecover: true, links: [{ title: 'K', url: 'https://kick.com/a' }], linkMode: 'first' };
+    expect(readLiveOptions({ options })).toEqual(readOptions({ options }));
+    expect(readLiveOptions({ options }, false).audience).toBe('public');
+    expect(readLiveOptions({ options }, true)).toEqual({ ...readOptions({ options }), audience: 'practice' });
+    expect(readLiveOptions({ options: { audience: 'practice' } }, true).audience).toBe('practice');
+    expect(readLiveOptions({ options: {} }, true).audience).toBe('practice');
+  });
+
+  it('never rewrites the saved destination options', () => {
+    const options = { audience: 'public' };
+    readLiveOptions({ options }, true);
+    expect(options).toEqual({ audience: 'public' });
   });
 });
 

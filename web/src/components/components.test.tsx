@@ -6,7 +6,7 @@ import { LINKS_MAX } from '@shared/types';
 import { AlertToggle, alertsEnabledMessage } from './AlertToggle';
 import { Badge } from './Badge';
 import { Button } from './Button';
-import { ChatLog } from './ChatLog';
+import { ChatLog, countNewMessages } from './ChatLog';
 import { ConfirmButton } from './ConfirmButton';
 import { CopyField } from './CopyField';
 import { DynamicForm } from './DynamicForm';
@@ -52,6 +52,12 @@ describe('components (static render)', () => {
     expect(out).toContain('role="switch"');
     expect(out).toContain('aria-checked="true"');
     expect(out).toContain('aria-label="Enable"');
+    expect(out).not.toContain('aria-labelledby');
+    // With a visible label the switch is named by it explicitly.
+    const labelled = html(<Toggle checked={false} onChange={() => undefined} label="Test mode" />);
+    const id = /<span id="([^"]+)">Test mode<\/span>/.exec(labelled)?.[1];
+    expect(id).toBeTruthy();
+    expect(labelled).toContain(`aria-labelledby="${id}"`);
   });
 
   it('PlatformBadge uses brand colors and initials', () => {
@@ -232,6 +238,67 @@ describe('components (static render)', () => {
     expect(out).not.toContain('url(x)');
     expect(out).toContain('mod');
     expect(html(<ChatLog messages={[]} emptyText="Quiet" />)).toContain('Quiet');
+  });
+
+  it('ChatLog: alert lines get a tag with the label and amount', () => {
+    const superchat: ChatMessage = {
+      id: 'yt:1',
+      platform: 'youtube',
+      destinationId: 'd',
+      author: { name: 'Ann' },
+      text: 'sent a Super Chat',
+      ts: '2026-10-11T10:00:00.000Z',
+      kind: 'event',
+      alert: { kind: 'superchat', user: { name: 'Ann' }, amount: { unit: 'currency', value: '5.00', currency: 'USD' } },
+    };
+    const out = html(<ChatLog messages={[superchat]} />);
+    expect(out).toContain('chat-msg is-event is-alert alert-superchat');
+    expect(out).toContain('Super Chat');
+    expect(out).toMatch(/<b class="chat-alert-amount">[^<]*5\.00<\/b>/);
+    // A plain message with an alert field is not decorated.
+    expect(html(<ChatLog messages={[{ ...superchat, kind: 'message' }]} />)).not.toContain('chat-alert-tag');
+  });
+
+  it('ChatLog: emotes render as images (https only), text stays text, /me is styled', () => {
+    const msg: ChatMessage = {
+      id: 'tw:1',
+      platform: 'twitch',
+      destinationId: 'd',
+      author: { name: 'bob', color: '#ff0000' },
+      text: '<b>hi</b> Kappa',
+      ts: '2026-10-11T10:00:00.000Z',
+      kind: 'message',
+      action: true,
+      fragments: [
+        { type: 'text', text: '<b>hi</b> ' },
+        { type: 'emote', text: 'Kappa', image: 'https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0' },
+      ],
+    };
+    const out = html(<ChatLog messages={[msg]} />);
+    expect(out).toContain('&lt;b&gt;hi&lt;/b&gt;');
+    expect(out).toContain('<img class="chat-emote" src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0" alt="Kappa"');
+    expect(out).toMatch(/referrerpolicy="no-referrer"/i);
+    expect(out).toContain('is-action');
+    expect(out).toContain('--author-color:#ff0000');
+  });
+
+  it('ChatLog counts new messages even when moderation removed the previous last one', () => {
+    const at = (id: string, sec: number): ChatMessage => ({
+      id,
+      platform: 'kick',
+      destinationId: 'd',
+      author: { name: 'a' },
+      text: id,
+      ts: new Date(Date.UTC(2026, 9, 11, 10, 0, sec)).toISOString(),
+      kind: 'message',
+    });
+    const list = [at('a', 1), at('b', 2), at('c', 3)];
+    expect(countNewMessages(list, null)).toBe(3);
+    expect(countNewMessages(list, { id: 'b', ts: Date.UTC(2026, 9, 11, 10, 0, 2) })).toBe(1);
+    // 'c' was the last one and got deleted: nothing new.
+    expect(countNewMessages(list.slice(0, 2), { id: 'c', ts: Date.UTC(2026, 9, 11, 10, 0, 3) })).toBe(0);
+    // 'b' deleted, then 'd' arrived.
+    expect(countNewMessages([at('a', 1), at('d', 4)], { id: 'b', ts: Date.UTC(2026, 9, 11, 10, 0, 2) })).toBe(1);
   });
 
   it('URL and color sanitizers', () => {

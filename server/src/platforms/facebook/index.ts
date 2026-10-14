@@ -2,6 +2,8 @@
 // - 'page'    (default): Facebook Page through the Graph API Live Video API — page-mode.ts
 // - 'profile' (experimental): persistent stream key + Live Producer browser automation — profile-mode.ts
 // A destination without an account streams to its persistent key only (no title / chat).
+// Session test mode: Page lives are "Only me" (page-mode.ts); profile and key-only destinations
+// can't be made private, so they don't support test mode (the orchestrator skips them).
 
 import type { Account } from '../../../../shared/types.js';
 import { DriverError, type PlatformDriver } from '../types.js';
@@ -22,6 +24,13 @@ export function accountMode(account: Account | null): FacebookMode {
   return account?.options.mode === 'profile' ? 'profile' : 'page';
 }
 
+/** Test mode needs a Page account (privacy "Only me"); profiles and key-only destinations have none. */
+export function supportsFacebookTestMode(account: Account | null): boolean {
+  return account !== null && account.platform === 'facebook' && accountMode(account) === 'page';
+}
+
+const NO_TEST_MODE = 'Facebook profiles and persistent-key destinations have no test mode — they are skipped while testing';
+
 export interface FacebookDriverOptions {
   page?: PageModeEnv;
   profile?: ProfileModeEnv;
@@ -34,6 +43,10 @@ export function createFacebookDriver(opts: FacebookDriverOptions = {}): Platform
 
   return {
     info: facebookInfo,
+
+    supportsTestMode(_dest, account) {
+      return supportsFacebookTestMode(account);
+    },
 
     async startConnect(account, ctx) {
       return accountMode(account) === 'profile' ? startProfileConnect() : startPageConnect(account, ctx);
@@ -64,6 +77,8 @@ export function createFacebookDriver(opts: FacebookDriverOptions = {}): Platform
       if (account && account.platform !== 'facebook') {
         throw new DriverError('The account linked to this destination is not a Facebook account', 'misconfigured');
       }
+      // The orchestrator never prepares these in test mode; refuse anyway so nothing goes out publicly.
+      if (ctx.testMode && !supportsFacebookTestMode(account)) throw new DriverError(NO_TEST_MODE, 'not-eligible');
       if (!account || accountMode(account) === 'profile') return prepareProfileLive(dest, account, title, ctx, profileEnv);
       return preparePageLive(dest, account, title, ctx, pageEnv);
     },

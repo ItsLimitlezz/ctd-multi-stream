@@ -6,7 +6,7 @@ import { useNow } from '../state/hooks';
 import { useLiveConnections, useLiveStatus, useSession } from '../state/live';
 import { Button } from './Button';
 import { elapsedSeconds, formatDuration } from './format';
-import { CloseIcon, MenuIcon } from './icons';
+import { CloseIcon, FlaskIcon, MenuIcon } from './icons';
 import { StatusDot } from './StatusDot';
 import { cx, type Tone } from './utils';
 
@@ -65,6 +65,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             )}
           </nav>
           <div className="spacer" />
+          <TestModeIndicator />
           <LiveIndicator />
           {user && <UserMenu username={user.username} role={user.role} onLogout={() => void logout()} />}
         </div>
@@ -82,6 +83,22 @@ const STATUS_UI: Record<SessionStatus, { label: string; tone: Tone; pulse: boole
   live: { label: 'LIVE', tone: 'live', pulse: true },
   stopping: { label: 'Stopping', tone: 'warn', pulse: true },
 };
+
+export const TEST_MODE_TITLE = 'Test mode is on: streams are private where the platform allows it; platforms without a test mode are skipped.';
+
+/** Orange "TEST MODE" pill in the top bar while session test mode is on (links to the dashboard). */
+export function TestModeIndicator() {
+  const session = useSession();
+  if (session?.testMode !== true) return null;
+  return (
+    <Link to="/" className="live-pill is-test" title={TEST_MODE_TITLE} aria-label="Test mode is on">
+      <FlaskIcon width={14} height={14} />
+      <span>
+        TEST<span className="test-pill-long"> MODE</span>
+      </span>
+    </Link>
+  );
+}
 
 /** Session status pill (links to the dashboard); shows reconnecting when the socket is down. */
 export function LiveIndicator() {

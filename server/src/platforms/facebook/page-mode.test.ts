@@ -22,6 +22,29 @@ async function connectedCtx(overrides: Partial<FakeContext> = {}): Promise<FakeC
   return ctx;
 }
 
+describe('test mode support', () => {
+  it('Pages support test mode; profiles and key-only destinations are skipped', () => {
+    expect(driver.info.testMode?.supported).toBe(true);
+    expect(driver.info.testMode?.description).toMatch(/Only me/);
+    expect(driver.info.testMode?.description).toMatch(/profiles .*skipped/i);
+    expect(driver.supportsTestMode!(makeDest(), makeAccount())).toBe(true);
+    expect(driver.supportsTestMode!(makeDest(), makeAccount({ options: {} }))).toBe(true); // default mode is page
+    expect(driver.supportsTestMode!(makeDest(), makeAccount({ options: { mode: 'profile' } }))).toBe(false);
+    expect(driver.supportsTestMode!(makeDest({ accountId: null }), null)).toBe(false);
+    expect(driver.supportsTestMode!(makeDest(), makeAccount({ platform: 'youtube' }))).toBe(false);
+  });
+
+  it('refuses to prepare a profile or key-only destination in test mode', async () => {
+    const calls = stubFetch(() => json(500, {}));
+    const ctx = makeCtx({ testMode: true });
+    await ctx.destinationSecrets.set('streamKey', 'FB-KEY');
+    for (const account of [makeAccount({ options: { mode: 'profile' } }), null]) {
+      await expect(driver.prepare(makeDest(), account, 'x', ctx)).rejects.toMatchObject({ code: 'not-eligible', message: expect.stringMatching(/no test mode/) });
+    }
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe('page mode: connect', () => {
   it('requires the developer app', async () => {
     const ctx = makeCtx({ app: null });
@@ -222,6 +245,92 @@ describe('page mode: live', () => {
     const create = calls.find((c) => graphPath(c.url) === '1001/live_videos')!;
     expect(JSON.parse(param(create, 'privacy')!)).toEqual({ value: 'SELF' });
     expect(prepared.watchUrl).toBe('https://www.facebook.com/1001');
+  });
+
+  it('test mode always creates the live as "Only me"', async () => {
+    const ctx = await connectedCtx({ testMode: true });
+    const calls = liveStub();
+    const prepared = await driver.prepare(makeDest({ options: { privacy: 'public' } }), makeAccount(), 'Testing', ctx);
+    const create = calls.find((c) => graphPath(c.url) === '1001/live_videos')!;
+    expect(param(create, 'status')).toBe('LIVE_NOW');
+    expect(JSON.parse(param(create, 'privacy')!)).toEqual({ value: 'SELF' });
+    expect(prepared.push?.url).toBe('rtmps://live-api-s.facebook.com:443/rtmp/FB-5555-0?s=1');
+    expect(calls.filter((c) => graphPath(c.url) === '1001/live_videos')).toHaveLength(1);
+  });
+
+  it('falls back to an unpublished live when Graph refuses "Only me" for the Page, and deletes it at the end', async () => {
+    const ctx = await connectedCtx({ testMode: true });
+    let status = 'UNPUBLISHED';
+    const calls = liveStub((call) => {
+      const path = graphPath(call.url);
+      if (call.method === 'POST' && path === '1001/live_videos' && param(call, 'privacy')) {
+        return graphErr(400, 100, '(#100) Invalid parameter');
+      }
+      if (call.method === 'GET' && path === '5555' && param(call, 'fields') === 'status') return json(200, { status });
+      if (call.method === 'DELETE' && path === '5555') return json(200, { success: true });
+      return null;
+    });
+    const prepared = await driver.prepare(makeDest(), makeAccount(), 'Testing', ctx);
+    const creates = calls.filter((c) => c.method === 'POST' && graphPath(c.url) === '1001/live_videos');
+    expect(creates).toHaveLength(2);
+    expect(param(creates[1]!, 'status')).toBe('UNPUBLISHED');
+    expect(param(creates[1]!, 'privacy')).toBeNull();
+    expect(param(creates[1]!, 'title')).toBe('Testing');
+    expect(prepared.push?.url).toBe('rtmps://live-api-s.facebook.com:443/rtmp/FB-5555-0?s=1');
+
+    await prepared.end!();
+    const del = calls.find((c) => c.method === 'DELETE')!;
+    expect(graphPath(del.url)).toBe('5555');
+    expect(param(del, 'access_token')).toBe('PAGE-TOKEN-1');
+    expect(calls.some((c) => param(c, 'end_live_video'))).toBe(false);
+
+    // Published by hand in the meantime: ended like any live, never deleted.
+    status = 'LIVE';
+    const before = calls.filter((c) => c.method === 'DELETE').length;
+    await prepared.end!();
+    expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(before);
+    expect(param(calls.filter((c) => c.method === 'POST' && graphPath(c.url) === '5555').at(-1)!, 'end_live_video')).toBe('true');
+  });
+
+  it('never deletes the fallback live when its state is unknown', async () => {
+    const ctx = await connectedCtx({ testMode: true });
+    const calls = liveStub((call) => {
+      const path = graphPath(call.url);
+      if (call.method === 'POST' && path === '1001/live_videos' && param(call, 'privacy')) return graphErr(400, 100, 'privacy is not supported');
+      if (call.method === 'GET' && path === '5555' && param(call, 'fields') === 'status') return graphErr(500, 2, 'temporary');
+      return null;
+    });
+    const prepared = await driver.prepare(makeDest(), makeAccount(), 'x', ctx);
+    await expect(prepared.end!()).resolves.toBeUndefined();
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false);
+  });
+
+  it('does not fall back for token, eligibility or permission errors', async () => {
+    for (const [response, code] of [
+      [graphErr(400, 190, 'Error validating access token'), 'needs-login'],
+      [graphErr(400, 100, 'This Page is not eligible to go live'), 'not-eligible'],
+      [graphErr(403, 200, '(#200) Requires pages_manage_posts permission'), 'misconfigured'],
+    ] as const) {
+      const ctx = await connectedCtx({ testMode: true });
+      const calls = liveStub((call) => (call.method === 'POST' && graphPath(call.url) === '1001/live_videos' ? response.clone() : null));
+      await expect(driver.prepare(makeDest(), makeAccount(), 'x', ctx)).rejects.toMatchObject({ code });
+      expect(calls.filter((c) => graphPath(c.url) === '1001/live_videos')).toHaveLength(1);
+    }
+  });
+
+  it('health reports the live video viewer count', async () => {
+    const ctx = await connectedCtx();
+    const calls = liveStub((call) =>
+      call.method === 'GET' && graphPath(call.url) === '5555' && param(call, 'fields') === 'live_views' ? json(200, { live_views: 17, id: '5555' }) : null,
+    );
+    const prepared = await driver.prepare(makeDest(), makeAccount(), 'x', ctx);
+    expect(prepared.recovery).toBeUndefined();
+    const ac = new AbortController();
+    const it = prepared.health!(ac.signal)[Symbol.asyncIterator]();
+    expect((await it.next()).value).toEqual({ type: 'viewers', count: 17 });
+    ac.abort();
+    await it.return?.(undefined);
+    expect(calls.some((c) => param(c, 'fields') === 'live_views' && param(c, 'access_token') === 'PAGE-TOKEN-1')).toBe(true);
   });
 
   it('updates the title and ends the live', async () => {

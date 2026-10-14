@@ -30,11 +30,16 @@ services:
     ports:
       # Router: forward public TCP 443 and 80 to this host. Nothing else.
       - "443:8443" # web UI (HTTPS)
-      - "80:8080" # Let's Encrypt HTTP-01 challenges + redirect to HTTPS (needed for automatic certificates)
+      - "80:8080" # Let's Encrypt HTTP-01 challenges + redirect to HTTPS (needed for automatic certificates);
+      #             LAN clients also get /api/v1, /dock and /overlay over plain HTTP here (see LAN_HTTP below)
       - "1935:1935" # RTMP from OBS. LAN only: NEVER port-forward 1935 on your router.
     env_file:
       - path: .env
         required: false
+    # Docker Desktop (Windows/macOS) and rootless Docker/Podman: put LAN_HTTP=off in .env. There every
+    # client, internet ones included, reaches the container from a private address and would get the
+    # LAN-only plain-HTTP API/dock/overlay (docs/SECURITY.md#lan-plain-http). Rootful Docker on Linux
+    # normally sees the real client addresses (IPv4); keep the default there.
     environment:
       TLS_MODE: ${TLS_MODE:-auto}
     volumes:

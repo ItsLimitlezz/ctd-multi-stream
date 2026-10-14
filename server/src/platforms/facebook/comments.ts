@@ -7,7 +7,9 @@
 //   Poll: GET /{live-video-id}/comments (reverse-chronological polling is the documented best practice).
 // `comment_rate` / `fields` follow the live_comments reference (ten_per_second is one of its rates,
 // one_per_two_seconds would drop messages in a busy chat).
-// `from` is omitted when Meta withholds the commenter's identity (privacy) → "Facebook user".
+// `from` is omitted when Meta withholds the commenter's identity (privacy) → "Facebook user" without
+// an author id; otherwise `from.id` is the author id. The comment id is the platformMessageId.
+// (Graph sends no deletion events for live comments, so there is no moderation here.)
 
 import type { Logger } from 'pino';
 import type { ChatMessageInput } from '../types.js';
@@ -23,7 +25,7 @@ export interface GraphComment {
   id?: string;
   message?: string;
   created_time?: string;
-  from?: { id?: string; name?: string } | null;
+  from?: { id?: string | number; name?: string } | null;
 }
 
 /** Graph timestamps look like 2026-10-11T18:04:05+0000; return ISO 8601 or undefined. */
@@ -38,7 +40,14 @@ export function commentToChat(c: GraphComment): ChatMessageInput | null {
   if (!text) return null; // stickers / GIF-only comments have no message
   const name = typeof c.from?.name === 'string' && c.from.name.trim() ? c.from.name.trim() : ANONYMOUS_AUTHOR;
   const msg: ChatMessageInput = { author: { name }, text };
-  if (typeof c.id === 'string' && c.id) msg.id = c.id;
+  // The commenter's (app-scoped) user id, when Meta shares the identity.
+  const fromId = c.from?.id;
+  const authorId = typeof fromId === 'string' ? fromId.trim() : typeof fromId === 'number' ? String(fromId) : '';
+  if (authorId) msg.author.id = authorId;
+  if (typeof c.id === 'string' && c.id) {
+    msg.id = c.id;
+    msg.platformMessageId = c.id;
+  }
   const ts = parseGraphTime(c.created_time);
   if (ts) msg.ts = ts;
   return msg;

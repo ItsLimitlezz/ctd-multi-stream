@@ -180,6 +180,23 @@ describe('pusherEvents', () => {
     await events.return(undefined);
   });
 
+  it('ignores a refused optional channel but fails on a refused required one', async () => {
+    server = await startServer(establish);
+    const events = pusherEvents({ url: server.url, channels: ['main'], optionalChannels: ['extra', 'main'], signal: ctl.signal });
+    const pending = events.next();
+    const ws = await server.next();
+    await until(() => server.received.filter((f) => f.event === 'pusher:subscribe').length >= 2);
+    expect(server.received.filter((f) => f.event === 'pusher:subscribe').map((f) => (f.data as { channel: string }).channel)).toEqual([
+      'main',
+      'extra',
+    ]);
+    ws.send(JSON.stringify({ event: 'pusher:subscription_error', channel: 'extra', data: { status: 401 } }));
+    ws.send(JSON.stringify({ event: 'GiftedSubscriptionsEvent', channel: 'extra', data: '{"gifter_username":"g"}' }));
+    expect((await pending).value).toMatchObject({ event: 'GiftedSubscriptionsEvent', channel: 'extra' });
+    ws.send(JSON.stringify({ event: 'pusher:subscription_error', channel: 'main', data: { status: 401 } }));
+    await expect(events.next()).rejects.toThrow(/refused the chatroom subscription/);
+  });
+
   it('returns immediately when already aborted', async () => {
     server = await startServer(establish);
     ctl.abort();

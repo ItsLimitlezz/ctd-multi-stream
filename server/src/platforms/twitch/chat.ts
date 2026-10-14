@@ -6,8 +6,8 @@
 
 import { randomInt } from 'node:crypto';
 import type { Logger } from 'pino';
-import type { ChatMessageInput } from '../types.js';
-import { ircToChat, parseIrcLine } from './irc.js';
+import type { ChatSourceItem } from '../types.js';
+import { GiftBombFilter, ircToChat, parseIrcLine } from './irc.js';
 
 export const IRC_WS_URL = 'wss://irc-ws.chat.twitch.tv:443';
 
@@ -77,14 +77,15 @@ class Inbox<T> {
 }
 
 /**
- * Yield chat messages of `#channelLogin` until `signal` aborts (then it returns) or the
- * connection fails (then it throws, so the ChatHub reconnects with backoff).
+ * Yield chat messages and moderation (deleted messages, bans/timeouts, cleared chat) of
+ * `#channelLogin` until `signal` aborts (then it returns) or the connection fails (then it throws,
+ * so the ChatHub reconnects with backoff).
  */
 export async function* readTwitchChat(
   channelLogin: string,
   signal: AbortSignal,
   opts: TwitchChatOptions = {},
-): AsyncGenerator<ChatMessageInput, void, undefined> {
+): AsyncGenerator<ChatSourceItem, void, undefined> {
   const channel = channelLogin.trim().toLowerCase();
   if (!isValidLogin(channel)) throw new Error('Invalid Twitch channel name for chat');
   if (signal.aborted) return;
@@ -94,7 +95,8 @@ export async function* readTwitchChat(
   const idleTimeoutMs = opts.idleTimeoutMs ?? 150_000;
   const WS = opts.WebSocketImpl ?? WebSocket;
 
-  const inbox = new Inbox<ChatMessageInput>();
+  const inbox = new Inbox<ChatSourceItem>();
+  const giftBombs = new GiftBombFilter();
   const ws = new WS(opts.url ?? IRC_WS_URL);
   let opened = false;
   let lastActivity = Date.now();
@@ -128,8 +130,8 @@ export async function* readTwitchChat(
         return;
       }
       default: {
-        const chat = ircToChat(msg);
-        if (chat) inbox.push(chat);
+        const item = giftBombs.apply(msg, ircToChat(msg));
+        if (item) inbox.push(item);
       }
     }
   };

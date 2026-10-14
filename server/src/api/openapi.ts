@@ -2,8 +2,12 @@
 // Keep in sync with docs/API.md.
 
 import { PLATFORM_IDS } from '../../../shared/types.js';
+import { CURRENCY_RE, DECIMAL_RE } from './alert-map.js';
 import { PROBLEM_TYPE } from './http.js';
-import { API_ROLES, EVENT_TYPES } from './types.js';
+import { ALERT_COUNT_UNITS, ALERT_KINDS, API_ROLES, EVENT_TYPES } from './types.js';
+
+/** Minor revision of the v1 contract (additive changes only; see the changelog in docs/API.md). */
+export const API_REVISION = '1.1';
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const nullable = (schema: object) => ({ oneOf: [schema, { type: 'null' }] });
@@ -41,7 +45,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
     openapi: '3.1.0',
     info: {
       title: 'CTD Multi-Stream external API',
-      version: `1 (server ${version})`,
+      version: `${API_REVISION} (server ${version})`,
       description:
         'Read-only API for other apps (CTD Overlay, the CTD OBS plugin, bots). Create a token in Settings → API and send it as `Authorization: Bearer ctd_pat_…`. Full guide: docs/API.md.',
       license: { name: 'AGPL-3.0-only', identifier: 'AGPL-3.0-only' },
@@ -167,7 +171,11 @@ export function openApiDocument(version: string): Record<string, unknown> {
             status: { enum: ['offline', 'starting', 'live', 'stopping'] },
             startedAt: nullable(isoTime),
             title: str,
-            testMode: bool,
+            testMode: {
+              type: 'boolean',
+              description:
+                'Test mode: every destination streams with its platform’s private/test setting; destinations without one are skipped (phase disabled, message "Skipped — <Platform> has no test mode"). Channel titles (Twitch, Kick) are never changed in test mode',
+            },
             autoGoLive: bool,
           },
         },
@@ -249,6 +257,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
                 ref('ChatMessageDeleted'),
                 ref('ChatUserCleared'),
                 ref('ChatCleared'),
+                ref('Alert'),
                 ref('Session'),
                 ref('Feed'),
                 ref('Destination'),
@@ -264,13 +273,13 @@ export function openApiDocument(version: string): Record<string, unknown> {
           type: 'object',
           required: ['type', 'text'],
           properties: {
-            type: { enum: ['text', 'emote', 'mention', 'link', 'cheermote'] },
+            type: { enum: ['text', 'emote', 'mention', 'link', 'cheermote'], description: 'mention is reserved (not sent yet); treat unknown types as text' },
             text: str,
             image: str,
             animated: bool,
             url: str,
             userId: str,
-            amount: num,
+            amount: { type: 'number', description: 'cheermote fragments (Twitch cheers): the bits it stands for' },
           },
         },
         ChatMessage: {
@@ -318,6 +327,50 @@ export function openApiDocument(version: string): Record<string, unknown> {
           properties: { userId: nullable(str), userName: nullable(str), platform: ref('Platform'), destinationId: str },
         },
         ChatCleared: { type: 'object', properties: { platform: ref('Platform'), destinationId: str } },
+        Alert: {
+          type: 'object',
+          description:
+            'alert.<kind> data: the CTD Overlay alert payload plus its source. Fields that don’t apply are omitted. Also sent as a chat.message (kind "event") with messageId.',
+          required: ['kind', 'user', 'platform', 'destinationId', 'messageId', 'ts'],
+          properties: {
+            kind: { enum: [...ALERT_KINDS] },
+            user: {
+              type: 'object',
+              required: ['name'],
+              properties: {
+                id: { type: 'string', description: 'Same form as chat.message user.id; absent for anonymous users' },
+                name: str,
+                avatar: { type: 'string', description: 'https URL' },
+                anonymous: { const: true },
+              },
+            },
+            amount: {
+              oneOf: [
+                {
+                  type: 'object',
+                  required: ['unit', 'value'],
+                  properties: { unit: { enum: [...ALERT_COUNT_UNITS] }, value: { type: 'integer', minimum: 0 } },
+                },
+                {
+                  type: 'object',
+                  required: ['unit', 'value', 'currency'],
+                  properties: {
+                    unit: { const: 'currency' },
+                    value: { type: 'string', pattern: DECIMAL_RE.source, description: 'Decimal string, never a float' },
+                    currency: { type: 'string', pattern: CURRENCY_RE.source, description: 'ISO 4217' },
+                  },
+                },
+              ],
+            },
+            tier: str,
+            message: { type: 'object', required: ['text'], properties: { text: str } },
+            gift: nullable({ type: 'object', properties: { recipients: { type: 'array', items: str }, total: { type: 'integer', minimum: 0 } } }),
+            platform: ref('Platform'),
+            destinationId: str,
+            messageId: { type: 'string', description: 'id of the chat.message that carried the alert' },
+            ts: epochMs,
+          },
+        },
         DestinationDown: {
           type: 'object',
           properties: { destinationId: str, name: str, platform: ref('Platform'), phase: { enum: PHASES }, reason: nullable(str) },

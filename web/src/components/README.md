@@ -41,7 +41,7 @@ Props: all `Button` props except `onClick`, plus `onConfirm: () => void | Promis
 `<Select options={[{ value, label, disabled? }]} value onValueChange placeholder invalid {...selectProps} />`. `placeholder` adds a first option with the value `''`.
 
 ### Toggle
-`<Toggle checked onChange={(next) => ...} label disabled busy size="sm|md" aria-label />` is a switch (`role="switch"`). `busy` disables it and animates the thumb while a request is in flight. With `label`, the label text is clickable too.
+`<Toggle checked onChange={(next) => ...} label disabled busy size="sm|md" aria-label aria-labelledby aria-describedby />` is a switch (`role="switch"`). `busy` disables it and animates the thumb while a request is in flight. With `label`, the label text is clickable too, and the switch is named by it through `aria-labelledby` (a switch inside a `<label>` doesn't reliably get its name from it). `aria-describedby` defaults to the surrounding `Field`'s help/error.
 
 ### Badge / StatusDot
 `<Badge tone dot pulse title>{text}</Badge>` and `<StatusDot tone pulse label />`.
@@ -55,6 +55,13 @@ Helpers: `PLATFORM_META`, `platformMeta(id)` (unknown ids fall back to custom st
 `<PhaseBadge phase={DestinationPhase} />` shows a label and tone for each destination phase. For example, `live` is a red pulsing "Live", `error` is a red "Error", `waiting-for-feed` is an amber "Waiting for feed" and `recovering` (the platform ended the live, e.g. a copyright takedown, and a fresh one is being created) is an amber pulsing "Recovering". Helpers: `PHASE_META` and `phaseMeta(phase)`.
 
 On the dashboard, `recovering` counts as active but not live ("1 of 2 destinations live · 1 recovering"), has no Retry button, and a card with `recoveries > 0` shows "Recovered 2× · last: <reason> <time ago>" (`recoverySummary(state, now)` in `DashboardPage.tsx`).
+
+Also on the dashboard (helpers in `pages/dashboard-helpers.ts`):
+
+- **Test mode:** a labelled switch next to Go live (`PUT /api/session/test-mode`), locked while a session runs. While on, an orange banner lists every enabled destination with what happens there (`testModePlan` / `testModeSummary`, from `PlatformInfo.testMode`; Facebook depends on the account type, resolved from the account for admins; a Facebook destination without an account, or whose account was deleted, is skipped like the server does), skipped destinations show "Skipped in test mode", and supported ones "Private test".
+- **Viewers:** live destination cards show `DestinationState.viewers` when the platform reports it, and the status card shows the sum of the known counts (`destinationViewers`, `totalViewers`, `formatViewers`); unknown counts are hidden, never shown as 0.
+
+Settings → **API** (`pages/settings/ApiTab.tsx`) lists the external-API tokens (revoke with a `ConfirmButton`), creates new ones (the secret is shown once, masked, in a modal that only closes with Done and can't close while the token is being created: `tokenModalReducer`), creates the **OBS dock** link in one click (`dockUrl(access, secret)`: LAN base when known, else the HTTPS base; token in the URL fragment) and shows the connection details with Copy buttons.
 
 ### Modal
 `<Modal open onClose title footer size="sm|md|lg" dismissible>{children}</Modal>` uses the native `<dialog>` element, so the focus trap, Escape and top-layer stacking come from the browser. Children mount only while the modal is open, so forms inside start fresh each time. Clicking the backdrop closes it when `dismissible` is set (the default). With `dismissible={false}`, Escape is stopped at keydown; if the browser still forces a close (Android back, a repeated Escape), the dialog is shown again. A dismissible modal closed by the browser calls `onClose`, so React state and the DOM never disagree. Open modals are tracked in `state/modal-stack.ts`.
@@ -104,7 +111,14 @@ Pure helpers in `dynamic-form.ts`, all exported from the barrel:
 `<AlertToggle label help />` is the "Alert me" switch (on the dashboard status card; the Profile page has the full Alerts card with "Read alerts aloud", the notification permission state and Test alert). `useAlertToggle()` returns `{ enabled, prefs, busy, setEnabled }`. Enabling runs `enableAlerts()` inside the click: it unlocks audio, plays a short chime and asks for notification permission, then toasts what works (`alertsEnabledMessage(status)`).
 
 ### ChatLog
-`<ChatLog messages={ChatMessage[]} compact emptyText />` is a scrolling chat list, oldest first. It sticks to the bottom while the user is there. Once the user scrolls up it shows a "N new / Jump to latest" button. Each row shows a timestamp, a `PlatformBadge`, the author and the text, all as plain text. Author colors are accepted only as hex. When the message set changes completely, for example a filter change, pass a new `key` to reset it.
+`<ChatLog messages={ChatMessage[]} compact emptyText />` is a scrolling chat list, oldest first. It sticks to the bottom while the user is there. Once the user scrolls up it shows a "N new / Jump to latest" button; the count stays right when moderation removes messages (`countNewMessages(messages, prevLast)`). Each row shows a timestamp, a `PlatformBadge`, the author and the text, all as plain text. Author colors are accepted only as hex. When the message set changes completely, for example a filter change, pass a new `key` to reset it.
+
+- **Alerts:** a `kind: 'event'` line with an `alert` (sub, gift, cheer, Kicks, raid, membership, Super Chat, tip, follow) gets a tinted row (`is-alert alert-<kind>`) and a tag with an icon, the label, the amount and the tier ("Subscription · 12 months · Tier 1", "Super Chat · $5.00").
+- **Emotes:** when `fragments` add up exactly to `text`, emotes render as `<img>` (https URLs only, `referrerpolicy="no-referrer"`, the emote name as `alt`) and mentions in bold; otherwise the plain text is shown.
+- `/me` lines (`action`) are italic in the author's color; `highlighted` messages get an accent stripe.
+
+### Chat formatting (`chat-format.ts`)
+Pure helpers, all exported from the barrel: `messageAlert(m)` (the alert of an event line, or null), `alertParts(alert)` / `alertSummary(alert)`, `formatAlertAmount(alert)` ("12 months", "5 gifts", "1,500 bits", "100 Kicks", "42 viewers"), `formatMoney(value, currency, locale?)` (ISO 4217 code + decimal string, formatted with `Intl.NumberFormat` from the string itself, so no float rounding; invalid input comes back as "value CUR"), `formatTier(tier)` ("1000" → "Tier 1", "Prime"), `chatSegments(m)`, `safeImageUrl(url)` and `ALERT_KINDS` / `ALERT_LABEL`.
 
 ### Toasts
 `toast(message, { tone, durationMs })`, `toast.success/info/warn/error(message)` and `dismissToast(id)` work anywhere, with no hook needed. `<ToastProvider>`, mounted once in `App.tsx`, renders them. A repeated identical message bumps a counter instead of stacking. At most 4 are visible. `durationMs: 0` keeps a toast until it is dismissed. The store lives in `state/toast.ts`. While a modal is open, the toasts render inside the topmost one (a modal dialog makes the rest of the page inert and covers it).
@@ -112,9 +126,10 @@ Pure helpers in `dynamic-form.ts`, all exported from the barrel:
 ### Other
 - `AppShell` is the top bar (brand, live indicator, nav, user menu) plus the main area. The nav collapses to a menu below 900 px.
 - `LiveIndicator` is the session status pill and shows "Reconnecting…" while the socket is down.
+- `TestModeIndicator` is the orange "TEST MODE" pill (just "TEST" below 480 px) shown in the top bar on every page while `session.testMode` is on.
 - `AuthLayout` is the centered card used by the sign-in and setup pages.
 - `ErrorBoundary` catches a crashing page without taking down the shell. `App.tsx` resets it on every route. Lazy admin pages that fail to load after an update (missing chunk) reload the page once (`state/chunk-reload.ts`); if that fails too, the boundary offers Reload instead of Try again.
-- `icons.tsx` holds small inline SVG icons (`CloseIcon`, `MenuIcon`, `LandscapeIcon`, `VerticalIcon`, `BroadcastIcon`, `ChatIcon`, `ExternalIcon`, `RetryIcon`, `ArrowDownIcon`, `ShieldIcon`, `ChevronUpIcon`, `ChevronDownIcon`, `PlusIcon`, `TrashIcon`, `BellIcon`).
+- `icons.tsx` holds small inline SVG icons (`CloseIcon`, `MenuIcon`, `LandscapeIcon`, `VerticalIcon`, `BroadcastIcon`, `ChatIcon`, `ExternalIcon`, `RetryIcon`, `ArrowDownIcon`, `ShieldIcon`, `ChevronUpIcon`, `ChevronDownIcon`, `PlusIcon`, `TrashIcon`, `BellIcon`, `EyeIcon` (viewers), `FlaskIcon` (test mode), `KeyIcon` (API tokens), and for chat alerts `HeartIcon`, `StarIcon`, `GiftIcon`, `GemIcon`, `BoltIcon`, `UsersIcon`, `CrownIcon`, `CoinIcon`).
 - `format.ts` has `formatDuration`, `elapsedSeconds`, `formatBitrate`, `formatFps`, `formatResolution`, `formatCodecs`, `formatAudio`, `formatClock`, `formatDateTime`, `formatAgo` ("just now", "3 min ago"; never in the future) and `plural`.
 - `utils.ts` has `cx(...)`, `safeHttpUrl(url)`, `safeHexColor(color)` and `copyText(text)`.
 
@@ -146,7 +161,7 @@ While a user is logged in, the app keeps one WebSocket open to `/api/ws`. If it 
 | Hook | Returns |
 |---|---|
 | `useSession()` | `SessionState \| null`, kept current from `hello`, `session`, `feed` and `destination` messages |
-| `useChat()` | `ChatMessage[]`, oldest first, the last 500, deduplicated by id |
+| `useChat()` | `ChatMessage[]`, oldest first, the last 500, deduplicated by id, without messages removed by moderation |
 | `useLiveStatus()` | `boolean`: socket connected |
 | `useLiveConnections()` | number of successful connections (0 means still connecting) |
 | `useAccountUpdates()` | `Record<accountId, Account>`, the latest pushed `account` messages |
@@ -157,6 +172,10 @@ While a user is logged in, the app keeps one WebSocket open to `/api/ws`. If it 
 | `useLiveState(selector)` | any slice of the state; the selector must return a stable reference |
 
 `notice` messages are shown as toasts automatically, and passed to `alertForNotice` (below).
+
+`chat-moderation` messages remove chat, always within the moderated destination: `message-deleted` drops one message (by hub id, `platformMessageId`, or the derived `<platform>:<id>`), `user-cleared` drops that user's messages (ids win when both sides have one, else display name or login, case-insensitively, like the server), `cleared` drops the destination's whole chat. The removed ids (last 1000, `removedChat`) are remembered so a history snapshot taken before the removal (REST `recentChat`, a reconnect's `hello`) can't bring them back. Pure helpers: `applyModeration`, `moderationRemoves`, `messageFromUser`, `rememberRemoved`.
+
+Moderation that happens while the socket is down only shows up as messages missing from the next `hello`, so a `hello` is reconciled rather than just merged (`reconcileChat`): a snapshot shorter than `HELLO_CHAT_LIMIT` (200, what the server sends) is the server's whole buffer, so every held message missing from it is dropped (after a server restart that clears the chat, like a reload would). A full snapshot is only the newest messages, so a held message is dropped only when it is clearly inside that window: newer than the destination's oldest snapshot message, or for a destination with nothing in the snapshot, newer than the snapshot's first messages. These drops are not added to `removedChat`.
 
 ### Alerts (`alerts.ts`)
 Opt-in, per-browser alerts for `notice` messages, e.g. "Instagram ended the live (copyright). Starting a new one…" and "Instagram is live again (recovery #1)". While on, `warn`/`error` notices play an alarm and `info` notices a gentle chime, both generated with the Web Audio API (no audio files, nothing external, so the CSP is unaffected), and each shows a browser `Notification` when permission is granted (only on HTTPS or localhost; `notificationStatus()` returns `'insecure'` otherwise, and `notificationHint(status)` explains it). "Read alerts aloud" also speaks the notice with `speechSynthesis`.

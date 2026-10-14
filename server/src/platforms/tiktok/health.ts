@@ -1,9 +1,11 @@
 // Stream Guard for TikTok: watches the LIVE Producer page a running LIVE uses and reports when
 // TikTok ended the LIVE (copyright / Community Guidelines interruption, LIVE removed, the dashboard
 // dropping out of the live state, or — opt-in — 0 viewers for too long). The runner then starts a
-// fresh LIVE (PreparedLive.recovery). Notice wording and the viewer stat: selectors.ts.
+// fresh LIVE (PreparedLive.recovery). It also reports the current viewer count (`viewers`) on every
+// change and at least every 30 s, null when it can't be read. Notice wording and the viewer stat:
+// selectors.ts.
 //
-// Split in two: a pure tracker (decisions, unit-tested with a fake clock) and the page sampler.
+// Split in two: pure trackers (decisions, unit-tested with a fake clock) and the page sampler.
 
 import type { Logger } from 'pino';
 import type { Page } from 'playwright';
@@ -16,6 +18,10 @@ import { errorText, isLoginUrl, isUnder, parseViewerCount, sleep } from './util.
 export const HEALTH_POLL_MS = 2000;
 /** Stream Guard's GRACE_PERIOD_SECONDS: the viewer rule waits this long after going LIVE. */
 export const VIEWER_GRACE_MS = 60_000;
+/** The viewer count is reported on every change and at least this often. */
+export const VIEWERS_REPORT_MS = 30_000;
+/** A count unreadable for less than this keeps the last known count (a re-render, a flaky read). */
+export const VIEWERS_HOLD_MS = 6_000;
 /** Polls in a row without "End LIVE" (and no notice) before the LIVE counts as gone. */
 const LIVE_LOSS_POLLS = 2;
 /** Polls in a row of an unrecognizable page before warning. */
@@ -202,6 +208,41 @@ export function createHealthTracker(opts: HealthTrackerOptions) {
   };
 }
 
+export type ViewersEvent = Extract<LiveHealthEvent, { type: 'viewers' }>;
+
+/**
+ * Turns viewer-count reads (null = unreadable) into `viewers` events: the first read, every change,
+ * and the same count again after `reportMs` (so a dashboard that reconnects catches up). A count
+ * unreadable for less than `holdMs` keeps the last known count (a re-render must not flash
+ * "unknown"); after that it's reported as null. Never invents a 0.
+ */
+export function createViewerReporter(reportMs = VIEWERS_REPORT_MS, holdMs = VIEWERS_HOLD_MS) {
+  /** Last reported count; undefined = nothing reported yet. */
+  let last: number | null | undefined;
+  let lastAt = 0;
+  let unreadableSince: number | null = null;
+  return {
+    next(count: number | null, now: number): ViewersEvent | null {
+      let value = count;
+      if (count === null) {
+        unreadableSince ??= now;
+        if (typeof last === 'number' && now - unreadableSince < holdMs) value = last;
+      } else {
+        unreadableSince = null;
+      }
+      if (value === last && now - lastAt < reportMs) return null;
+      last = value;
+      lastAt = now;
+      return { type: 'viewers', count: value };
+    },
+  };
+}
+
+/** The count to report for a sample: only while the dashboard isn't plainly out of the LIVE. */
+export function sampleViewers(sample: HealthSample): number | null {
+  return sample.state === 'live' || sample.state === 'unknown' ? sample.viewers : null;
+}
+
 // ---------------------------------------------------------------------------
 // Page sampling + watch loop
 // ---------------------------------------------------------------------------
@@ -238,6 +279,8 @@ export interface WatchHealthOptions {
   pollMs: number;
   detectMs: number;
   tracker: ReturnType<typeof createHealthTracker>;
+  /** Viewer count reporting (`viewers` events); omitted = none. */
+  viewers?: ReturnType<typeof createViewerReporter>;
   /** False once another LIVE took over the page (this watcher must stop). */
   isCurrent: () => boolean;
   log: Logger;
@@ -245,10 +288,10 @@ export interface WatchHealthOptions {
 }
 
 /**
- * Poll the producer page until `signal` aborts, yielding the tracker's events; returns right
- * after yielding `ended`. Errors never escape: an unreadable page is an 'unknown' sample.
- * When the page left LIVE Producer (closed, or navigated elsewhere for a few polls) it is
- * brought back, so a takedown is still noticed.
+ * Poll the producer page until `signal` aborts, yielding the tracker's events, then the viewer
+ * count when it is due; returns right after yielding `ended`. Errors never escape: an unreadable
+ * page is an 'unknown' sample. When the page left LIVE Producer (closed, or navigated elsewhere
+ * for a few polls) it is brought back, so a takedown is still noticed.
  */
 export async function* watchProducerHealth(opts: WatchHealthOptions, signal: AbortSignal): AsyncGenerator<LiveHealthEvent> {
   const now = opts.now ?? Date.now;
@@ -282,10 +325,13 @@ export async function* watchProducerHealth(opts: WatchHealthOptions, signal: Abo
       sample = { state: 'unknown', notices: [], viewers: null };
     }
     if (signal.aborted || !opts.isCurrent()) return;
-    for (const event of opts.tracker.next(sample, now())) {
+    const t = now();
+    for (const event of opts.tracker.next(sample, t)) {
       yield event;
       if (event.type === 'ended') return;
     }
+    const viewers = opts.viewers?.next(sampleViewers(sample), t);
+    if (viewers && !signal.aborted) yield viewers;
     try {
       await sleep(opts.pollMs, signal);
     } catch {

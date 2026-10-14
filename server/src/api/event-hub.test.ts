@@ -326,6 +326,43 @@ describe('chat buffer', () => {
   });
 });
 
+describe('alerts', () => {
+  it('a chat line carrying an alert also yields alert.<kind> right after its chat.message', () => {
+    bus.emit(
+      'chat',
+      chat('sub1', {
+        kind: 'event',
+        text: 'Ann subscribed at Tier 1 for 12 months',
+        alert: { kind: 'subscription', user: { id: 'u-ann', name: 'Ann' }, amount: { unit: 'months', value: 12 }, tier: '1000' },
+      }),
+    );
+    expect(types()).toEqual(['chat.message', 'alert.subscription']);
+    const [line, alert] = events as [Envelope<ApiChatMessage>, Envelope];
+    expect(alert.id > line.id).toBe(true);
+    expect(alert.src).toEqual(line.src);
+    expect(alert.data).toEqual({
+      kind: 'subscription',
+      user: { id: 'twitch:u-ann', name: 'Ann' },
+      amount: { unit: 'months', value: 12 },
+      tier: '1000',
+      platform: 'twitch',
+      destinationId: 't1',
+      messageId: line.data.id,
+      ts: T0,
+    });
+    // Alerts are live events only: GET /chat backfill holds the chat line, not the alert.
+    expect(hub.chat(200).items.map((e) => e.type)).toEqual(['chat.message']);
+    // Replayable from the buffer like any event.
+    expect(hub.since(hub.floor).items.map((e) => e.type)).toEqual(['chat.message', 'alert.subscription']);
+  });
+
+  it('plain messages and invalid alerts yield no alert envelope', () => {
+    bus.emit('chat', chat('1'));
+    bus.emit('chat', chat('2', { kind: 'event', alert: { kind: 'nope' } as unknown as ChatMessage['alert'] }));
+    expect(types()).toEqual(['chat.message', 'chat.message']);
+  });
+});
+
 describe('robustness', () => {
   it('a throwing subscriber or repo does not break the bus', () => {
     hub.subscribe(() => {

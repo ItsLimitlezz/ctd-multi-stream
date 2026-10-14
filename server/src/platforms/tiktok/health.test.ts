@@ -4,8 +4,12 @@ import {
   CANT_SEE_WARNING,
   classifyNotice,
   createHealthTracker,
+  createViewerReporter,
   LIVE_GONE_REASON,
   LOGGED_OUT_WARNING,
+  sampleViewers,
+  VIEWERS_HOLD_MS,
+  VIEWERS_REPORT_MS,
   VIEWERS_UNAVAILABLE_WARNING,
   type HealthSample,
   type Notice,
@@ -208,6 +212,11 @@ describe('Stream Guard health tracker', () => {
     expect(run(tracker, Array.from({ length: 10 }, () => live({ viewers: null })), 2000, 200_000)).toEqual([]);
   });
 
+  it('ignores the viewer count when the 0-viewer rule is off (viewers are reported separately)', () => {
+    const tracker = createHealthTracker(NO_VIEWER_RULE);
+    expect(run(tracker, [live({ viewers: 12 }), live({ viewers: 0 }), live({ viewers: null })], 2000, 100_000)).toEqual([]);
+  });
+
   it('clips long reasons', () => {
     const tracker = createHealthTracker(NO_VIEWER_RULE);
     const long = `Your LIVE was ended because ${'it may violate our Community Guidelines '.repeat(10)}`;
@@ -217,5 +226,59 @@ describe('Stream Guard health tracker', () => {
       expect(event.reason.length).toBeLessThanOrEqual(160);
       expect(event.reason.endsWith('…')).toBe(true);
     }
+  });
+});
+
+describe('viewer count reporting', () => {
+  /** Feed counts every 2 s from `t0`; returns [time, count] for every report. */
+  function feed(r: ReturnType<typeof createViewerReporter>, counts: (number | null)[], t0 = 0): [number, number | null][] {
+    const out: [number, number | null][] = [];
+    counts.forEach((c, i) => {
+      const ev = r.next(c, t0 + i * 2000);
+      if (ev) out.push([t0 + i * 2000, ev.count]);
+    });
+    return out;
+  }
+
+  it('uses 30 s / 6 s by default', () => {
+    expect(VIEWERS_REPORT_MS).toBe(30_000);
+    expect(VIEWERS_HOLD_MS).toBe(6_000);
+  });
+
+  it('reports the first read and every change at once', () => {
+    expect(feed(createViewerReporter(), [3, 3, 8, 8, 0, 0, 1_200])).toEqual([
+      [0, 3],
+      [4000, 8],
+      [8000, 0],
+      [12_000, 1_200],
+    ]);
+  });
+
+  it('repeats an unchanged count at least every 30 s', () => {
+    expect(feed(createViewerReporter(), Array.from({ length: 36 }, () => 5))).toEqual([
+      [0, 5],
+      [30_000, 5],
+      [60_000, 5],
+    ]);
+  });
+
+  it('holds the last count through a short unreadable spell, then reports null; never a made-up 0', () => {
+    const r = createViewerReporter(30_000, 6000);
+    expect(feed(r, [5, null, null, 5])).toEqual([[0, 5]]);
+    expect(feed(r, Array.from({ length: 20 }, () => null), 8000)).toEqual([
+      [14_000, null],
+      [44_000, null],
+    ]);
+    expect(feed(r, [6], 48_000)).toEqual([[48_000, 6]]);
+    const fresh = createViewerReporter();
+    expect(fresh.next(null, 0)).toEqual({ type: 'viewers', count: null });
+    expect(fresh.next(null, 2000)).toBeNull();
+  });
+
+  it('counts only while the dashboard is (or may be) in the LIVE', () => {
+    expect(sampleViewers(live({ viewers: 7 }))).toBe(7);
+    expect(sampleViewers(live({ state: 'unknown', viewers: 7 }))).toBe(7);
+    expect(sampleViewers(live({ state: 'not-live', viewers: 7 }))).toBeNull();
+    expect(sampleViewers(live({ state: 'logged-out', viewers: null }))).toBeNull();
   });
 });

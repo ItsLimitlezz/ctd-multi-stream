@@ -25,17 +25,22 @@ import { joinRtmpUrl } from './util.js';
 const PUSH_URL = joinRtmpUrl(FIXTURE_SERVER_URL, FIXTURE_STREAM_KEY);
 const VIOLATION_ENDED = 'Your LIVE was ended because it may violate our Community Guidelines.';
 
-/** Runs a health iterator in the background, collecting its events. */
+/** Runs a health iterator in the background, collecting viewer counts in `viewers` and all other events in `events`. */
 function collect(prepared: PreparedLive) {
   const ac = new AbortController();
   const events: LiveHealthEvent[] = [];
+  const viewers: (number | null)[] = [];
   let finished = false;
   const done = (async () => {
-    for await (const event of prepared.health!(ac.signal)) events.push(event);
+    for await (const event of prepared.health!(ac.signal)) {
+      if (event.type === 'viewers') viewers.push(event.count);
+      else events.push(event);
+    }
     finished = true;
   })();
   return {
     events,
+    viewers,
     done,
     get finished() {
       return finished;
@@ -79,6 +84,8 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('TikTok Stream Guard against a LIVE
         minGoLiveTimeoutSec: 1,
         healthPollMs: 200,
         healthGraceMs: 1500,
+        viewersReportMs: 1500,
+        viewersHoldMs: 500,
       },
     });
   }, 60_000);
@@ -256,6 +263,24 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('TikTok Stream Guard against a LIVE
     await Promise.all([watchers[1].stop(), watchers[2].stop()]);
     await Promise.all([rule.prepared.end!(), off.prepared.end!(), unreadable.prepared.end!()]);
   }, 60_000);
+
+  it('reports the current viewer count: at once, on changes, again after the report interval, null once unreadable', async () => {
+    fixture.setScenario({ cookieBanner: false, keyMode: 'password-input', viewers: 3 });
+    const { acc, prepared } = await goLive(); // 0-viewer rule off: viewers are still reported
+    const health = collect(prepared);
+    await waitFor(() => health.viewers.includes(3), 3000, 'the first viewer count');
+    expect(health.viewers[0]).toBe(3); // the "Viewers" stat, not "Total viewers"
+    const page = await bm.page(acc.id);
+    await page.evaluate('window.__fixture.setViewers(8)');
+    await waitFor(() => health.viewers.includes(8), 3000, 'the changed count');
+    await waitFor(() => health.viewers.filter((v) => v === 8).length >= 2, 4000, 'the unchanged count to be repeated');
+    await page.evaluate('window.__fixture.setViewers(null)');
+    await waitFor(() => health.viewers.includes(null), 3000, 'an unreadable count to be reported');
+    expect(health.viewers.filter((v) => v !== 3 && v !== 8 && v !== null)).toEqual([]);
+    expect(health.events).toEqual([]);
+    await health.stop();
+    await prepared.end!();
+  }, 30_000);
 
   it('dismisses a leftover "LIVE ended" dialog before creating the next LIVE', async () => {
     fixture.setScenario({ cookieBanner: false, keyMode: 'password-input', endedNotice: VIOLATION_ENDED });

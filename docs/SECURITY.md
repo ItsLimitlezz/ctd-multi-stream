@@ -11,7 +11,7 @@ Please **don't open a public issue**. Report it privately through GitHub: the re
 | Port (container → typical host) | Exposure | What it serves |
 |---|---|---|
 | 8443 → 443 / 30443 | **Internet** (port-forwarded) | Web UI, REST API and WebSockets, over HTTPS |
-| 8080 → 80 / 30080 | Internet (port-forwarded) | Only Let's Encrypt HTTP-01 challenge responses and a redirect to HTTPS |
+| 8080 → 80 / 30080 | Internet (port-forwarded) | Let's Encrypt HTTP-01 challenge responses and a redirect to HTTPS. For LAN clients only, also `/api/v1`, `/dock` and `/overlay/*` over plain HTTP (see [LAN plain HTTP](#lan-plain-http)) |
 | 1935 → 1935 | **LAN only** (never forward it) | RTMP ingest from OBS |
 | MediaMTX API, auth hook | Loopback inside the container | Internal only |
 
@@ -20,6 +20,30 @@ Public paths that work without logging in:
 - The login and first-run setup pages, and `GET /healthz`.
 - The OBS chat overlay `/overlay/chat?token=…`. It needs a long random token and only shows chat. Rotate the token if the URL leaks.
 - `/oauth/callback/<platform>`, which completes an OAuth connection only for a logged-in admin.
+- The external API `/api/v1` for other apps (CTD Overlay, the OBS dock, bots; see [API.md](API.md)). Every route except the API description (`/api/v1/openapi.json`) needs a **personal access token** (`Authorization: Bearer ctd_pat_…`). The OBS dock page `/dock` is a static page; it reads data with the token kept in its URL fragment.
+
+## External API tokens
+
+- An admin creates tokens in **Settings → API**. A token has scopes (`chat:read`, `status:read`) and is **read-only**: nothing in `/api/v1` can start or stop a stream, change the title or touch settings.
+- The secret is shown once and stored only as a SHA-256 hash. Revoking a token takes effect immediately (open event streams close within 30 s). Creating and revoking tokens is in the audit log.
+- Each token is limited to 600 requests per minute and 5 open event streams. The API never sets or reads cookies.
+- A token holder can read your chat and stream status (titles, destination names, watch URLs, error messages). Stream keys, account tokens and settings are never part of the API.
+- Treat a token like a password: give each app its own, and revoke it when an app is retired or a dock URL (`/dock#token=…`) may have leaked.
+
+## LAN plain HTTP
+
+So apps on your network (the OBS dock, CTD Overlay) work without trusting a certificate, the HTTP port also serves `/api/v1`, `/dock` and `/overlay/*` over plain HTTP, **but only to LAN clients**. Everyone else gets the redirect to HTTPS. A LAN client is decided by the TCP peer address of the connection (never by `X-Forwarded-For`): by default the private ranges 10/8, 172.16/12, 192.168/16, CGNAT 100.64/10, loopback, IPv6 ULA fc00::/7 and link-local. On plain HTTP the token travels unencrypted on your LAN, like the overlay token.
+
+Environment variables (in `.env` for Docker, `environment:` in the TrueNAS app YAML):
+
+| Variable | Effect |
+|---|---|
+| `LAN_HTTP` | `on` (default) or `off`. With `off` the HTTP port only answers Let's Encrypt and redirects everything to HTTPS; LAN apps then use the HTTPS URL (and pin the certificate fingerprint shown in **Settings → API** when it is self-signed). Other values are logged as a warning and treated as `on`. |
+| `LAN_HTTP_CIDRS` | Comma-separated ranges or single addresses, e.g. `192.168.1.0/24,fd00::/8`. Only peers inside them count as LAN; this **replaces** the built-in private ranges. Invalid entries are ignored with a warning at startup; if none is valid, LAN plain HTTP is off. |
+| `LAN_HTTP_HOST` | The NAS's LAN address (IP or name such as `nas.local`) used to build the LAN URL and the OBS dock URL in **Settings → API**, when it can't be guessed (inside a container it can't). Display only: it doesn't change who gets plain HTTP. |
+| `LAN_HTTP_PORT` | The HTTP port as seen from the LAN, when it isn't mapped like the HTTPS port (e.g. `443 → 80`, `30443 → 30080`). Display only. |
+
+**Turn it off (or narrow it) where internet clients can look private.** Wherever a NAT or proxy hop replaces the client's address with a private one, every internet visitor looks like a LAN client: Docker Desktop on Windows/macOS, rootless Docker or Podman, IPv6 published into an IPv4-only Docker network, ports forwarded from a VPS through a tunnel, or your own reverse proxy in front of the HTTP port. There set `LAN_HTTP=off`, or `LAN_HTTP_CIDRS` to your real LAN only (leaving out the gateway/proxy address). Exposure would be limited to token-protected, read-only data, but plain HTTP across the internet should never happen. With `TLS_MODE=off` (your own HTTPS proxy in front) there is no separate HTTP port and these variables do nothing.
 
 RTMP publishing requires a random per-feed key. Reading a feed is only possible from inside the container with an internal password, so nobody on your LAN can pull your stream from the server.
 
@@ -62,6 +86,6 @@ So:
 1. Change every user's password (this ends their other sessions) and review the users list.
 2. Check **Settings → Audit log** for logins and changes you don't recognize.
 3. Revoke the app's access on each platform (Twitch: Connections; Google account: third-party access; Kick, Facebook: app settings), then reconnect the accounts.
-4. Reset your stream keys on every platform that has one, and rotate the OBS ingest keys and the chat overlay token in the app.
+4. Reset your stream keys on every platform that has one, rotate the OBS ingest keys and the chat overlay token in the app, and revoke every API token in **Settings → API** (create new ones for the apps you still use).
 5. Log out of all sessions on Instagram, TikTok, X and Facebook from their security settings, then log in again through the app.
 6. If the data folder may have leaked, also regenerate your developer-app secrets (Twitch, Google, Kick, Meta).

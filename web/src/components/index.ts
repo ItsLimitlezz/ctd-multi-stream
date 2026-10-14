@@ -1,11 +1,25 @@
 // Design system barrel. See README.md in this folder for props and usage.
 
 export { AlertToggle, alertsEnabledMessage, useAlertToggle, type AlertToggleProps } from './AlertToggle';
-export { AppShell, LiveIndicator } from './AppShell';
+export { AppShell, LiveIndicator, TestModeIndicator } from './AppShell';
 export { Badge, type BadgeProps } from './Badge';
 export { Button, buttonClass, type ButtonProps, type ButtonSize, type ButtonVariant } from './Button';
 export { Card, type CardProps } from './Card';
-export { ChatLog, type ChatLogProps } from './ChatLog';
+export { ChatLog, countNewMessages, type ChatLogProps } from './ChatLog';
+export {
+  ALERT_KINDS,
+  ALERT_LABEL,
+  alertParts,
+  alertSummary,
+  chatSegments,
+  formatAlertAmount,
+  formatMoney,
+  formatTier,
+  isAlertKind,
+  messageAlert,
+  safeImageUrl,
+  type ChatSegment,
+} from './chat-format';
 export { ConfirmButton, type ConfirmButtonProps } from './ConfirmButton';
 export { CopyField, type CopyFieldProps } from './CopyField';
 export { DynamicForm, type DynamicFormProps } from './DynamicForm';

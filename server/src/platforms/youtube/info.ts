@@ -38,7 +38,7 @@ export const YOUTUBE_INFO: PlatformInfo = {
         { value: 'unlisted', label: 'Unlisted' },
         { value: 'private', label: 'Private' },
       ],
-      help: 'Who can watch each broadcast. Use Private to test.',
+      help: "Who can watch each broadcast. The dashboard's test mode always uses Private.",
     },
     {
       key: 'latency',
@@ -93,12 +93,17 @@ export const YOUTUBE_INFO: PlatformInfo = {
     'Live streaming must be enabled on the channel (youtube.com/features); the first time can take up to 24 hours. ' +
     'Each destination gets its own broadcast per stream: add one destination per feed (vertical lives can show in the Shorts feed). ' +
     'The YouTube API has a daily quota (10,000 units by default) shared by every YouTube account using your developer app; ' +
-    'reading chat uses most of it, so turn chat off on destinations where you do not need it.',
+    'reading chat uses most of it, so turn chat off on destinations where you do not need it. ' +
+    'The viewer count is read once a minute (about 60 units per hour per destination).',
+  testMode: { supported: true, description: 'Private broadcast — only you can see it' },
 };
 
-/** Read destination options defensively (the UI normalizes them, old rows may not be). */
-export function readOptions(options: Record<string, unknown>): YouTubeOptions {
-  const privacy = PRIVACY.find((p) => p === options.privacy) ?? 'public';
+/**
+ * Read destination options defensively (the UI normalizes them, old rows may not be).
+ * `testMode` forces a private broadcast whatever the destination's privacy option says.
+ */
+export function readOptions(options: Record<string, unknown>, testMode = false): YouTubeOptions {
+  const privacy = testMode ? 'private' : (PRIVACY.find((p) => p === options.privacy) ?? 'public');
   const latency = LATENCY.find((l) => l === options.latency) ?? 'low';
   return {
     privacy,

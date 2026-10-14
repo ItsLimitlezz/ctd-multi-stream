@@ -92,6 +92,27 @@ describe('attach', () => {
     expect(hub.recent()).toEqual(emitted);
   });
 
+  it('keeps the structured alert of an event line (bus and ring buffer)', async () => {
+    const resub: ChatMessageInput = {
+      id: 'n1',
+      kind: 'event',
+      author: { name: 'DJFan', id: '144552210' },
+      text: 'subscribed for 12 months: a year of DPRTMNT!',
+      alert: {
+        kind: 'subscription',
+        user: { id: '144552210', name: 'DJFan' },
+        amount: { unit: 'months', value: 12 },
+        tier: '1000',
+        message: { text: 'a year of DPRTMNT!' },
+      },
+    };
+    hub.attach('dest-1', 'twitch', staticSource([resub]), parent.signal);
+    await flush();
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.alert).toEqual(resub.alert);
+    expect(hub.recent()[0]?.alert).toEqual(resub.alert);
+  });
+
   it('restarts a failing source with exponential backoff capped at 30 s', async () => {
     let calls = 0;
     // eslint-disable-next-line require-yield

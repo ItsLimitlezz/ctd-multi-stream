@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OAuthTokens } from '../common/oauth.js';
-import { DriverError } from '../types.js';
+import { DriverError, type PreparedLive } from '../types.js';
 import { clearChatroomCache } from './chat-source.js';
 import { KICK_TITLE_MAX, kickDriver } from './index.js';
 import {
@@ -50,6 +50,9 @@ function form(req: RecordedRequest | undefined): Record<string, string> {
 
 const patches = (calls: RecordedRequest[]) => calls.filter((c) => c.method === 'PATCH');
 
+/** A fresh run of the live's health watcher. */
+const watch = (live: PreparedLive, signal: AbortSignal) => live.health!(signal)[Symbol.asyncIterator]();
+
 let ctx: FakeCtx;
 
 beforeEach(async () => {
@@ -82,6 +85,7 @@ describe('info', () => {
     const key = info.destinationFields.find((f) => f.target === 'streamKey');
     expect(ingest?.default).toBe(`rtmps://${IVS}/app`);
     expect(key).toMatchObject({ type: 'secret', required: false });
+    expect(info.testMode).toEqual({ supported: false, description: 'Kick has no test mode — skipped while testing' });
   });
 });
 
@@ -508,6 +512,54 @@ describe('prepare', () => {
     vi.stubGlobal('fetch', routes().fetch);
     const prepared = await kickDriver.prepare(makeDestination({ feed: 'vertical' }), makeAccount(), 'T', ctx);
     expect(prepared.push?.feeds).toEqual(['vertical']);
+  });
+
+  it('never streams in test mode (Kick has none), without calling Kick', async () => {
+    const stub = routes();
+    vi.stubGlobal('fetch', stub.fetch);
+    const testCtx = makeCtx({ testMode: true });
+    await testCtx.accountSecrets.setJson('oauth', tokens());
+    const err = await kickDriver.prepare(makeDestination(), makeAccount(), 'T', testCtx).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DriverError);
+    expect(err).toMatchObject({ message: 'Kick has no test mode — skipped while testing' });
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  it('health reports viewers from the channel endpoint (null while not live)', async () => {
+    let live = false;
+    const stub = routes({
+      [`GET ${API}/channels`]: () =>
+        json({ data: [channel({ stream: { url: `rtmps://${IVS}`, key: 'sk_us-west-2_apikey', is_live: live, viewer_count: live ? 321 : 0 } })] }),
+    });
+    vi.stubGlobal('fetch', stub.fetch);
+    const prepared = await kickDriver.prepare(makeDestination(), makeAccount(), 'Old title', ctx);
+    expect(typeof prepared.health).toBe('function');
+    expect(prepared.recovery).toBeUndefined();
+
+    const ctl = new AbortController();
+    expect((await watch(prepared, ctl.signal).next()).value).toEqual({ type: 'viewers', count: null });
+    live = true;
+    expect((await watch(prepared, ctl.signal).next()).value).toEqual({ type: 'viewers', count: 321 });
+    ctl.abort();
+    expect(stub.calls.filter((c) => c.method === 'GET').every((c) => c.headers.authorization === 'Bearer at-valid')).toBe(true);
+  });
+
+  it('health keeps the last count through one failed read', async () => {
+    let fail = false;
+    vi.stubGlobal(
+      'fetch',
+      routes({
+        [`GET ${API}/channels`]: () => (fail ? json({ message: 'boom' }, 500) : json({ data: [channel({ stream: { is_live: true, viewer_count: 5 } })] })),
+      }).fetch,
+    );
+    await ctx.destinationSecrets.set('streamKey', 'sk_manual');
+    const prepared = await kickDriver.prepare(makeDestination({ hasStreamKey: true }), makeAccount(), 'Old title', ctx);
+    fail = true;
+    const ctl = new AbortController();
+    const next = watch(prepared, ctl.signal).next();
+    setTimeout(() => ctl.abort(), 50);
+    // First failure yields nothing; the abort during the 30 s wait ends the watcher.
+    expect(await next).toEqual({ done: true, value: undefined });
   });
 
   it('passes a caller abort through unchanged', async () => {

@@ -35,21 +35,31 @@ async function until(what: string, check: () => boolean, ms = 6_000): Promise<vo
   }
 }
 
-/** Runs live.health() in the background and records its events. */
+/**
+ * Runs live.health() in the background and records its events: viewer counts in `viewers`,
+ * everything else in `events`.
+ */
 function watch(live: PreparedLive) {
   const ctl = new AbortController();
   const events: LiveHealthEvent[] = [];
+  const viewers: (number | null)[] = [];
   let finished = false;
   const done = (async () => {
-    for await (const ev of live.health!(ctl.signal)) events.push(ev);
+    for await (const ev of live.health!(ctl.signal)) {
+      if (ev.type === 'viewers') viewers.push(ev.count);
+      else events.push(ev);
+    }
     finished = true;
   })();
   return {
     events,
+    viewers,
     get finished() {
       return finished;
     },
-    waitFor: (type: LiveHealthEvent['type'], ms?: number) => until(`health event ${type}`, () => events.some((e) => e.type === type), ms),
+    waitFor: (type: Exclude<LiveHealthEvent['type'], 'viewers'>, ms?: number) =>
+      until(`health event ${type}`, () => events.some((e) => e.type === type), ms),
+    waitForViewers: (count: number | null, ms?: number) => until(`viewers ${count}`, () => viewers.includes(count), ms),
     async stop() {
       ctl.abort();
       await done;
@@ -98,13 +108,19 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('instagram stream guard (Chromium +
     await context?.close();
   });
 
-  function prepare(options: Record<string, unknown> = {}, secrets: FakeSecrets | null = null, title = 'Saturday set'): Promise<PreparedLive> {
+  function prepare(
+    options: Record<string, unknown> = {},
+    secrets: FakeSecrets | null = null,
+    title = 'Saturday set',
+    testMode?: boolean,
+  ): Promise<PreparedLive> {
     const { ctx } = makeCtx(manager, new AbortController().signal, secrets);
+    if (testMode !== undefined) ctx.testMode = testMode;
     return driver.prepare(makeDestination(options), makeAccount(), title, ctx);
   }
 
-  async function goLive(options: Record<string, unknown> = {}, secrets: FakeSecrets | null = null): Promise<PreparedLive> {
-    const live = await prepare(options, secrets);
+  async function goLive(options: Record<string, unknown> = {}, secrets: FakeSecrets | null = null, testMode?: boolean): Promise<PreparedLive> {
+    const live = await prepare(options, secrets, undefined, testMode);
     await live.confirm!(new AbortController().signal);
     return live;
   }
@@ -519,6 +535,84 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('instagram stream guard (Chromium +
     await health.stop();
     await live.end!();
   }, 60_000);
+
+  // ---- viewers ----
+
+  it('reports the viewer count: at once, on every change, again after 30 s, null once unreadable', async () => {
+    await setup({ viewerUi: 'icon', viewers: 7 });
+    const live = await goLive({ audience: 'public' }); // 0-viewer rule off: viewers are still reported
+    const health = watch(live);
+    await health.waitForViewers(7, 3_000);
+    const p = await page();
+    await p.evaluate('window.__setViewers(9)');
+    await health.waitForViewers(9, 3_000);
+    await sleep(500);
+    expect(health.viewers).toEqual([7, 9]); // unchanged count: not repeated within 30 s
+    clock = 31_000;
+    await until('the count to be repeated', () => health.viewers.length >= 3, 3_000);
+    expect(health.viewers).toEqual([7, 9, 9]);
+    await p.evaluate('window.__setViewers(null)'); // count hidden
+    await sleep(500);
+    expect(health.viewers).toEqual([7, 9, 9]); // a short gap keeps the last count
+    clock = 40_000;
+    await health.waitForViewers(null, 3_000);
+    expect(health.viewers).toEqual([7, 9, 9, null]);
+    expect(health.events).toEqual([]);
+    await health.stop();
+    await live.end!();
+  }, 60_000);
+
+  it('no readable count → viewers null (never a made-up 0)', async () => {
+    await setup({ viewerUi: 'none' });
+    const live = await goLive();
+    const health = watch(live);
+    await health.waitForViewers(null, 3_000);
+    expect(health.viewers).toEqual([null]);
+    await health.stop();
+    await live.end!();
+  }, 60_000);
+
+  // ---- test mode ----
+
+  it('test mode: Practice whatever the audience option says, no watch URL, no 0-viewer rule, viewers still reported', async () => {
+    await setup({ viewerUi: 'icon', viewers: 0 });
+    const live = await goLive({ audience: 'public', zeroViewerSec: 5 }, null, true);
+    expect(fx.events).toContainEqual({ type: 'audience', value: 'Practice' });
+    expect(fx.events).not.toContainEqual({ type: 'audience', value: 'Public' });
+    expect(live.watchUrl).toBeNull();
+    expect(live.recovery).toEqual({ pushDownConfirmMs: 5_000, maxAttempts: 3 }); // Stream Guard still recovers
+    const health = watch(live);
+    for (const t of [61_000, 67_000, 120_000]) {
+      clock = t;
+      await sleep(400);
+    }
+    expect(health.events).toEqual([]); // Practice: never ended for 0 viewers
+    expect(health.viewers[0]).toBe(0);
+    await health.stop();
+    await live.end!();
+    expect(fx.events).toContainEqual({ type: 'end' });
+  }, 60_000);
+
+  it('test mode: recoveries stay Practice and the link rotation is not moved', async () => {
+    await setup({ linkUi: 'producer' });
+    const secrets = new FakeSecrets();
+    await secrets.setJson('linkRotation', { index: 1 });
+    const audiences = () => fx.events.filter((e) => e.type === 'audience').map((e) => e.value);
+    for (let i = 0; i < 2; i++) {
+      // The second prepare is what a Stream Guard recovery does (same destination, same context).
+      const live = await prepare({ audience: 'public', links: LINKS }, secrets, undefined, true);
+      expect(linkEvents().at(-1)).toBe(`${TWITCH.title}|${TWITCH.url}`); // the link is still added
+      await live.end!();
+    }
+    expect(audiences()).toEqual(['Practice', 'Practice']);
+    expect(await secrets.getJson('linkRotation')).toEqual({ index: 1 }); // the saved position is untouched
+    // Back to normal: Public, the same link, and now the rotation moves on.
+    const live = await prepare({ audience: 'public', links: LINKS }, secrets, undefined, false);
+    expect(audiences().at(-1)).toBe('Public');
+    expect(linkEvents().at(-1)).toBe(`${TWITCH.title}|${TWITCH.url}`);
+    expect(await secrets.getJson('linkRotation')).toEqual({ index: 2 });
+    await live.end!();
+  }, 120_000);
 
   it('no "Add link" anywhere: the live starts, the index is kept, health warns', async () => {
     const secrets = new FakeSecrets();

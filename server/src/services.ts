@@ -283,6 +283,11 @@ export interface Orchestrator {
   stop(reason?: string): Promise<void>;
   setTitle(title: string): Promise<TitleResult[]>;
   setAutoGoLive(value: boolean): void;
+  /**
+   * Session test mode (persisted as 'session.testMode'). Only while no session runs: otherwise
+   * throws an error with statusCode 409 and code 'session_live'.
+   */
+  setTestMode(value: boolean): void;
   /** Destination enabled/disabled or edited mid-session. */
   destinationChanged(id: string): Promise<void>;
   destinationRemoved(id: string): Promise<void>;

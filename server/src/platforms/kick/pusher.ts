@@ -30,6 +30,11 @@ export interface PusherEvent {
 export interface PusherOptions {
   url: string;
   channels: string[];
+  /**
+   * Also subscribed, but a refused subscription is ignored (extra event channels that Kick may
+   * rename); a refusal on one of `channels` ends the connection.
+   */
+  optionalChannels?: string[];
   signal: AbortSignal;
   connectTimeoutMs?: number;
   /** Client-side inactivity before we ping. Default: the server's activity_timeout (120 s). */
@@ -83,6 +88,7 @@ export async function* pusherEvents(opts: PusherOptions): AsyncGenerator<PusherE
   const { signal } = opts;
   if (signal.aborted) return;
 
+  const optional = (opts.optionalChannels ?? []).filter((c) => !opts.channels.includes(c));
   const queue: PusherEvent[] = [];
   let failure: Error | null = null;
   let notify: (() => void) | null = null;
@@ -141,7 +147,7 @@ export async function* pusherEvents(opts: PusherOptions): AsyncGenerator<PusherE
           activityMs = Math.min(timeoutSec, 120) * 1000;
           armActivity();
         }
-        for (const channel of opts.channels) send('pusher:subscribe', { auth: '', channel });
+        for (const channel of [...opts.channels, ...optional]) send('pusher:subscribe', { auth: '', channel });
         return;
       }
       case 'pusher:ping':
@@ -153,6 +159,7 @@ export async function* pusherEvents(opts: PusherOptions): AsyncGenerator<PusherE
         return;
       }
       case 'pusher:subscription_error':
+        if (typeof frame.channel === 'string' && optional.includes(frame.channel)) return;
         fail(new PusherError('Kick chat refused the chatroom subscription', null, true));
         return;
       default:

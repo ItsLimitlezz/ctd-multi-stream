@@ -2,6 +2,7 @@
 
 import type {
   ApiScope,
+  ChatAlertKind,
   DestinationPhase,
   Feed,
   FeedState,
@@ -13,11 +14,17 @@ import type {
 export const CONNECTOR = 'ctd-multi-stream';
 export const CORE = 'core';
 
+/** Every ChatAlert kind, in documentation order. */
+export const ALERT_KINDS: readonly ChatAlertKind[] = ['follow', 'subscription', 'gift', 'cheer', 'kicks', 'raid', 'membership', 'superchat', 'tip'];
+
+export type ApiAlertEventType = `alert.${ChatAlertKind}`;
+
 export type ApiEventType =
   | 'chat.message'
   | 'chat.message.deleted'
   | 'chat.user.cleared'
   | 'chat.cleared'
+  | ApiAlertEventType
   | 'stream.status'
   | 'feed.status'
   | 'destination.status'
@@ -32,6 +39,15 @@ export const EVENT_SCOPES: Record<ApiEventType, ApiScope | null> = {
   'chat.message.deleted': 'chat:read',
   'chat.user.cleared': 'chat:read',
   'chat.cleared': 'chat:read',
+  'alert.follow': 'chat:read',
+  'alert.subscription': 'chat:read',
+  'alert.gift': 'chat:read',
+  'alert.cheer': 'chat:read',
+  'alert.kicks': 'chat:read',
+  'alert.raid': 'chat:read',
+  'alert.membership': 'chat:read',
+  'alert.superchat': 'chat:read',
+  'alert.tip': 'chat:read',
   'stream.status': 'status:read',
   'feed.status': 'status:read',
   'destination.status': 'status:read',
@@ -143,6 +159,30 @@ export interface ApiChatMessage {
   highlighted: boolean;
   action: boolean;
   kind: 'message' | 'event';
+  ts: number;
+}
+
+/** Count units of ApiAlert.amount (integers); money uses unit 'currency'. */
+export const ALERT_COUNT_UNITS = ['months', 'count', 'bits', 'kicks', 'viewers'] as const;
+
+/**
+ * alert.<kind> data: the CTD Overlay alert payload (shared ChatAlert) plus where it came from.
+ * Optional fields are omitted when they don't apply (never null, except `gift`, which ChatAlert allows).
+ */
+export interface ApiAlert {
+  kind: ChatAlertKind;
+  /** `id` has the chat.message `user.id` form (`<platform>:<id>` / `<platform>:name:<name>`); absent for anonymous users. */
+  user: { id?: string; name: string; avatar?: string; anonymous?: boolean };
+  /** Counts are integers; money is an ISO 4217 currency + a decimal string ("5.00"), never a float. */
+  amount?: { unit: (typeof ALERT_COUNT_UNITS)[number]; value: number } | { unit: 'currency'; value: string; currency: string };
+  tier?: string;
+  message?: { text: string };
+  gift?: { recipients?: string[]; total?: number } | null;
+  platform: PlatformId;
+  destinationId: string;
+  /** `id` of the chat.message (kind "event") that carried this alert. */
+  messageId: string;
+  /** Epoch ms (the chat message's time). */
   ts: number;
 }
 

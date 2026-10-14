@@ -1,4 +1,5 @@
-// Event hub for the external API: turns EventBus events into v1 envelopes (docs/API.md §3, §5),
+// Event hub for the external API: turns EventBus events into v1 envelopes (docs/API.md §3, §5;
+// a chat message carrying an alert also yields an alert.<kind> envelope),
 // keeps a replay buffer for /events and /events/poll (last 2000 envelopes or 15 minutes) and a
 // chat backfill buffer for GET /chat that mirrors the ChatHub ring (500) with moderation applied.
 //
@@ -8,6 +9,7 @@ import type { Logger } from 'pino';
 import type { ChatMessage, ChatModeration, Destination, DestinationState, Feed, FeedState, PlatformInfo, SessionState } from '../../../shared/types.js';
 import type { EventBus } from '../events.js';
 import type { AppServices } from '../services.js';
+import { alertEventData } from './alert-map.js';
 import { apiMessageFromUser, chatMessageData, moderationEvent } from './chat-map.js';
 import { apiDestination, apiFeed, apiSession, buildStatus, type StatusSources } from './status.js';
 import {
@@ -299,10 +301,14 @@ export class EventHub {
   }
 
   private onChat(msg: ChatMessage): void {
+    const src = source(msg.destinationId, msg.platform);
     const data = chatMessageData(msg, this.channelName(msg.destinationId, msg.platform));
-    const env = this.publish('chat.message', source(msg.destinationId, msg.platform), data);
+    const env = this.publish('chat.message', src, data);
     this.chatBuffer.push(env);
     if (this.chatBuffer.length > this.chatBufferSize) this.chatBuffer.splice(0, this.chatBuffer.length - this.chatBufferSize);
+    // Sub, gift, cheer, raid, Super Chat…: also a structured alert.<kind>, right after its chat line.
+    const alert = alertEventData(msg);
+    if (alert) this.publish(alert.type, src, alert.data);
   }
 
   private onModeration(m: ChatModeration): void {

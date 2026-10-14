@@ -15,6 +15,11 @@ import type { YouTubeOptions } from './info.js';
 export const LIVE_STREAM_KEY = 'liveStreamId';
 /** The broadcast of the current/last live, so a crashed session's broadcast is cleaned up next time. */
 export const BROADCAST_KEY = 'broadcastId';
+/**
+ * Broadcasts of earlier lives that couldn't be ended yet (JSON list of ids, oldest first). Kept
+ * apart from BROADCAST_KEY, which the next live's broadcast overwrites; every prepare() retries them.
+ */
+export const LEFTOVER_BROADCASTS_KEY = 'leftoverBroadcastIds';
 
 /** Shift for a scheduledStartTime YouTube rejected (it must not be in the past). */
 const FUTURE_START_MS = 60_000;
@@ -196,7 +201,7 @@ export async function finishBroadcast(
       try {
         await client.deleteBroadcast(broadcastId, signal);
       } catch (err) {
-        if (!(err instanceof YouTubeApiError && (err.status === 404 || err.has('liveBroadcastNotFound')))) throw err;
+        if (!isNotFound(err)) throw err;
       }
       return;
     }
@@ -210,6 +215,62 @@ export async function finishBroadcast(
     }
     await delay(t.pollMs, signal);
   }
+}
+
+function isNotFound(err: unknown): boolean {
+  return err instanceof YouTubeApiError && (err.status === 404 || err.has('liveBroadcastNotFound'));
+}
+
+/** What a broadcast that couldn't be ended means for the next live on the destination's stream. */
+export interface LeftoverCheck {
+  /**
+   * gone: deleted, complete or revoked (forget it). idle: still there but it can't show the next
+   * live (bound to another stream, not set up, or another channel's): retry ending it later.
+   * on-air: live, starting or testing on the destination's stream (or its state is unclear): the
+   * next live would show on it too.
+   */
+  state: 'gone' | 'idle' | 'on-air';
+  status?: string;
+}
+
+/**
+ * Check a leftover broadcast that finishBroadcast() couldn't end. `streamId` is the destination's
+ * stored liveStream (null: a new one will be created, which no leftover is bound to). An upcoming
+ * ("ready") broadcast on that stream has auto start, so it is deleted rather than left to start
+ * with the next live. Throws when YouTube can't be asked (the caller fails closed).
+ */
+export async function checkLeftover(
+  client: YouTubeClient,
+  broadcastId: string,
+  streamId: string | null,
+  signal?: AbortSignal,
+): Promise<LeftoverCheck> {
+  let current: LiveBroadcast | null;
+  try {
+    current = await client.getBroadcast(broadcastId, 'status,contentDetails', signal);
+  } catch (err) {
+    if (isNotFound(err)) return { state: 'gone' };
+    // Not readable by this account (e.g. it was switched to another channel, which then gets its
+    // own stream from ensureStream): it can't show the next live.
+    if (err instanceof YouTubeApiError && err.status === 403 && err.has('forbidden')) return { state: 'idle' };
+    throw err;
+  }
+  const status = current?.status?.lifeCycleStatus;
+  if (!current || status === 'complete' || status === 'revoked') return { state: 'gone', status };
+  const bound = current.contentDetails?.boundStreamId;
+  // An unknown binding counts as the destination's stream.
+  const onOurStream = streamId !== null && (!bound || bound === streamId);
+  if (!onOurStream || status === 'created') return { state: 'idle', status };
+  if (status === 'ready') {
+    try {
+      await client.deleteBroadcast(broadcastId, signal);
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    return { state: 'gone', status };
+  }
+  // live, liveStarting, testing, testStarting, or a state we don't know: assume it shows the stream.
+  return { state: 'on-air', status };
 }
 
 /**

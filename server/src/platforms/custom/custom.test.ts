@@ -128,4 +128,17 @@ describe('customDriver', () => {
     expect((badKey as DriverError).code).toBe('misconfigured');
     expect((badKey as DriverError).message).not.toContain('a b');
   });
+
+  it('has no test mode: skipped while testing, and never pushes if prepared in test mode', async () => {
+    expect(customDriver.info.testMode).toEqual({ supported: false, description: 'Custom servers are skipped while testing' });
+    expect(customDriver.supportsTestMode).toBeUndefined();
+    const testing = { ...ctx('sk_1'), testMode: true };
+    const err = await customDriver.prepare(dest('rtmp://live.example.com/app/'), null, '', testing).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DriverError);
+    expect((err as DriverError).code).toBe('not-eligible');
+    expect((err as DriverError).message).toBe('Custom servers are skipped while testing');
+    // Test mode off (or unset): unchanged.
+    const prepared = await customDriver.prepare(dest('rtmp://live.example.com/app/'), null, '', { ...ctx('sk_1'), testMode: false });
+    expect(prepared.push?.url).toBe('rtmp://live.example.com/app/sk_1');
+  });
 });

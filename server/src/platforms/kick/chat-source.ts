@@ -1,19 +1,22 @@
 // Chat source for one prepared Kick live: resolve the chatroom id (cached), then stream the
-// chatroom's Pusher events as chat messages until the signal aborts.
+// chatroom's Pusher events (chat, moderation, alerts) until the signal aborts.
 
 import type { Account } from '../../../../shared/types.js';
-import type { ChatMessageInput, DriverContext } from '../types.js';
+import type { ChatSourceItem, DriverContext } from '../types.js';
 import { errorText } from './api.js';
-import { chatroomChannel, parseKickChatEvent } from './chat.js';
+import { channelEventsChannel, chatroomChannel, giftsChannel, kickEventKey, parseKickChatEvent } from './chat.js';
 import { ChatroomNotFoundError, lookupChatroom, type ChatroomInfo } from './chatroom.js';
 import { readOptions, sameSlug, updateOptions } from './options.js';
 import { kickPusherUrl, pusherEvents } from './pusher.js';
 
 /** Waits between failed chatroom lookups (each may launch a browser, so back off generously). */
 const LOOKUP_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 300_000] as const;
+/** The same alert arriving on two channels (or a big gift's later chunks) within this window is dropped. */
+const DEDUPE_WINDOW_MS = 60_000;
+const DEDUPE_MAX_KEYS = 500;
 
-/** slug (lower case) → chatroom id, shared by every live of the process. */
-const chatroomCache = new Map<string, number>();
+/** slug (lower case) → chatroom (and channel) id, shared by every live of the process. */
+const chatroomCache = new Map<string, ChatroomInfo>();
 
 export interface KickChatOptions {
   ctx: DriverContext;
@@ -41,13 +44,16 @@ function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
   });
 }
 
-/** Chatroom id from the caches, else looked up (retrying with backoff). Null when aborted. */
-export async function resolveChatroomId(opts: KickChatOptions): Promise<number | null> {
+/** Chatroom (and channel) id from the caches, else looked up (retrying with backoff). Null when aborted. */
+export async function resolveChatroom(opts: KickChatOptions): Promise<ChatroomInfo | null> {
   const { ctx, account, slug, signal } = opts;
   const key = slug.toLowerCase();
+  const memo = chatroomCache.get(key);
+  if (memo) return memo;
   const cached = readOptions(account);
-  const known = chatroomCache.get(key) ?? (sameSlug(cached.slug, slug) ? cached.chatroomId : undefined);
-  if (known) return known;
+  if (cached.chatroomId && sameSlug(cached.slug, slug)) {
+    return { chatroomId: cached.chatroomId, channelId: cached.channelId ?? null };
+  }
 
   const lookup =
     opts.lookup ?? ((s: string, sig: AbortSignal) => lookupChatroom(s, { browser: ctx.browser, accountId: account.id, signal: sig }));
@@ -55,7 +61,7 @@ export async function resolveChatroomId(opts: KickChatOptions): Promise<number |
   for (let attempt = 0; !signal.aborted; attempt++) {
     try {
       const info = await lookup(slug, signal);
-      chatroomCache.set(key, info.chatroomId);
+      chatroomCache.set(key, info);
       try {
         await updateOptions(ctx, account, {
           slug,
@@ -65,7 +71,7 @@ export async function resolveChatroomId(opts: KickChatOptions): Promise<number |
       } catch (err) {
         ctx.log.warn({ error: errorText(err) }, 'could not cache the Kick chatroom id');
       }
-      return info.chatroomId;
+      return info;
     } catch (err) {
       if (signal.aborted) return null;
       const wait = backoff[Math.min(attempt, backoff.length - 1)] ?? 300_000;
@@ -77,18 +83,59 @@ export async function resolveChatroomId(opts: KickChatOptions): Promise<number |
   return null;
 }
 
-/** Read-only chat for a Kick channel. Throws when the websocket drops (the ChatHub restarts it). */
-export async function* kickChat(opts: KickChatOptions): AsyncGenerator<ChatMessageInput> {
-  const chatroomId = await resolveChatroomId(opts);
-  if (chatroomId === null || opts.signal.aborted) return;
+/** Chatroom id from the caches, else looked up (retrying with backoff). Null when aborted. */
+export async function resolveChatroomId(opts: KickChatOptions): Promise<number | null> {
+  return (await resolveChatroom(opts))?.chatroomId ?? null;
+}
+
+/** Keys seen within a time window (bounded). */
+export class RecentEventKeys {
+  private readonly seen = new Map<string, number>();
+
+  constructor(
+    private readonly windowMs = DEDUPE_WINDOW_MS,
+    private readonly maxKeys = DEDUPE_MAX_KEYS,
+  ) {}
+
+  /** True when `key` was already seen within the window; records it otherwise. */
+  repeat(key: string, now = Date.now()): boolean {
+    for (const [k, at] of this.seen) {
+      if (now - at < this.windowMs) break; // insertion order = time order
+      this.seen.delete(k);
+    }
+    if (this.seen.has(key)) return true;
+    this.seen.set(key, now);
+    if (this.seen.size > this.maxKeys) {
+      const oldest = this.seen.keys().next().value;
+      if (oldest !== undefined) this.seen.delete(oldest);
+    }
+    return false;
+  }
+}
+
+/**
+ * Read-only chat for a Kick channel: chat messages, moderation (deleted messages, bans/timeouts,
+ * cleared chat), alerts (subs, gifted subs, hosts) and Kicks event lines. Throws when the websocket
+ * drops (the ChatHub restarts it).
+ */
+export async function* kickChat(opts: KickChatOptions): AsyncGenerator<ChatSourceItem> {
+  const room = await resolveChatroom(opts);
+  if (room === null || opts.signal.aborted) return;
+  const optionalChannels = [giftsChannel(room.chatroomId)];
+  if (room.channelId) optionalChannels.push(channelEventsChannel(room.channelId));
   const events = pusherEvents({
     url: opts.pusherUrl ?? kickPusherUrl(),
-    channels: [chatroomChannel(chatroomId)],
+    channels: [chatroomChannel(room.chatroomId)],
+    optionalChannels,
     signal: opts.signal,
   });
+  const recent = new RecentEventKeys();
   for await (const ev of events) {
-    const msg = parseKickChatEvent(ev.event, ev.data);
-    if (msg) yield msg;
+    const item = parseKickChatEvent(ev.event, ev.data);
+    if (!item) continue;
+    const key = kickEventKey(ev.event, ev.data);
+    if (key && recent.repeat(key)) continue;
+    yield item;
   }
 }
 

@@ -1,15 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WsServerMessage } from '@shared/api';
 import type { Account, ChatMessage, DestinationState, FeedState, SessionState } from '@shared/types';
+import type { ChatModeration } from '@shared/types';
 import {
+  applyModeration,
   CHAT_LIMIT,
+  HELLO_CHAT_LIMIT,
   initialLiveState,
   LiveConnection,
   LiveStore,
   mergeChat,
+  messageFromUser,
   parseServerMessage,
+  reconcileChat,
   reconnectDelay,
   reduceLive,
+  rememberRemoved,
+  type LiveState,
   type SocketLike,
 } from './live-store';
 
@@ -156,6 +163,172 @@ describe('reduceLive', () => {
     const s = reduceLive(initialLiveState, { type: 'chat', message: chat('x') });
     expect(s.chat.map((m) => m.id)).toEqual(['x']);
     expect(reduceLive(s, { type: 'chat', message: chat('x') })).toBe(s);
+  });
+});
+
+describe('chat moderation', () => {
+  const TS = '2026-10-11T10:00:00.000Z';
+  const line = (id: string, over: Partial<ChatMessage> = {}): ChatMessage => ({
+    id,
+    platform: 'twitch',
+    destinationId: 'd1',
+    author: { name: 'Viewer' },
+    text: id,
+    ts: TS,
+    kind: 'message',
+    ...over,
+  });
+  const withChat = (chat: ChatMessage[]): LiveState => ({ ...initialLiveState, chat });
+  const moderate = (s: LiveState, moderation: ChatModeration) => reduceLive(s, { type: 'chat-moderation', moderation });
+  const ids = (s: LiveState) => s.chat.map((m) => m.id);
+
+  it('parses chat-moderation frames and rejects malformed ones', () => {
+    const moderation: ChatModeration = { kind: 'cleared', platform: 'kick', destinationId: 'k1', ts: TS };
+    expect(parseServerMessage(JSON.stringify({ type: 'chat-moderation', moderation }))).toEqual({ type: 'chat-moderation', moderation });
+    expect(parseServerMessage(JSON.stringify({ type: 'chat-moderation' }))).toBeNull();
+    expect(parseServerMessage(JSON.stringify({ type: 'chat-moderation', moderation: { kind: 'cleared' } }))).toBeNull();
+    expect(parseServerMessage(JSON.stringify({ type: 'chat-moderation', moderation: { destinationId: 'k1' } }))).toBeNull();
+  });
+
+  it('message-deleted removes one message by hub id, platform id or the derived id', () => {
+    const s = withChat([
+      line('twitch:a'),
+      line('h2', { platformMessageId: 'b' }),
+      line('twitch:c'),
+      line('h4', { platformMessageId: 'b', destinationId: 'd2' }), // same platform id, other channel
+    ]);
+    const byHubId = moderate(s, { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', ts: TS, messageId: 'twitch:a', platformMessageId: 'a' });
+    expect(ids(byHubId)).toEqual(['h2', 'twitch:c', 'h4']);
+    const byPlatformId = moderate(s, { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', ts: TS, messageId: null, platformMessageId: 'b' });
+    expect(ids(byPlatformId)).toEqual(['twitch:a', 'twitch:c', 'h4']);
+    const derived = moderate(s, { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', ts: TS, messageId: null, platformMessageId: 'c' });
+    expect(ids(derived)).toEqual(['twitch:a', 'h2', 'h4']);
+  });
+
+  it('user-cleared removes that user in that destination: ids win, else name or login (any case)', () => {
+    const s = withChat([
+      line('1', { author: { name: 'Ann', id: 'u1', login: 'ann_tv' } }),
+      line('2', { author: { name: 'Bob', id: 'u2' } }),
+      line('3', { author: { name: 'Ann_TV' } }), // no id: matched by name
+      line('4', { author: { name: 'Someone', login: 'ANN_TV' } }), // matched by login
+      line('5', { author: { name: 'Ann', id: 'u9' } }), // another user with the same display name
+      line('6', { author: { name: 'Ann', id: 'u1' }, destinationId: 'd2' }), // other destination
+      line('7', { author: { name: 'Ann', id: 'u1' }, platform: 'kick' }), // same destination id, other platform (defensive)
+      line('8', { kind: 'event', author: { name: 'Ann', id: 'u1' }, alert: { kind: 'follow', user: { name: 'Ann' } } }),
+    ]);
+    const out = moderate(s, { kind: 'user-cleared', platform: 'twitch', destinationId: 'd1', ts: TS, userId: 'u1', userName: 'ann_tv' });
+    expect(ids(out)).toEqual(['2', '5', '6', '7']);
+    // Name only (browser chat has no user ids).
+    const byName = moderate(s, { kind: 'user-cleared', platform: 'twitch', destinationId: 'd1', ts: TS, userId: null, userName: 'BOB' });
+    expect(ids(byName)).not.toContain('2');
+    expect(byName.chat).toHaveLength(7);
+    // An id alone never matches messages that have no author id.
+    const idOnly = moderate(s, { kind: 'user-cleared', platform: 'twitch', destinationId: 'd1', ts: TS, userId: 'u3', userName: null });
+    expect(idOnly).toBe(s);
+  });
+
+  it('messageFromUser follows the server rule', () => {
+    expect(messageFromUser({ author: { name: 'Ann', id: 'u1' } }, 'u1', null)).toBe(true);
+    expect(messageFromUser({ author: { name: 'Ann', id: 'u1' } }, 'u2', 'Ann')).toBe(false);
+    expect(messageFromUser({ author: { name: 'Ann' } }, 'u2', 'ann')).toBe(true);
+    expect(messageFromUser({ author: { name: 'Ann' } }, null, null)).toBe(false);
+  });
+
+  it("cleared removes one destination's chat only", () => {
+    const s = withChat([line('1'), line('2', { destinationId: 'd2' }), line('3')]);
+    expect(ids(moderate(s, { kind: 'cleared', platform: 'twitch', destinationId: 'd1', ts: TS }))).toEqual(['2']);
+    expect(moderate(s, { kind: 'cleared', platform: 'twitch', destinationId: 'nope', ts: TS })).toBe(s);
+    // Unknown kinds from a newer server are ignored.
+    expect(moderate(s, { kind: 'mystery', platform: 'twitch', destinationId: 'd1', ts: TS } as unknown as ChatModeration)).toBe(s);
+  });
+
+  it('removed messages never come back with a later history merge', () => {
+    let s = withChat([line('twitch:a'), line('twitch:b')]);
+    s = moderate(s, { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', ts: TS, messageId: 'twitch:a', platformMessageId: 'a' });
+    // A deletion for a message not received yet is remembered too.
+    s = moderate(s, { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', ts: TS, messageId: null, platformMessageId: 'z' });
+    s = reduceLive(s, { type: 'hello', session: session(), chat: [line('twitch:a'), line('twitch:b'), line('twitch:z'), line('twitch:new')] });
+    expect(ids(s)).toEqual(['twitch:b', 'twitch:new']);
+    s = reduceLive(s, { type: 'chat', message: line('twitch:a') });
+    expect(ids(s)).toEqual(['twitch:b', 'twitch:new']);
+
+    const store = new LiveStore();
+    store.dispatch({ type: 'chat', message: line('x1') });
+    store.dispatch({ type: 'chat-moderation', moderation: { kind: 'cleared', platform: 'twitch', destinationId: 'd1', ts: TS } });
+    store.mergeChat([line('x1'), line('x2')]); // REST snapshot taken before the clear
+    expect(store.getState().chat.map((m) => m.id)).toEqual(['x2']);
+  });
+
+  describe('a reconnect hello reconciles chat with the server buffer', () => {
+    const BASE = Date.UTC(2026, 9, 11, 10, 0, 0);
+    const at = (id: string, destinationId: string, sec: number): ChatMessage =>
+      line(id, { destinationId, ts: new Date(BASE + sec * 1000).toISOString() });
+    const hello = (s: LiveState, chat: ChatMessage[]) => reduceLive(s, { type: 'hello', session: session(), chat });
+
+    it('drops messages missing from a snapshot that is the whole buffer (moderated while away)', () => {
+      let s = hello(initialLiveState, [at('A', 'd1', 1), at('B', 'd1', 2), at('C', 'd1', 3)]);
+      expect(ids(s)).toEqual(['A', 'B', 'C']);
+      // B was deleted while the socket was down; D arrived.
+      s = hello(s, [at('A', 'd1', 1), at('C', 'd1', 3), at('D', 'd1', 4)]);
+      expect(ids(s)).toEqual(['A', 'C', 'D']);
+    });
+
+    it("an empty snapshot after a 'cleared' (or a server restart) empties the chat", () => {
+      let s = hello(initialLiveState, [at('A', 'd1', 1), at('B', 'd2', 2)]);
+      s = hello(s, []);
+      expect(s.chat).toEqual([]);
+      // Not remembered as moderated: a platform that delivers them again after a restart shows them.
+      s = reduceLive(s, { type: 'chat', message: at('A', 'd1', 1) });
+      expect(ids(s)).toEqual(['A']);
+    });
+
+    it('a full snapshot only drops messages that are clearly inside its window', () => {
+      const snapshot: ChatMessage[] = [];
+      // Window start: a delayed YouTube batch (d1) with older timestamps, then Kick (d2), then more d1.
+      for (let i = 0; i < 10; i++) snapshot.push(at(`y${i}`, 'd1', 100 + i));
+      for (let i = 0; i < 95; i++) snapshot.push(at(`k${i}`, 'd2', 160 + i));
+      for (let i = 0; i < 95; i++) snapshot.push(at(`s${i}`, 'd1', 300 + i));
+      expect(snapshot).toHaveLength(HELLO_CHAT_LIMIT);
+
+      const held = [
+        at('old', 'd1', 0), // fell out of the window: kept
+        at('w', 'd2', 150), // arrived before the window but newer than its first (YouTube) messages: kept
+        at('mod', 'd1', 500), // inside the window, missing: deleted while away
+        at('c-old', 'd3', 50), // d3 has nothing in the window: older than its start, kept
+        at('c-new', 'd3', 400), // ... newer than its start: the channel was cleared while away
+        at('y0', 'd1', 100),
+      ];
+      let s = hello(initialLiveState, held);
+      expect(s.chat).toHaveLength(held.length);
+      s = hello(s, snapshot);
+      const out = ids(s);
+      expect(out).toEqual(expect.arrayContaining(['old', 'w', 'c-old', ...snapshot.map((m) => m.id)]));
+      expect(out).not.toContain('mod');
+      expect(out).not.toContain('c-new');
+      expect(out).toHaveLength(HELLO_CHAT_LIMIT + 3);
+      expect(out.slice(0, 3)).toEqual(['old', 'c-old', 'y0']); // still in time order
+      // The removed-id memory is only for moderation we actually saw.
+      expect(s.removedChat.size).toBe(0);
+    });
+
+    it('keeps the same array when the snapshot changes nothing; removed ids stay out', () => {
+      const chat = [at('A', 'd1', 1), at('B', 'd1', 2)];
+      expect(reconcileChat(chat, [at('A', 'd1', 1), at('B', 'd1', 2)])).toBe(chat);
+      expect(reconcileChat(chat, [at('A', 'd1', 1), at('B', 'd1', 2), at('X', 'd1', 3)], CHAT_LIMIT, new Set(['X']))).toBe(chat);
+      // Messages whose time can't be read are never dropped from a full snapshot's window.
+      const full = Array.from({ length: HELLO_CHAT_LIMIT }, (_, i) => at(`f${i}`, 'd1', 10 + i));
+      const odd = line('odd', { ts: 'not a date' });
+      expect(ids({ ...initialLiveState, chat: reconcileChat([odd], full) })).toContain('odd');
+    });
+  });
+
+  it('applyModeration returns the same array when nothing matched; the removed-id memory is bounded', () => {
+    const chat = [line('1')];
+    expect(applyModeration(chat, { kind: 'cleared', platform: 'twitch', destinationId: 'other', ts: TS })).toEqual({ chat, removedIds: [] });
+    const removed = rememberRemoved(new Set(['a', 'b']), ['c', 'd'], 3);
+    expect([...removed]).toEqual(['b', 'c', 'd']);
+    const same = new Set(['a']);
+    expect(rememberRemoved(same, [])).toBe(same);
   });
 });
 

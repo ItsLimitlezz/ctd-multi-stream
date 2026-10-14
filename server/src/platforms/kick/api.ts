@@ -4,8 +4,8 @@
 // - Users:            https://docs.kick.com/apis/users     (GET /public/v1/users)
 // - Channels:         https://docs.kick.com/apis/channels  (GET/PATCH /public/v1/channels)
 // GET /channels without params returns the caller's channel, including `stream.url` + `stream.key`
-// when the token has `streamkey:read`. PATCH /channels takes { stream_title, category_id, custom_tags };
-// we only ever send stream_title.
+// when the token has `streamkey:read`, and `stream.is_live` / `stream.viewer_count`. PATCH /channels
+// takes { stream_title, category_id, custom_tags }; we only ever send stream_title.
 
 import type { ScopedSecrets } from '../../services.js';
 import { PlatformHttpError, fetchJson } from '../common/http.js';
@@ -36,7 +36,15 @@ export interface KickChannel {
   broadcaster_user_id: number;
   slug: string;
   stream_title?: string | null;
-  stream?: { url?: string | null; key?: string | null; is_live?: boolean } | null;
+  stream?: { url?: string | null; key?: string | null; is_live?: boolean; viewer_count?: number | null } | null;
+}
+
+/** Viewers of a channel's current stream (null while it isn't live or Kick doesn't say). */
+export function liveViewerCount(channel: KickChannel): number | null {
+  const stream = channel.stream;
+  if (!stream || stream.is_live === false) return null;
+  const n = stream.viewer_count;
+  return typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 interface KickList<T> {

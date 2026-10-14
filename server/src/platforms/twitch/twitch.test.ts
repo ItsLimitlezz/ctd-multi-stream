@@ -5,7 +5,7 @@ import type { BrowserManager, ScopedSecrets } from '../../services.js';
 import type { OAuthTokens } from '../common/oauth.js';
 import { DriverError, type DriverContext, type PreparedLive } from '../types.js';
 import { forgetValidation } from './api.js';
-import { twitchDriver } from './index.js';
+import { OBS_DIRECT_TEST_WARNING, twitchDriver } from './index.js';
 import { DEFAULT_INGEST } from './options.js';
 
 // ---------------------------------------------------------------------------
@@ -149,9 +149,12 @@ const routes = {
   channels: 'PATCH api.twitch.tv/helix/channels',
   key: 'GET api.twitch.tv/helix/streams/key',
   config: 'POST ingest.twitch.tv/api/v3/GetClientConfiguration',
+  streams: 'GET api.twitch.tv/helix/streams',
 };
 
 const form = (c: Call) => Object.fromEntries(new URLSearchParams(c.body));
+/** A fresh run of the live's health watcher. */
+const watch = (live: PreparedLive, signal: AbortSignal) => live.health!(signal)[Symbol.asyncIterator]();
 const byRoute = (calls: Call[], route: string) => calls.filter((c) => `${c.method} ${c.url.host}${c.url.pathname}` === route);
 
 beforeEach(() => {
@@ -188,6 +191,13 @@ describe('info', () => {
     expect(dual?.default).toBe('off');
     expect(info.destinationFields.every((f) => f.target === 'option')).toBe(true);
     expect(info.notes).toMatch(/experimental/);
+    expect(info.testMode).toEqual({ supported: true, description: expect.stringMatching(/^Bandwidth test — .*OBS/) });
+    expect(info.testMode?.description).toMatch(/title is left unchanged/);
+    expect(info.testMode?.description).toMatch(/Not private with "OBS sends Dual Format directly".*publicly/);
+    // Every destination is prepared in test mode (the default rule, no override): an "OBS direct"
+    // one isn't skipped, because skipping would not stop OBS's own public output — it carries a
+    // warning instead (see the prepare tests).
+    expect(twitchDriver.supportsTestMode).toBeUndefined();
   });
 
   it('requires feeds per Dual Format mode', () => {
@@ -482,6 +492,125 @@ describe('prepare', () => {
       ctx,
     );
     expect(live.push?.url).toBe('rtmps://use20.contribute.live-video.net/app/live_141981764_SECRET?bandwidthtest=true');
+  });
+
+  it('test mode always streams as a bandwidth test', async () => {
+    stubFetch(liveRoutes());
+    const made = makeCtx({ testMode: true });
+    await made.secrets.setJson('oauth', tokens());
+    const live = await twitchDriver.prepare(dest(), account, 'Title', made.ctx);
+    expect(live.push?.url).toBe(`${DEFAULT_INGEST}/live_141981764_SECRET?bandwidthtest=true`);
+    // ...without doubling the flag when the destination already tests.
+    const again = await twitchDriver.prepare(dest({ bandwidthTest: true }), account, 'Title', made.ctx);
+    expect(again.push?.url).toBe(`${DEFAULT_INGEST}/live_141981764_SECRET?bandwidthtest=true`);
+    // OBS direct sends no video from here: nothing to change (it is flagged instead, see below).
+    expect((await twitchDriver.prepare(dest({ dualFormat: 'obs-direct' }), account, 'Title', made.ctx)).push).toBeNull();
+  });
+
+  it('test mode leaves the public channel title unchanged (prepare and live)', async () => {
+    const calls = stubFetch(liveRoutes());
+    const made = makeCtx({ testMode: true });
+    await made.secrets.setJson('oauth', tokens());
+    for (const options of [{}, { dualFormat: 'obs-direct' }]) {
+      const live = await twitchDriver.prepare(dest(options), account, 'Rehearsal', made.ctx);
+      await expect(live.setTitle!('Changed mid-test')).resolves.toBeUndefined();
+    }
+    expect(byRoute(calls, routes.channels)).toHaveLength(0);
+    // The stream key is still fetched for the relay (the bandwidth test needs it).
+    expect(byRoute(calls, routes.key)).toHaveLength(1);
+  });
+
+  it('test mode with OBS direct: still chat + viewers, but the card says OBS streams publicly', async () => {
+    stubFetch(liveRoutes({ [routes.streams]: () => json(200, { data: [{ user_id: '141981764', type: 'live', viewer_count: 7 }] }) }));
+    const made = makeCtx({ testMode: true });
+    await made.secrets.setJson('oauth', tokens());
+    const live = await twitchDriver.prepare(dest({ dualFormat: 'obs-direct' }), account, 'T', made.ctx);
+    expect(live.push).toBeNull();
+    expect(typeof live.chat).toBe('function');
+
+    const ctl = new AbortController();
+    const events = watch(live, ctl.signal);
+    expect((await events.next()).value).toEqual({ type: 'warning', message: OBS_DIRECT_TEST_WARNING });
+    expect(OBS_DIRECT_TEST_WARNING).toMatch(/^Not private: OBS streams to Twitch itself/);
+    expect([...OBS_DIRECT_TEST_WARNING].length).toBeLessThanOrEqual(200); // the runner's message limit
+    expect((await events.next()).value).toEqual({ type: 'viewers', count: 7 });
+    ctl.abort();
+    // An aborted watcher yields nothing, the warning included.
+    expect(await watch(live, ctl.signal).next()).toEqual({ done: true, value: undefined });
+  });
+
+  it('no warning for OBS direct outside test mode, nor for relayed destinations in test mode', async () => {
+    stubFetch(liveRoutes({ [routes.streams]: () => json(200, { data: [] }) }));
+    const plain = await connected();
+    const testing = makeCtx({ testMode: true });
+    await testing.secrets.setJson('oauth', tokens());
+    const cases = [
+      { ctx: plain.ctx, options: { dualFormat: 'obs-direct' } },
+      { ctx: testing.ctx, options: {} },
+    ];
+    for (const { ctx, options } of cases) {
+      const live = await twitchDriver.prepare(dest(options), account, 'T', ctx);
+      const ctl = new AbortController();
+      expect((await watch(live, ctl.signal).next()).value).toEqual({ type: 'viewers', count: null });
+      ctl.abort();
+    }
+  });
+
+  it('test mode applies to relay Dual Format too', async () => {
+    stubFetch(
+      liveRoutes({
+        [routes.config]: () =>
+          json(200, {
+            meta: { config_id: 'cfg-9' },
+            status: { result: 'success' },
+            ingest_endpoints: [{ protocol: 'RTMPS', url_template: 'rtmps://x.contribute.live-video.net/app/{stream_key}', authentication: 'v1_auth' }],
+            encoder_configurations: [
+              { type: 'obs_x264', width: 1920, height: 1080, framerate: { numerator: 60, denominator: 1 }, canvas_index: 0 },
+              { type: 'obs_x264', width: 1080, height: 1920, framerate: { numerator: 60, denominator: 1 }, canvas_index: 1 },
+            ],
+            audio_configurations: { live: [{ codec: 'ffmpeg_aac' }] },
+          }),
+      }),
+    );
+    const made = makeCtx({ testMode: true });
+    await made.secrets.setJson('oauth', tokens());
+    const live = await twitchDriver.prepare(dest({ dualFormat: 'relay-multitrack' }), account, 'T', made.ctx);
+    expect(live.push?.url).toBe('rtmps://x.contribute.live-video.net/app/v1_auth?bandwidthtest=true&clientConfigId=cfg-9');
+  });
+
+  it('health reports viewers from Helix (null until the stream is listed)', async () => {
+    let listed = false;
+    const calls = stubFetch(
+      liveRoutes({
+        [routes.streams]: () => json(200, { data: listed ? [{ user_id: '141981764', type: 'live', viewer_count: 42 }] : [] }),
+      }),
+    );
+    const { ctx } = await connected();
+    const live = await twitchDriver.prepare(dest(), account, 'T', ctx);
+    expect(typeof live.health).toBe('function');
+    expect(live.recovery).toBeUndefined();
+
+    const ctl = new AbortController();
+    const first = await watch(live, ctl.signal).next();
+    expect(first.value).toEqual({ type: 'viewers', count: null });
+    listed = true;
+    const second = await watch(live, ctl.signal).next();
+    expect(second.value).toEqual({ type: 'viewers', count: 42 });
+    ctl.abort();
+
+    const req = byRoute(calls, routes.streams)[0]!;
+    expect(req.url.searchParams.get('user_id')).toBe('141981764');
+    expect(req.headers.get('client-id')).toBe('cid123');
+    expect(req.headers.get('authorization')).toBe('Bearer at-1');
+  });
+
+  it('health stops at once when its signal aborts', async () => {
+    stubFetch(liveRoutes({ [routes.streams]: () => json(200, { data: [] }) }));
+    const { ctx } = await connected();
+    const live = await twitchDriver.prepare(dest(), account, 'T', ctx);
+    const ctl = new AbortController();
+    ctl.abort();
+    expect(await watch(live, ctl.signal).next()).toEqual({ done: true, value: undefined });
   });
 
   it('OBS direct: no video, no stream key, still title + chat', async () => {

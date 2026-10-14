@@ -1,7 +1,7 @@
 // Turns driver-produced ChatMessageInput into a safe, bounded ChatMessage.
 
 import { createHash } from 'node:crypto';
-import type { ChatFragment, ChatMessage, PlatformId } from '../../../shared/types.js';
+import type { ChatAlert, ChatAlertKind, ChatFragment, ChatMessage, PlatformId } from '../../../shared/types.js';
 import type { ChatMessageInput } from '../platforms/types.js';
 
 export const MAX_TEXT_LENGTH = 500;
@@ -114,7 +114,116 @@ export function normalizeChatMessage(
   if (input.highlighted === true) msg.highlighted = true;
   const reply = cleanReply(input.reply);
   if (reply) msg.reply = reply;
+  // Alerts ride on event lines only (sub, gift, cheer, raid, Super Chat…).
+  if (kind === 'event') {
+    const alert = cleanAlert(input.alert, name);
+    if (alert) msg.alert = alert;
+  }
   return msg;
+}
+
+// ---------------------------------------------------------------------------
+// Alerts (ChatMessage.alert, the CTD Overlay alert shape). They reach the web UI, the overlays and
+// the external API (which maps them again in api/alert-map.ts with these same rules).
+// ---------------------------------------------------------------------------
+
+export const MAX_ALERT_TIER_LENGTH = 32;
+export const MAX_GIFT_RECIPIENTS = 100;
+/** Money: up to 15 integer digits and 8 decimals ("5", "5.00", "0.99", "1234.5"). */
+export const DECIMAL_RE = /^\d{1,15}(?:\.\d{1,8})?$/;
+/** ISO 4217 currency code. */
+export const CURRENCY_RE = /^[A-Z]{3}$/;
+
+type AlertAmount = NonNullable<ChatAlert['amount']>;
+type AlertCountUnit = Extract<AlertAmount, { value: number }>['unit'];
+// Written as records so the compiler flags a kind or unit added to the shared type but not here.
+const ALERT_KINDS = new Set<string>(
+  Object.keys({ follow: 0, subscription: 0, gift: 0, cheer: 0, kicks: 0, raid: 0, membership: 0, superchat: 0, tip: 0 } satisfies Record<ChatAlertKind, 0>),
+);
+const ALERT_COUNT_UNITS = new Set<string>(
+  Object.keys({ months: 0, count: 0, bits: 0, kicks: 0, viewers: 0 } satisfies Record<AlertCountUnit, 0>),
+);
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+/** Non-negative safe integer, else undefined. */
+function cleanCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** cleanText for values that may also arrive as numbers (ids, tiers). */
+function cleanTextOrNumber(value: unknown, max: number): string {
+  return cleanText(typeof value === 'number' && Number.isFinite(value) ? String(value) : value, max);
+}
+
+/**
+ * An alert amount: a known count unit with a non-negative integer, or money as a decimal string
+ * with an ISO 4217 currency. Anything else (a float money value, "5,00", a negative count) is
+ * undefined: never guessed at.
+ */
+export function cleanAlertAmount(value: unknown): AlertAmount | undefined {
+  const a = asRecord(value);
+  if (!a) return undefined;
+  if (a.unit === 'currency') {
+    if (typeof a.value !== 'string' || typeof a.currency !== 'string') return undefined;
+    const amount = a.value.trim();
+    const currency = a.currency.trim().toUpperCase();
+    return DECIMAL_RE.test(amount) && CURRENCY_RE.test(currency) ? { unit: 'currency', value: amount, currency } : undefined;
+  }
+  const n = cleanCount(a.value);
+  if (typeof a.unit !== 'string' || !ALERT_COUNT_UNITS.has(a.unit) || n === undefined) return undefined;
+  return { unit: a.unit as AlertCountUnit, value: n };
+}
+
+function cleanGift(value: unknown): NonNullable<ChatAlert['gift']> | undefined {
+  const g = asRecord(value);
+  if (!g) return undefined;
+  const out: NonNullable<ChatAlert['gift']> = {};
+  if (Array.isArray(g.recipients)) {
+    const recipients: string[] = [];
+    for (const r of g.recipients as unknown[]) {
+      if (recipients.length >= MAX_GIFT_RECIPIENTS) break;
+      const name = cleanText(r, MAX_AUTHOR_LENGTH);
+      if (name) recipients.push(name);
+    }
+    if (recipients.length > 0) out.recipients = recipients;
+  }
+  const total = cleanCount(g.total);
+  if (total !== undefined) out.total = total;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * A driver's alert, cleaned like the rest of the message, or undefined when it isn't one (not an
+ * object, unknown kind). The user name falls back to `authorName` ('Anonymous' for an anonymous
+ * user, who never keeps an id); the avatar must be https; text is cleaned and capped; optional
+ * parts that are malformed are left out.
+ */
+export function cleanAlert(value: unknown, authorName: string): ChatAlert | undefined {
+  const a = asRecord(value);
+  if (!a || typeof a.kind !== 'string' || !ALERT_KINDS.has(a.kind)) return undefined;
+
+  const u = asRecord(a.user) ?? {};
+  const anonymous = u.anonymous === true;
+  const name = cleanText(u.name, MAX_AUTHOR_LENGTH) || (anonymous ? 'Anonymous' : authorName);
+  const id = anonymous ? '' : cleanTextOrNumber(u.id, MAX_ID_LENGTH);
+  const user: ChatAlert['user'] = id ? { id, name } : { name };
+  const avatar = cleanHttpUrl(u.avatar, true);
+  if (avatar) user.avatar = avatar;
+  if (anonymous) user.anonymous = true;
+
+  const alert: ChatAlert = { kind: a.kind as ChatAlertKind, user };
+  const amount = cleanAlertAmount(a.amount);
+  if (amount) alert.amount = amount;
+  const tier = cleanTextOrNumber(a.tier, MAX_ALERT_TIER_LENGTH);
+  if (tier) alert.tier = tier;
+  const text = cleanText(asRecord(a.message)?.text, MAX_TEXT_LENGTH);
+  if (text) alert.message = { text };
+  const gift = cleanGift(a.gift);
+  if (gift) alert.gift = gift;
+  return alert;
 }
 
 export const MAX_FRAGMENTS = 200;

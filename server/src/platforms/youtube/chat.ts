@@ -11,9 +11,15 @@
 // pollingIntervalMillis, never faster than every 8 s, slower when the chat is quiet or when
 // several YouTube chats share the developer app's daily quota.
 //   https://developers.google.com/youtube/v3/live/docs/liveChatMessages/list
+//
+// Besides messages the source yields moderation (messageDeletedEvent → message-deleted,
+// userBannedEvent → user-cleared) and structured alerts on event lines (Super Chat / Super Sticker
+// → superchat, new member / milestone → membership, gifted memberships → gift).
+//   https://developers.google.com/youtube/v3/live/docs/liveChatMessages#resource
 
 import type { Logger } from 'pino';
-import { DriverError, type ChatMessageInput } from '../types.js';
+import type { ChatAlert } from '../../../../shared/types.js';
+import { DriverError, type ChatMessageInput, type ChatModerationInput, type ChatSourceItem } from '../types.js';
 import {
   apiError,
   QUOTA_REASONS,
@@ -21,8 +27,10 @@ import {
   YouTubeApiError,
   type LiveChatMessage,
   type LiveChatPage,
+  type Uint64,
   type YouTubeClient,
 } from './api.js';
+import { moneyAmount } from './money.js';
 
 export interface ChatTimings {
   /** Minimum gap between chat requests (polls or stream connections). */
@@ -85,7 +93,7 @@ const pollers = new Set<ChatState>();
 class ChatEnded extends Error {}
 class StreamUnusable extends Error {}
 
-export function createChatSource(deps: ChatSourceDeps): (signal: AbortSignal) => AsyncIterable<ChatMessageInput> {
+export function createChatSource(deps: ChatSourceDeps): (signal: AbortSignal) => AsyncIterable<ChatSourceItem> {
   const t: ChatTimings = { ...DEFAULT_CHAT_TIMINGS, ...deps.timings };
   const state: ChatState = {
     mode: 'stream',
@@ -106,7 +114,7 @@ async function* runChat(
   t: ChatTimings,
   state: ChatState,
   signal: AbortSignal,
-): AsyncGenerator<ChatMessageInput> {
+): AsyncGenerator<ChatSourceItem> {
   state.liveChatId ??= await deps.liveChatId(signal);
   const liveChatId = state.liveChatId;
   if (!liveChatId) {
@@ -203,7 +211,7 @@ async function* streamOnce(
   state: ChatState,
   liveChatId: string,
   signal: AbortSignal,
-): AsyncGenerator<ChatMessageInput> {
+): AsyncGenerator<ChatSourceItem> {
   await sleep(state.lastRequestAt + t.minGapMs - Date.now(), signal);
   if (signal.aborted) return;
   state.lastRequestAt = Date.now();
@@ -274,7 +282,7 @@ async function* pollOnce(
   state: ChatState,
   liveChatId: string,
   signal: AbortSignal,
-): AsyncGenerator<ChatMessageInput> {
+): AsyncGenerator<ChatSourceItem> {
   await sleep(state.lastRequestAt + state.nextGapMs - Date.now(), signal);
   if (signal.aborted) return;
   state.lastRequestAt = Date.now();
@@ -310,7 +318,7 @@ function backlogFloor(deps: ChatSourceDeps, t: ChatTimings, state: ChatState): n
   return state.pageToken === null ? Math.max(since, state.lastSeenMs) : since;
 }
 
-function* pageMessages(value: unknown, floor: number, state: ChatState): Generator<ChatMessageInput> {
+function* pageMessages(value: unknown, floor: number, state: ChatState): Generator<ChatSourceItem> {
   if (!value || typeof value !== 'object') return;
   const raw = value as LiveChatPage & { error?: { code?: unknown } };
   if (raw.error) {
@@ -320,14 +328,48 @@ function* pageMessages(value: unknown, floor: number, state: ChatState): Generat
   }
   if (typeof raw.nextPageToken === 'string' && raw.nextPageToken) state.pageToken = raw.nextPageToken;
   for (const item of Array.isArray(raw.items) ? raw.items : []) {
+    // The chat is over: stop reading (not a moderation — the messages stay).
     if (item?.snippet?.type === 'chatEndedEvent') throw new ChatEnded();
     const ms = Date.parse(item?.snippet?.publishedAt ?? '');
     if (Number.isFinite(ms)) {
       if (ms < floor) continue;
       state.lastSeenMs = Math.max(state.lastSeenMs, ms);
     }
-    const msg = toChatMessage(item);
-    if (msg) yield msg;
+    const out = toChatItem(item);
+    if (out) yield out;
+  }
+}
+
+/** One liveChatMessage → a chat message, a moderation, or null (types we don't use). */
+export function toChatItem(item: LiveChatMessage | null | undefined): ChatSourceItem | null {
+  return toModeration(item) ?? toChatMessage(item);
+}
+
+function trimmed(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * messageDeletedEvent → message-deleted (the deleted message's id, which is the
+ * platformMessageId of the message we yielded); userBannedEvent (ban or timeout) → user-cleared
+ * (the banned channel id = the author.id of their messages, plus the display name).
+ */
+export function toModeration(item: LiveChatMessage | null | undefined): ChatModerationInput | null {
+  const s = item?.snippet;
+  switch (s?.type) {
+    case 'messageDeletedEvent': {
+      const platformMessageId = trimmed(s.messageDeletedDetails?.deletedMessageId);
+      return platformMessageId ? { kind: 'message-deleted', platformMessageId } : null;
+    }
+    case 'userBannedEvent': {
+      const banned = s.userBannedDetails?.bannedUserDetails;
+      const userId = trimmed(banned?.channelId);
+      const userName = trimmed(banned?.displayName);
+      if (!userId && !userName) return null;
+      return { kind: 'user-cleared', ...(userId ? { userId } : {}), ...(userName ? { userName } : {}) };
+    }
+    default:
+      return null;
   }
 }
 
@@ -345,8 +387,38 @@ function withComment(head: string, comment: string | undefined): string {
   return c ? `${head}: ${c}` : head;
 }
 
-function textOf(s: NonNullable<LiveChatMessage['snippet']>): { text: string; kind: 'message' | 'event' } | null {
-  const event = (text: string) => ({ text, kind: 'event' as const });
+/** A positive integer (counts, months) or null. */
+function positiveInt(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+type AlertBody = Omit<ChatAlert, 'user'>;
+
+interface Content {
+  text: string;
+  kind: 'message' | 'event';
+  /** Structured alert for event lines (the user is filled in from the author). */
+  alert?: AlertBody;
+  /** Paid message (Super Chat / Super Sticker). */
+  highlighted?: boolean;
+}
+
+/** Super Chat / Super Sticker alert: exact money amount, YouTube's tier, the viewer's comment. */
+function superchatAlert(
+  d: { amountMicros?: Uint64; currency?: string; tier?: number } | undefined,
+  comment: string | undefined,
+): AlertBody {
+  const alert: AlertBody = { kind: 'superchat' };
+  const amount = moneyAmount(d?.amountMicros, d?.currency);
+  if (amount) alert.amount = amount;
+  const tier = positiveInt(d?.tier);
+  if (tier !== null) alert.tier = String(tier);
+  const text = comment?.trim();
+  if (text) alert.message = { text };
+  return alert;
+}
+
+function contentOf(s: NonNullable<LiveChatMessage['snippet']>): Content | null {
   switch (s.type) {
     case 'textMessageEvent': {
       const text = s.textMessageDetails?.messageText ?? s.displayMessage;
@@ -354,33 +426,60 @@ function textOf(s: NonNullable<LiveChatMessage['snippet']>): { text: string; kin
     }
     case 'superChatEvent': {
       const d = s.superChatDetails;
-      return event(withComment(`Super Chat ${d?.amountDisplayString ?? ''}`.trim(), d?.userComment));
+      return {
+        kind: 'event',
+        text: withComment(`Super Chat ${d?.amountDisplayString ?? ''}`.trim(), d?.userComment),
+        alert: superchatAlert(d, d?.userComment),
+        highlighted: true,
+      };
     }
     case 'superStickerEvent': {
       const d = s.superStickerDetails;
-      return event(withComment(`Super Sticker ${d?.amountDisplayString ?? ''}`.trim(), d?.superStickerMetadata?.altText));
+      return {
+        kind: 'event',
+        text: withComment(`Super Sticker ${d?.amountDisplayString ?? ''}`.trim(), d?.superStickerMetadata?.altText),
+        // The sticker's alt text describes the sticker; it is not a message from the viewer.
+        alert: superchatAlert(d, undefined),
+        highlighted: true,
+      };
     }
     case 'newSponsorEvent': {
       const d = s.newSponsorDetails;
       const level = d?.memberLevelName?.trim();
-      return event(d?.isUpgrade ? `Upgraded membership${level ? ` to ${level}` : ''}` : `New member${level ? ` (${level})` : ''}`);
+      const alert: AlertBody = { kind: 'membership', amount: { unit: 'months', value: 1 } };
+      if (level) alert.tier = level;
+      const text = d?.isUpgrade ? `Upgraded membership${level ? ` to ${level}` : ''}` : `New member${level ? ` (${level})` : ''}`;
+      return { kind: 'event', text, alert };
     }
     case 'memberMilestoneChatEvent': {
       const d = s.memberMilestoneChatDetails;
-      const months = d?.memberMonth;
-      return event(withComment(months ? `Member for ${months} months` : 'Membership milestone', d?.userComment));
+      const months = positiveInt(d?.memberMonth);
+      const level = d?.memberLevelName?.trim();
+      const alert: AlertBody = { kind: 'membership' };
+      if (months !== null) alert.amount = { unit: 'months', value: months };
+      if (level) alert.tier = level;
+      const comment = d?.userComment?.trim();
+      if (comment) alert.message = { text: comment };
+      return { kind: 'event', text: withComment(months ? `Member for ${months} months` : 'Membership milestone', comment), alert };
     }
     case 'membershipGiftingEvent': {
-      const n = s.membershipGiftingDetails?.giftMembershipsCount ?? 1;
-      return event(`Gifted ${n} membership${n === 1 ? '' : 's'}`);
+      const d = s.membershipGiftingDetails;
+      const n = positiveInt(d?.giftMembershipsCount) ?? 1;
+      const level = d?.giftMembershipsLevelName?.trim();
+      const alert: AlertBody = { kind: 'gift', amount: { unit: 'count', value: n }, gift: { total: n } };
+      if (level) alert.tier = level;
+      return { kind: 'event', text: `Gifted ${n} membership${n === 1 ? '' : 's'}`, alert };
     }
     case 'giftEvent': {
+      // A paid YouTube gift (Jewels): a chat line only. alert.gift means gifted memberships/subs
+      // (docs/API.md), and no other alert kind fits.
       const g = s.giftEventDetails?.giftMetadata;
-      const combo = g?.comboCount ?? 1;
-      return event(`Sent ${g?.giftName ?? g?.altText ?? 'a gift'}${combo > 1 ? ` ×${combo}` : ''}`);
+      const combo = positiveInt(g?.comboCount) ?? 1;
+      return { kind: 'event', text: `Sent ${g?.giftName ?? g?.altText ?? 'a gift'}${combo > 1 ? ` ×${combo}` : ''}` };
     }
     default:
-      // Tombstones, bans, polls, members-only mode changes, per-recipient gift receipts.
+      // Tombstones, polls, members-only mode changes, per-recipient gift receipts (one alert per
+      // gifting event is enough). Deletions and bans are moderation (toModeration).
       return null;
   }
 }
@@ -389,15 +488,25 @@ function textOf(s: NonNullable<LiveChatMessage['snippet']>): { text: string; kin
 export function toChatMessage(item: LiveChatMessage | null | undefined): ChatMessageInput | null {
   const s = item?.snippet;
   if (!item?.id || !s) return null;
-  const content = textOf(s);
+  const content = contentOf(s);
   if (!content) return null;
   const a = item.authorDetails ?? {};
-  const author: ChatMessageInput['author'] = { name: a.displayName?.trim() || 'YouTube user' };
+  const name = a.displayName?.trim() || 'YouTube user';
+  const channelId = trimmed(a.channelId) ?? trimmed(s.authorChannelId);
+  const author: ChatMessageInput['author'] = { name };
+  if (channelId) author.id = channelId;
   if (a.profileImageUrl) author.avatarUrl = a.profileImageUrl;
   const badges = badgesOf(a);
   if (badges.length > 0) author.badges = badges;
-  const msg: ChatMessageInput = { id: item.id, author, text: content.text, kind: content.kind };
+  const msg: ChatMessageInput = { id: item.id, platformMessageId: item.id, author, text: content.text, kind: content.kind };
   if (s.publishedAt) msg.ts = s.publishedAt;
+  if (content.highlighted) msg.highlighted = true;
+  if (content.alert) {
+    const user: ChatAlert['user'] = { name };
+    if (channelId) user.id = channelId;
+    if (a.profileImageUrl) user.avatar = a.profileImageUrl;
+    msg.alert = { ...content.alert, user };
+  }
   return msg;
 }
 

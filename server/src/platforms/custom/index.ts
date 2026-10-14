@@ -5,6 +5,8 @@ import type { Destination, PlatformInfo } from '../../../../shared/types.js';
 import { DriverError, type DriverContext, type PlatformDriver, type PreparedLive } from '../types.js';
 import { joinIngestUrl, rtmpUrlProblem, safeHost, streamKeyProblem } from './url.js';
 
+const TEST_MODE_SKIPPED = 'Custom servers are skipped while testing';
+
 const info: PlatformInfo = {
   id: 'custom',
   name: 'Custom RTMP',
@@ -39,6 +41,8 @@ const info: PlatformInfo = {
   notes:
     'For any service that is not built in (Trovo, Owncast, PeerTube, a second restreamer, your own server...). ' +
     'Video is passed through unchanged; the title and chat are not managed for custom destinations.',
+  // The app can't know whether a custom server is private, so nothing is sent to it while testing.
+  testMode: { supported: false, description: TEST_MODE_SKIPPED },
 };
 
 async function readKey(ctx: DriverContext): Promise<string> {
@@ -62,6 +66,8 @@ export const customDriver: PlatformDriver = {
   },
 
   async prepare(dest, _account, _title, ctx): Promise<PreparedLive> {
+    // The orchestrator skips custom destinations in test mode; never push publicly if one gets here.
+    if (ctx.testMode) throw new DriverError(TEST_MODE_SKIPPED, 'not-eligible');
     const found = await problems(dest, ctx);
     if (found.length > 0) throw new DriverError(`${found.join('; ')}. Edit the destination.`, 'misconfigured');
     const url = joinIngestUrl(dest.ingestUrl!, await readKey(ctx));

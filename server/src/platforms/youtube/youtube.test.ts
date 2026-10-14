@@ -10,7 +10,7 @@ import {
   YOUTUBE_SCOPE,
   YouTubeClient,
 } from './api.js';
-import { BROADCAST_KEY, confirmLive, finishBroadcast, LIVE_STREAM_KEY } from './broadcast.js';
+import { BROADCAST_KEY, confirmLive, finishBroadcast, LEFTOVER_BROADCASTS_KEY, LIVE_STREAM_KEY } from './broadcast.js';
 import { youtubeDriver } from './index.js';
 import { readOptions, youtubeTitle } from './info.js';
 import {
@@ -30,6 +30,7 @@ const STREAMS = `${API_BASE}/liveStreams`;
 const BROADCASTS = `${API_BASE}/liveBroadcasts`;
 const BIND = `${API_BASE}/liveBroadcasts/bind`;
 const TRANSITION = `${API_BASE}/liveBroadcasts/transition`;
+const VIDEOS = `${API_BASE}/videos`;
 
 const STREAM = {
   id: 'stream-1',
@@ -115,10 +116,15 @@ describe('info', () => {
       enableChat: true,
     });
     expect(info.notes).toMatch(/quota/);
+    expect(info.testMode).toEqual({ supported: true, description: 'Private broadcast — only you can see it' });
+    // Default (no supportsTestMode): every YouTube destination can stream privately.
+    expect(youtubeDriver.supportsTestMode).toBeUndefined();
   });
 
   it('reads options defensively and builds valid titles', () => {
     expect(readOptions({})).toEqual({ privacy: 'public', latency: 'low', madeForKids: false, enableChat: true });
+    expect(readOptions({ privacy: 'public', latency: 'normal' }, true)).toEqual({ privacy: 'private', latency: 'normal', madeForKids: false, enableChat: true });
+    expect(readOptions({ privacy: 'unlisted' }, false).privacy).toBe('unlisted');
     expect(readOptions({ privacy: 'bogus', latency: 'ultraLow', madeForKids: true, enableChat: false })).toEqual({
       privacy: 'public',
       latency: 'ultraLow',
@@ -399,11 +405,43 @@ describe('prepare', () => {
     expect(stub.calls.every((c) => c.url.host === 'oauth2.googleapis.com' || c.headers.authorization === 'Bearer access-1')).toBe(true);
   });
 
+  it('test mode forces a private broadcast whatever the destination privacy', async () => {
+    happyRoutes();
+    // The second prepare reuses the stream and ends the first broadcast (leftover).
+    stub.on('GET', STREAMS, json({ items: [STREAM] })).on('POST', TRANSITION, json({ id: 'bc-1', status: { lifeCycleStatus: 'complete' } }));
+    const { ctx } = await connectedCtx();
+    const dest = makeDestination({ options: { privacy: 'public', latency: 'low', madeForKids: false, enableChat: true } });
+    await youtubeDriver.prepare(dest, makeAccount(), 'Testing', { ...ctx, testMode: true });
+    const body = stub.callsTo('POST', BROADCASTS)[0]!.body as { status: unknown };
+    expect(body.status).toEqual({ privacyStatus: 'private', selfDeclaredMadeForKids: false });
+
+    await youtubeDriver.prepare(dest, makeAccount(), 'Real', { ...ctx, testMode: false });
+    expect((stub.callsTo('POST', BROADCASTS)[1]!.body as { status: unknown }).status).toEqual({ privacyStatus: 'public', selfDeclaredMadeForKids: false });
+  });
+
+  it('health reports the broadcast viewer count from videos.list', async () => {
+    happyRoutes();
+    stub.on('GET', VIDEOS, json({ items: [{ id: 'bc-1', liveStreamingDetails: { concurrentViewers: '42' } }] }));
+    const { ctx } = await connectedCtx();
+    const prepared = await youtubeDriver.prepare(makeDestination(), makeAccount(), 'Title', ctx);
+    expect(prepared.recovery).toBeUndefined(); // viewers only: YouTube lives are not auto-recovered
+    const ctl = new AbortController();
+    const it = prepared.health!(ctl.signal)[Symbol.asyncIterator]();
+    expect((await it.next()).value).toEqual({ type: 'viewers', count: 42 });
+    ctl.abort();
+    await it.return?.(undefined);
+    const call = stub.callsTo('GET', VIDEOS)[0]!;
+    expect(call.url.searchParams.get('id')).toBe('bc-1');
+    expect(call.url.searchParams.get('part')).toBe('liveStreamingDetails');
+  });
+
   it('reuses the stored stream and skips chat when disabled or made for kids', async () => {
     stub
       .on('GET', STREAMS, json({ items: [STREAM] }))
       .on('POST', BROADCASTS, json(BROADCAST))
-      .on('POST', BIND, json({ id: 'bc-1' }));
+      .on('POST', BIND, json({ id: 'bc-1' }))
+      // The second prepare ends the first one's broadcast.
+      .on('POST', TRANSITION, json({ id: 'bc-1', status: { lifeCycleStatus: 'complete' } }));
     const { ctx, destinationSecrets } = await connectedCtx();
     await destinationSecrets.set(LIVE_STREAM_KEY, 'stream-1');
     const prepared = await youtubeDriver.prepare(
@@ -427,7 +465,8 @@ describe('prepare', () => {
       .on('GET', STREAMS, json({ items: [] }), json({ items: [{ ...STREAM, snippet: { channelId: 'UCother' } }] }))
       .on('POST', STREAMS, json({ ...STREAM, id: 'stream-2' }))
       .on('POST', BROADCASTS, json(BROADCAST))
-      .on('POST', BIND, json({ id: 'bc-1' }));
+      .on('POST', BIND, json({ id: 'bc-1' }))
+      .on('POST', TRANSITION, json({ id: 'bc-1', status: { lifeCycleStatus: 'complete' } }));
     const { ctx, destinationSecrets } = await connectedCtx();
     await destinationSecrets.set(LIVE_STREAM_KEY, 'stream-old');
     await youtubeDriver.prepare(makeDestination(), makeAccount(), 'Title', ctx);
@@ -447,6 +486,123 @@ describe('prepare', () => {
     const transition = stub.callsTo('POST', TRANSITION)[0]!;
     expect(Object.fromEntries(transition.url.searchParams)).toEqual({ broadcastStatus: 'complete', id: 'old-bc', part: 'status' });
     expect(await destinationSecrets.get(BROADCAST_KEY)).toBe('bc-1');
+    expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toBeNull();
+  });
+
+  describe('a leftover broadcast that cannot be ended', () => {
+    /** The leftover 'old-bc' as liveBroadcasts.list returns it. */
+    const leftover = (status: string, boundStreamId = 'stream-1') =>
+      json({ items: [{ id: 'old-bc', status: { lifeCycleStatus: status }, contentDetails: { boundStreamId } }] });
+
+    function routes() {
+      stub
+        .on('POST', TRANSITION, googleError(503, 'backendError'))
+        .on('GET', STREAMS, json({ items: [STREAM] }))
+        .on('POST', BROADCASTS, json(BROADCAST))
+        .on('POST', BIND, json({ id: 'bc-1' }));
+    }
+
+    async function leftoverCtx() {
+      const c = await connectedCtx();
+      await c.destinationSecrets.set(LIVE_STREAM_KEY, 'stream-1');
+      await c.destinationSecrets.set(BROADCAST_KEY, 'old-bc');
+      return c;
+    }
+
+    it('blocks a test-mode live while it is still live on the same stream, keeps its id, and goes ahead once it ends', async () => {
+      routes();
+      stub.on('GET', BROADCASTS, leftover('live'));
+      const { ctx, destinationSecrets } = await leftoverCtx();
+      const test = { ...ctx, testMode: true };
+      // Retryable (not fatal): the runner tries again; a lasting failure tells the user what to do.
+      await expectDriverError(youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', test), 'platform-error', /still live.*YouTube Studio/);
+      expect(stub.callsTo('POST', BROADCASTS)).toHaveLength(0);
+      expect(stub.callsTo('POST', BIND)).toHaveLength(0);
+      expect(stub.callsTo('GET', BROADCASTS)[0]!.url.searchParams.get('part')).toBe('status,contentDetails');
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toEqual(['old-bc']);
+
+      stub.on('POST', TRANSITION, json({ id: 'old-bc', status: { lifeCycleStatus: 'complete' } }));
+      await youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', test);
+      expect(stub.callsTo('POST', TRANSITION).at(-1)!.url.searchParams.get('id')).toBe('old-bc');
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toBeNull();
+      expect(await destinationSecrets.get(BROADCAST_KEY)).toBe('bc-1');
+    });
+
+    it('blocks normal lives too while it is starting or testing on the same stream', async () => {
+      for (const status of ['liveStarting', 'testing', 'testStarting']) {
+        routes();
+        stub.on('GET', BROADCASTS, leftover(status));
+        const { ctx } = await leftoverCtx();
+        await expectDriverError(youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', ctx), 'platform-error', new RegExp(`still ${status}`));
+      }
+      expect(stub.callsTo('POST', BROADCASTS)).toHaveLength(0);
+    });
+
+    it('fails closed when YouTube cannot say whether it is still live', async () => {
+      routes();
+      stub.on('GET', BROADCASTS, googleError(503, 'backendError'));
+      const { ctx, destinationSecrets } = await leftoverCtx();
+      await expectDriverError(youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', { ...ctx, testMode: true }), 'platform-error', /make sure it is off air/);
+      expect(stub.callsTo('POST', BROADCASTS)).toHaveLength(0);
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toEqual(['old-bc']);
+    });
+
+    it('deletes an upcoming (auto-start) leftover on the same stream and goes ahead', async () => {
+      routes();
+      stub.on('GET', BROADCASTS, leftover('ready')).on('DELETE', BROADCASTS, new Response(null, { status: 204 }));
+      const { ctx, destinationSecrets } = await leftoverCtx();
+      await youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', { ...ctx, testMode: true });
+      expect(stub.callsTo('DELETE', BROADCASTS).map((c) => c.url.searchParams.get('id'))).toEqual(['old-bc']);
+      expect(stub.callsTo('POST', BROADCASTS)).toHaveLength(1);
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toBeNull();
+      expect(await destinationSecrets.get(BROADCAST_KEY)).toBe('bc-1');
+
+      // If it can't be deleted either, it could auto-start with the new live: retry later.
+      stub.on('DELETE', BROADCASTS, googleError(503, 'backendError'));
+      await destinationSecrets.set(BROADCAST_KEY, 'old-bc');
+      await expectDriverError(youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', ctx), 'platform-error');
+      expect(stub.callsTo('POST', BROADCASTS)).toHaveLength(1);
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toEqual(['old-bc']);
+    });
+
+    it('goes ahead when it is bound to another stream, and retries it on the next prepare', async () => {
+      routes();
+      stub.on('GET', BROADCASTS, leftover('live', 'stream-other'));
+      const { ctx, destinationSecrets } = await leftoverCtx();
+      await youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', { ...ctx, testMode: true });
+      // The new broadcast takes BROADCAST_KEY; the leftover's id is not lost.
+      expect(await destinationSecrets.get(BROADCAST_KEY)).toBe('bc-1');
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toEqual(['old-bc']);
+
+      stub.on('POST', TRANSITION, json({ status: { lifeCycleStatus: 'complete' } }));
+      stub.calls.length = 0;
+      await youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', ctx);
+      expect(stub.callsTo('POST', TRANSITION).map((c) => c.url.searchParams.get('id'))).toEqual(['old-bc', 'bc-1']);
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toBeNull();
+    });
+
+    it("goes ahead (keeping the id) when it isn't readable by this account, and forgets one that is gone", async () => {
+      routes();
+      stub.on('POST', TRANSITION, googleError(403, 'forbidden')).on('GET', BROADCASTS, googleError(403, 'forbidden'));
+      const { ctx, destinationSecrets } = await leftoverCtx();
+      await youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', ctx);
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toEqual(['old-bc']);
+
+      stub.on('POST', TRANSITION, googleError(503, 'backendError')).on('GET', BROADCASTS, json({ items: [] }));
+      await youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', ctx);
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toBeNull();
+    });
+
+    it('keeps the leftover id when binding the new broadcast fails', async () => {
+      routes();
+      stub
+        .on('GET', BROADCASTS, leftover('live', 'stream-other'))
+        .on('POST', BIND, googleError(500, 'backendError'))
+        .on('DELETE', BROADCASTS, new Response(null, { status: 204 }));
+      const { ctx, destinationSecrets } = await leftoverCtx();
+      await expectDriverError(youtubeDriver.prepare(makeDestination(), makeAccount(), 'T', ctx), 'platform-error');
+      expect(await destinationSecrets.getJson(LEFTOVER_BROADCASTS_KEY)).toEqual(['old-bc']);
+    });
   });
 
   it('maps "live streaming not enabled" to not-eligible with the features link', async () => {

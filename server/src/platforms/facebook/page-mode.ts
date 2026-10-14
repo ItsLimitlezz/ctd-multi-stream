@@ -11,6 +11,13 @@
 //   POST /{live-video-id}?end_live_video=true ends it (status → VOD).
 // Dev mode: "Apps in Development Mode can request any Permission from any app User who has a Role
 // on the app" (https://developers.facebook.com/docs/pages-api/overview) — no App Review needed.
+//
+// "Only me" (destination option privacy 'self', and always in session test mode): the live is
+// created with privacy {"value":"SELF"}. The reference lists `privacy` for Page lives without its
+// values, so if Graph refuses SELF for the Page the live is created with status=UNPUBLISHED instead
+// (Facebook receives the stream as a preview and shows it to nobody); that live is deleted again
+// at the end unless someone published it meanwhile.
+// Viewers: GET /{live-video-id}?fields=live_views every 30 s (viewers.ts).
 
 import { timingSafeEqual } from 'node:crypto';
 import type { ConnectPoll, ConnectStart } from '../../../../shared/api.js';
@@ -20,7 +27,8 @@ import { truncateTitle } from '../common/http.js';
 import { loadTokens, makeState, parseCallbackUrl, saveTokens } from '../common/oauth.js';
 import { DriverError, type DriverContext, type PreparedLive } from '../types.js';
 import { liveComments } from './comments.js';
-import { GraphClient, OAUTH_DIALOG_URL } from './graph.js';
+import { GraphApiError, GraphClient, OAUTH_DIALOG_URL } from './graph.js';
+import { watchLiveViews } from './viewers.js';
 
 export const TITLE_MAX = 254;
 /** Permissions requested in the login dialog (classic Facebook Login or Login for Business with scope). */
@@ -39,6 +47,8 @@ export interface PageModeEnv {
   graphHost?: string;
   streamingHost?: string;
   commentPollMs?: number;
+  /** Viewer count poll interval (default 30 s). */
+  viewersPollMs?: number;
 }
 
 interface PendingAuth {
@@ -334,9 +344,22 @@ function absoluteFacebookUrl(permalink: string): string | null {
   }
 }
 
-function privacyParam(dest: Destination): string | null {
-  // Pages are public by default; only send privacy for "Only me" test lives.
-  return dest.options.privacy === 'self' ? JSON.stringify({ value: 'SELF' }) : null;
+/** Privacy "Only me" (Graph Privacy parameter). */
+export const SELF_PRIVACY = JSON.stringify({ value: 'SELF' });
+
+/** "Only me": the destination's test audience, or always while session test mode is on. */
+function wantsOnlyMe(dest: Destination, testMode: boolean): boolean {
+  // Pages are public by default; privacy is only sent for "Only me" lives.
+  return testMode || dest.options.privacy === 'self';
+}
+
+/**
+ * Graph refused the "Only me" privacy for this Page (invalid parameter, or an error about privacy).
+ * Token, eligibility and permission problems are not privacy problems.
+ */
+function privacyRejected(err: unknown): boolean {
+  if (!(err instanceof GraphApiError) || err.code === 'needs-login' || err.code === 'not-eligible') return false;
+  return err.graphCode === 100 || /privacy/i.test(err.message);
 }
 
 export async function preparePageLive(
@@ -349,23 +372,44 @@ export async function preparePageLive(
   if (!account) throw new DriverError('Choose a connected Facebook account for this destination', 'not-connected');
   const graph = graphFor(ctx, env);
   const page = await resolvePage(account, ctx, graph);
+  const testMode = ctx.testMode === true;
 
   // Only the title (never a category/topic/tags).
   const form: Record<string, string> = { status: 'LIVE_NOW' };
   const cleanTitle = truncateTitle(title, TITLE_MAX);
   if (cleanTitle) form.title = cleanTitle;
-  const privacy = privacyParam(dest);
-  if (privacy) form.privacy = privacy;
+  const onlyMe = wantsOnlyMe(dest, testMode);
+  if (onlyMe) form.privacy = SELF_PRIVACY;
 
-  const live = await graph.post<CreatedLive>(`${page.id}/live_videos`, page.accessToken, form, ctx.signal);
+  const path = `${page.id}/live_videos`;
+  let unpublished = false;
+  let live: CreatedLive;
+  try {
+    live = await graph.post<CreatedLive>(path, page.accessToken, form, ctx.signal);
+  } catch (err) {
+    if (!onlyMe || ctx.signal.aborted || !privacyRejected(err)) throw err;
+    // Nothing may go out publicly: fall back to an unpublished live (a preview nobody sees).
+    ctx.log.warn(
+      { pageId: page.id, error: errorText(err) },
+      'Facebook refused the "Only me" privacy for this Page; creating the live unpublished (preview only) instead',
+    );
+    const fallback: Record<string, string> = { ...form, status: 'UNPUBLISHED' };
+    delete fallback.privacy;
+    live = await graph.post<CreatedLive>(path, page.accessToken, fallback, ctx.signal);
+    unpublished = true;
+  }
   const liveId = live?.id;
   if (!liveId) throw new DriverError('Facebook did not return a live video id', 'platform-error');
-  const end = () => endLiveVideo(graph, liveId, page.accessToken, ctx);
+  const end = (signal?: AbortSignal) =>
+    unpublished ? endUnpublishedLive(graph, liveId, page.accessToken, ctx, signal) : endLiveVideo(graph, liveId, page.accessToken, ctx);
   if (!live.secure_stream_url) {
     await end().catch(() => {});
     throw new DriverError('Facebook did not return an RTMPS stream URL for the live video', 'platform-error');
   }
-  ctx.log.info({ pageId: page.id, liveVideoId: liveId }, 'Facebook live video created');
+  ctx.log.info(
+    { pageId: page.id, liveVideoId: liveId, onlyMe, unpublished, testMode },
+    unpublished ? 'Facebook live video created unpublished (preview only)' : 'Facebook live video created',
+  );
 
   // Best effort: a failure here must not lose the live that now exists (the caller ends it on abort).
   let watchUrl: string | null = null;
@@ -390,7 +434,47 @@ export async function preparePageLive(
         { graph, liveVideoId: liveId, token: page.accessToken, log: ctx.log, streamingHost: env.streamingHost, pollMs: env.commentPollMs },
         signal,
       ),
+    // Viewer count only (live_views every 30 s); Page lives are not recovered automatically.
+    health: (signal) =>
+      watchLiveViews(
+        {
+          graph,
+          liveVideoId: liveId,
+          token: page.accessToken,
+          log: ctx.log,
+          ...(env.viewersPollMs !== undefined ? { timings: { pollMs: env.viewersPollMs } } : {}),
+        },
+        signal,
+      ),
   };
+}
+
+/**
+ * End the unpublished fallback live: delete it while it is still unpublished (a leftover preview
+ * nobody needs). If someone published it in the meantime it is ended like any live and kept.
+ * Never throws.
+ */
+async function endUnpublishedLive(graph: GraphClient, liveId: string, token: string, ctx: DriverContext, signal?: AbortSignal): Promise<void> {
+  let status: string | null;
+  try {
+    status = (await graph.get<{ status?: string }>(liveId, token, { fields: 'status' }, signal))?.status ?? null;
+  } catch (err) {
+    ctx.log.warn({ liveVideoId: liveId, error: errorText(err) }, 'reading the unpublished Facebook live failed; leaving it as is');
+    return;
+  }
+  if (!status) return; // unknown state: never delete what we can't see
+  if (!NOT_STARTED_STATUSES.has(status)) {
+    await endLiveVideo(graph, liveId, token, ctx).catch((err: unknown) => {
+      ctx.log.warn({ liveVideoId: liveId, error: errorText(err) }, 'ending the Facebook live failed; it ends when the stream stops');
+    });
+    return;
+  }
+  try {
+    await graph.delete(liveId, token, signal);
+    ctx.log.info({ liveVideoId: liveId }, 'deleted the unpublished Facebook test live');
+  } catch (err) {
+    ctx.log.warn({ liveVideoId: liveId, error: errorText(err) }, 'deleting the unpublished Facebook live failed');
+  }
 }
 
 /** End the live; "already ended / never started" is not an error. */

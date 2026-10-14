@@ -49,7 +49,7 @@ Authorization: Bearer ctd_pat_3fK9wQ1v…
 
 | Scope | Grants |
 |---|---|
-| `chat:read` | `GET /chat`, `chat.*` events |
+| `chat:read` | `GET /chat`, `chat.*` and `alert.*` events |
 | `status:read` | `GET /status`, `stream.*`, `feed.*`, `destination.*`, `system.notice` events |
 
 `/`, `/events` and `/events/poll` return whatever the token's scopes allow. Browser-only
@@ -166,7 +166,17 @@ event stream.
 - `down` = the session is running, the destination is enabled (and not skipped by test mode), and
   it isn't reaching the platform right now (`error`, `retrying`, `recovering`, or `waiting-for-feed`).
   This is the field to light up red.
-- `viewers`: `null` when the platform doesn't report it (or hides it). Never `0` for "unknown".
+- `session.testMode`: the session streams in **test mode** (the dashboard switch; it can only change
+  while no session runs). Every destination uses its platform's private/test setting: Twitch
+  bandwidth test, YouTube private broadcast, Instagram Practice, Facebook Page "only me".
+  Destinations whose platform (or account) has none are not started at all: `phase: "disabled"`,
+  `message: "Skipped — Kick has no test mode"`, never `down`. Test mode never changes a channel
+  title (Twitch, Kick), which is public even during a bandwidth test; `session.title` is applied
+  when the stream goes live outside test mode.
+- `viewers`: current viewers while live, as the platform reports them: Twitch, Kick and Facebook Page
+  (polled every 30 s), YouTube (every 60 s), Instagram and TikTok (read from the live page). `null`
+  when unknown: not live, not reported yet, hidden by the platform, or never reported (X, custom
+  RTMP). Never `0` for "unknown".
 - `platforms[]`: per-platform rollup. `live` if any of its destinations is live; `viewers` is the sum
   of known counts (null if none known); `error` is the message of the first down destination that
   has one (`null` if none does; check `destinations[].down` for the down state itself).
@@ -251,22 +261,27 @@ Without `after`: returns nothing but the current cursor (`next`), so you can sta
 }
 ```
 - `id` is stable for the message (prefixed with the platform) — use it to apply deletions.
-- `user.id` is `<platform>:<id>` when the chat source gives the platform's user id, otherwise
-  `<platform>:name:<display name>` (always for browser-read chat on Instagram/TikTok/X/Facebook
-  profile; for now also Twitch, YouTube, Kick and Facebook Page — see §6). Treat it as opaque:
-  compare it, don't parse it.
+- `user.id` is `<platform>:<id>` when the chat source gives the platform's user id (Twitch,
+  YouTube, Kick; Facebook Page when Facebook shares the commenter), otherwise
+  `<platform>:name:<display name>` (browser-read chat on Instagram, TikTok, X and Facebook profile).
+  Treat it as opaque: compare it, don't parse it.
 - `roles` ⊆ `broadcaster`, `moderator`, `vip`, `subscriber`, `member`, `verified`, `founder`,
   `artist`, `bot`; the raw platform badges stay in `badges`.
 - `fragments`: joining every fragment's `text` always equals `text`: `text` fragments, `link`
-  fragments for URLs, and `emote` fragments where the chat source resolves emotes (as in the
-  example). Twitch emotes and Kick emote codes are not resolved yet (§6): today Kick emotes appear
-  in `text` as `:name:`. `action` (`/me` messages) is likewise `false` until then.
+  fragments for URLs, and `emote` fragments (with an `https` `image`) where the chat source
+  resolves emotes: Twitch emotes and Kick emote codes (an emote fragment's `text` is how the emote
+  reads in `text`, e.g. its name). Twitch cheers (Bits) also get `cheermote` fragments: `text` as
+  written (e.g. `Cheer100`) and an integer `amount` of bits, no `image`. `mention` is reserved: no
+  chat source sends it yet. Treat a fragment type you don't know as text.
+- `action` is `true` for `/me` messages (Twitch, Kick); `highlighted` for highlighted or paid
+  messages.
 - `kind: "event"` = a platform notice shown in chat (sub, raid, Super Chat…), `text` is its
-  human-readable line.
+  human-readable line. When the notice is a structured alert, an `alert.<kind>` event (below)
+  follows it.
 - `color` is `#RRGGBB` or `null`; `avatar` is an `https` URL or `null`. `channel` is the
   destination name.
-- `platformMessageId` and `user.login` are `null` when the chat source doesn't provide them (for
-  now: always, §6). `reply`
+- `platformMessageId` and `user.login` are `null` when the chat source doesn't provide them
+  (browser-read chat). `reply`
   is `null` or `{ "messageId", "userName", "text" }` (`messageId` in the same prefixed form as
   `id`; any of them may be `null`).
 
@@ -285,9 +300,75 @@ either field may be `null`.
 ```json
 { "platform": "twitch", "destinationId": "5b1c…" }
 ```
-Moderation is reported where the platform exposes it: Twitch, YouTube and Kick — once their chat
-readers report it (not yet, §6; handle these events now, they will start arriving without an API
-change). Browser-read chat (Instagram, TikTok, X, Facebook profile) has no deletion events.
+Moderation is reported where the platform exposes it: Twitch (deleted messages, bans and
+timeouts, `/clear`), YouTube (deleted messages, bans and timeouts) and Kick (deleted messages,
+bans and timeouts, cleared chat). Browser-read chat (Instagram, TikTok, X, Facebook profile) has no
+deletion events. `GET /chat` already leaves removed messages out.
+
+### `alert.<kind>` — `chat:read`
+Structured platform alerts, in the CTD Overlay alert shape. Each one is also a `chat.message`
+(`kind: "event"`, a readable `text`), sent right before it; `messageId` is that message's `id`.
+Alerts are live events only: `GET /chat` returns the chat line, not the alert. Subscribe with
+`types=alert.*` (note that `chat.*` does not include them).
+
+| Type | From | `amount` |
+|---|---|---|
+| `alert.subscription` | Twitch sub / resub, Kick subscription | `months` (cumulative), `tier` = `1000` / `2000` / `3000` / `Prime` on Twitch |
+| `alert.gift` | Twitch gifted subs (single and mystery), Kick gifted subscriptions, YouTube gifted memberships | `count` (subs gifted), `gift.recipients` when known |
+| `alert.cheer` | Twitch Bits | `bits` |
+| `alert.raid` | Twitch raid, Kick host | `viewers` |
+| `alert.membership` | YouTube new member (`months: 1`), member milestone | `months` |
+| `alert.superchat` | YouTube Super Chat and Super Sticker | `currency` |
+| `alert.follow`, `alert.kicks`, `alert.tip` | Reserved for the CTD Overlay kinds; no chat source sends them yet | — |
+
+Kick Kicks and YouTube paid gifts (Jewels) are `chat.message` event lines only
+(`kind: "event"`), with no alert.
+
+```json
+{
+  "kind": "subscription",
+  "user": { "id": "twitch:144552210", "name": "DJFan" },
+  "amount": { "unit": "months", "value": 12 },
+  "tier": "1000",
+  "message": { "text": "a year of DPRTMNT!" },
+  "platform": "twitch",
+  "destinationId": "5b1c…",
+  "messageId": "twitch:3f1d7c2a-…",
+  "ts": 1791830000123
+}
+```
+```json
+{
+  "kind": "superchat",
+  "user": { "id": "youtube:UCx9…", "name": "Night Owl", "avatar": "https://yt3.ggpht.com/…" },
+  "amount": { "unit": "currency", "value": "5.00", "currency": "USD" },
+  "message": { "text": "play the remix!" },
+  "platform": "youtube",
+  "destinationId": "7c4e…",
+  "messageId": "youtube:LCC.Cg8KDQ…",
+  "ts": 1791830012456
+}
+```
+```json
+{
+  "kind": "gift",
+  "user": { "name": "Anonymous", "anonymous": true },
+  "amount": { "unit": "count", "value": 5 },
+  "gift": { "total": 5 },
+  "platform": "twitch",
+  "destinationId": "5b1c…",
+  "messageId": "twitch:9a0b…",
+  "ts": 1791830020789
+}
+```
+- Fields that don't apply are left out (not `null`): `amount`, `tier`, `message`, `gift`,
+  `user.id` (anonymous users), `user.avatar`, `user.anonymous`.
+- `user.id` has the `chat.message` `user.id` form, so it can be matched with chat authors.
+- `amount.value` is an integer for `months`, `count`, `bits`, `kicks` and `viewers`. Money
+  (`unit: "currency"`) is a **decimal string** with an ISO 4217 `currency` (`"5.00"` `USD`,
+  `"1000"` `JPY`) — never a float; format it with the currency's own rules.
+- `gift`: `{ "recipients"?: [names], "total"?: integer }` (for a gift bomb `total` is the number of
+  subs; recipients may be missing or partial).
 
 ### `stream.status` — `status:read`
 `data` = the `session` object from `/status`. Sent when status, title, test mode or auto go-live change.
@@ -323,15 +404,11 @@ cursor is from before a restart); refetch `/status` and `/chat`.
 
 ## 6. Not in v1 (yet)
 
-- Platform alerts as structured events (follows, subs with amounts, gifts, cheers, raids, Super
-  Chats). Today they arrive as `chat.message` with `kind: "event"` and a text line.
-- Chat details the platforms provide but the chat readers don't pass on yet (the fields and events
-  exist; values start appearing without an API change): platform user ids (`user.id` in the
-  `<platform>:<id>` form), `user.login` and `platformMessageId` for Twitch, YouTube, Kick and
-  Facebook Page; Twitch emote and Kick emote-code `emote` fragments; `action` for Twitch `/me`;
-  `chat.message.deleted` / `chat.user.cleared` / `chat.cleared` for Twitch, YouTube and Kick.
-- Writing (sending chat, changing the title, going live). The web UI does that; v1 is read-only.
-- Per-platform viewer counts for X (not exposed by X).
+- Writing (sending chat, changing the title, going live, test mode). The web UI does that; v1 is
+  read-only.
+- Follows, Kick KICKs and tips as alerts (`alert.follow`, `alert.kicks` and `alert.tip` are
+  reserved: no chat source sends them yet).
+- Viewer counts for X (not exposed by X) and custom RTMP servers.
 
 ## 7. Example clients
 
@@ -380,6 +457,31 @@ run();
 
 **Settings → API → OBS dock** creates a token (`status:read` + `chat:read`) and gives a URL like
 `http://192.168.1.20:30080/dock#token=ctd_pat_…`. In OBS: **Docks → Custom Browser Docks**, paste
-it. The dock shows live status, feed bitrates, every destination (red when down, with the reason),
-viewers, and the merged chat. The token stays in the URL fragment, so it is never sent to the
-server in the URL — the page sends it as a header.
+it. The dock shows live status (with a TEST badge in test mode), feed bitrates, every destination
+(red when down, with the reason), viewers, and the merged chat. The token stays in the URL
+fragment, so it is never sent to the server in the URL — the page sends it as a header.
+
+## Changelog
+
+`apiVersion` stays `1`: every change below is additive, so clients written for an earlier v1
+keep working (ignore event types and fields you don't know). `GET /api/v1/openapi.json` reports
+the revision in `info.version`.
+
+### v1.1
+
+- **Alerts:** `alert.<kind>` events (`subscription`, `gift`, `cheer`, `raid`, `membership`,
+  `superchat`; `follow`, `kicks`, `tip` reserved) under the `chat:read` scope, sent after the
+  `chat.message` event line that carries them (§5). Money is a decimal string + ISO 4217 currency.
+- **Viewers:** `destinations[].viewers` (and the `platforms[].viewers` sum of known counts) are now
+  filled for Twitch, Kick, YouTube, Facebook Page, Instagram and TikTok.
+- **Test mode:** `session.testMode` is live: the dashboard switch streams privately where the
+  platform allows it and skips the rest (`phase: "disabled"`, "Skipped — … has no test mode").
+- **Chat details** for Twitch, YouTube, Kick and Facebook Page: real platform user ids
+  (`user.id` = `<platform>:<id>`), `user.login`, `platformMessageId`; Twitch emote and Kick
+  emote-code `emote` fragments, Twitch `cheermote` fragments (with `amount`); `action` for `/me`;
+  `chat.message.deleted`, `chat.user.cleared` and `chat.cleared` from Twitch, YouTube and Kick.
+
+### v1.0
+
+First release: tokens and scopes, `/status`, `/chat`, `/events` (SSE) and `/events/poll`, `chat.*`,
+`stream.status`, `feed.status`, `destination.*` and `system.*` events, the OBS dock.

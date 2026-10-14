@@ -2,8 +2,10 @@
 // Connect: Google OAuth device flow with the user's own "TVs and Limited Input devices" client.
 // Each live: a new broadcast (title, privacy, latency, made-for-kids) bound to the destination's
 // reusable RTMPS stream, auto-started by the video (no auto stop); the title is updated through
-// the API while live; chat is read through the API; the broadcast is completed when the live ends
-// (or, after a crash, by the next prepare).
+// the API while live; chat (with moderation and Super Chat / membership alerts) and the viewer count
+// are read through the API; the broadcast is completed when the live ends (or, after a crash, by the
+// next prepare, which won't start while an earlier broadcast is still on air on the same stream).
+// Session test mode makes every broadcast private, whatever the destination's privacy.
 // Docs: https://developers.google.com/youtube/v3/live/docs
 //       https://developers.google.com/identity/protocols/oauth2/limited-input-device
 
@@ -24,14 +26,19 @@ import {
 } from './api.js';
 import {
   BROADCAST_KEY,
+  checkLeftover,
   confirmLive,
   createBroadcast,
   ensureStream,
   finishBroadcast,
+  LEFTOVER_BROADCASTS_KEY,
+  LIVE_STREAM_KEY,
   setBroadcastTitle,
+  type LeftoverCheck,
 } from './broadcast.js';
 import { createChatSource } from './chat.js';
 import { readOptions, YOUTUBE_INFO, youtubeTitle } from './info.js';
+import { watchViewers } from './viewers.js';
 
 /** Pending device-code sign-in (accountSecrets key 'device'). */
 interface DeviceState {
@@ -157,18 +164,89 @@ async function pendingResult(
   }
 }
 
-/** End the broadcast a previous (crashed or interrupted) live left behind. Best effort. */
-async function endLeftover(client: YouTubeClient, secrets: ScopedSecrets, ctx: DriverContext): Promise<void> {
-  const previous = await secrets.get(BROADCAST_KEY);
-  if (!previous) return;
+/** Most leftover broadcast ids remembered per destination (the oldest are forgotten first). */
+const MAX_LEFTOVERS = 10;
+
+/** Leftover broadcast ids: the remembered list plus the last live's broadcast, oldest first. */
+async function leftoverIds(secrets: ScopedSecrets): Promise<string[]> {
+  let stored: unknown = null;
   try {
-    await finishBroadcast(client, previous, ctx.signal);
-    await secrets.delete(BROADCAST_KEY);
-    ctx.log.info({ broadcastId: previous }, 'ended a leftover YouTube broadcast');
-  } catch (err) {
-    if (ctx.signal.aborted) throw err;
-    ctx.log.warn({ broadcastId: previous, error: errText(err) }, 'ending a leftover YouTube broadcast failed');
+    stored = await secrets.getJson<unknown>(LEFTOVER_BROADCASTS_KEY);
+  } catch {
+    // Unreadable list: start over (the last live's broadcast is still under BROADCAST_KEY).
   }
+  const ids = Array.isArray(stored) ? stored.filter((v): v is string => typeof v === 'string' && v.length > 0) : [];
+  const last = await secrets.get(BROADCAST_KEY);
+  if (last) ids.push(last);
+  return [...new Set(ids)];
+}
+
+function leftoverOnAir(status: string | undefined): DriverError {
+  return new DriverError(
+    `The previous YouTube broadcast is still ${status ?? 'on air'} and couldn't be ended yet; it would show this live too. ` +
+      'Retrying — if this keeps failing, end it in YouTube Studio.',
+    'platform-error',
+  );
+}
+
+function leftoverUnknown(err: unknown): DriverError {
+  // Problems the user must fix (login, app setup) keep their code; anything else is retried.
+  if (err instanceof DriverError && err.code !== 'platform-error' && err.code !== 'timeout') return err;
+  return new DriverError(
+    `Couldn't end the previous YouTube broadcast or make sure it is off air (${errText(err)}). ` +
+      'Retrying — if this keeps failing, end it in YouTube Studio.',
+    'platform-error',
+  );
+}
+
+/**
+ * End the broadcasts earlier lives left behind (crash, or an end() that failed). One that can't be
+ * ended yet is remembered under LEFTOVER_BROADCASTS_KEY (the new broadcast overwrites
+ * BROADCAST_KEY) and retried by the next prepare(). If it is still on air on the destination's
+ * stream, or YouTube can't tell, this throws a retryable error instead of starting a live that it
+ * would mirror (publicly, even in test mode).
+ */
+async function endLeftovers(client: YouTubeClient, secrets: ScopedSecrets, ctx: DriverContext): Promise<void> {
+  const ids = await leftoverIds(secrets);
+  if (ids.length === 0) return;
+  const streamId = await secrets.get(LIVE_STREAM_KEY);
+  const kept: string[] = [];
+  let blocker: DriverError | null = null;
+  for (const id of ids) {
+    try {
+      await finishBroadcast(client, id, ctx.signal);
+      ctx.log.info({ broadcastId: id }, 'ended a leftover YouTube broadcast');
+      continue;
+    } catch (err) {
+      if (ctx.signal.aborted) throw err;
+      ctx.log.warn({ broadcastId: id, error: errText(err) }, 'ending a leftover YouTube broadcast failed');
+    }
+    let check: LeftoverCheck;
+    try {
+      check = await checkLeftover(client, id, streamId, ctx.signal);
+    } catch (err) {
+      if (ctx.signal.aborted) throw err;
+      kept.push(id);
+      blocker ??= leftoverUnknown(err);
+      continue;
+    }
+    if (check.state === 'gone') {
+      ctx.log.info({ broadcastId: id, status: check.status }, 'leftover YouTube broadcast is gone');
+      continue;
+    }
+    kept.push(id);
+    if (check.state === 'on-air') blocker ??= leftoverOnAir(check.status);
+    else ctx.log.info({ broadcastId: id, status: check.status }, 'leftover YouTube broadcast kept for the next live');
+  }
+  // Save the unresolved ids before BROADCAST_KEY is cleared (and later overwritten by the new broadcast).
+  if (kept.length > MAX_LEFTOVERS) {
+    ctx.log.warn({ dropped: kept.slice(0, kept.length - MAX_LEFTOVERS) }, 'forgetting the oldest leftover YouTube broadcasts');
+  }
+  const remembered = kept.slice(-MAX_LEFTOVERS);
+  if (remembered.length > 0) await secrets.setJson(LEFTOVER_BROADCASTS_KEY, remembered);
+  else await secrets.delete(LEFTOVER_BROADCASTS_KEY);
+  await secrets.delete(BROADCAST_KEY);
+  if (blocker) throw blocker;
 }
 
 export const youtubeDriver: PlatformDriver = {
@@ -274,23 +352,28 @@ export const youtubeDriver: PlatformDriver = {
     const destSecrets = ctx.destinationSecrets;
     if (!destSecrets) throw new DriverError('YouTube destination storage is unavailable', 'misconfigured');
     const { log, signal } = ctx;
-    const opts = readOptions(dest.options);
+    const opts = readOptions(dest.options, ctx.testMode === true);
     const since = Date.now();
 
-    await endLeftover(client, destSecrets, ctx);
+    await endLeftovers(client, destSecrets, ctx);
     const channelId = typeof account.options.channelId === 'string' ? account.options.channelId : null;
     const stream = await ensureStream(client, destSecrets, dest.feed, channelId, log, signal);
     const broadcast = await createBroadcast(client, youtubeTitle(title, dest.name), opts, stream.id, log, signal, (id) =>
       destSecrets.set(BROADCAST_KEY, id),
     );
     const broadcastId = broadcast.id;
-    log.info({ broadcastId, feed: dest.feed, privacy: opts.privacy, latency: opts.latency }, 'YouTube broadcast ready');
+    log.info(
+      { broadcastId, feed: dest.feed, privacy: opts.privacy, latency: opts.latency, testMode: ctx.testMode === true },
+      'YouTube broadcast ready',
+    );
 
     const prepared: PreparedLive = {
       push: { url: stream.url, mode: 'copy', feeds: [dest.feed] },
       watchUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(broadcastId)}`,
       // The driver call's signal is not used past prepare(): these run later with their own timeouts.
       confirm: (s) => confirmLive(client, broadcastId, log, s),
+      // Viewer count only (videos.list every 60 s); YouTube lives are not recovered automatically.
+      health: watchViewers(client, broadcastId, log),
       setTitle: (next, s) => setBroadcastTitle(client, broadcastId, youtubeTitle(next, dest.name), s),
       end: async (s) => {
         // Throws (keeping BROADCAST_KEY, so the next prepare() ends it) when it can't be ended yet.

@@ -1,7 +1,8 @@
 // Pure helpers for the settings tabs (and a few shared with the accounts/destinations pages).
 
-import type { AppSettings, PlatformAppStatus } from '@shared/api';
-import type { AuditEntry, FieldSpec, TlsMode, TlsStatus } from '@shared/types';
+import type { ApiAccessInfo, AppSettings, PlatformAppStatus } from '@shared/api';
+import type { ApiScope, AuditEntry, FieldSpec, TlsMode, TlsStatus } from '@shared/types';
+import { API_SCOPES } from '@shared/types';
 import { cleanValues, type FormErrors, type FormValues } from '../../components/dynamic-form';
 import type { Tone } from '../../components/utils';
 
@@ -16,6 +17,7 @@ export const SETTINGS_TABS = [
   { id: 'apps', label: 'Developer apps' },
   { id: 'users', label: 'Users' },
   { id: 'overlay', label: 'Chat overlay' },
+  { id: 'api', label: 'API' },
   { id: 'audit', label: 'Audit log' },
   { id: 'about', label: 'About' },
 ] as const;
@@ -265,6 +267,105 @@ export function parseWholeNumber(raw: string): number | null {
   const s = raw.trim();
   if (!s) return null;
   return /^\d+$/.test(s) ? Number(s) : Number.NaN;
+}
+
+// ---------------------------------------------------------------------------
+// External API (Settings → API)
+// ---------------------------------------------------------------------------
+
+/** Same limit as the server (http/routes/tokens.ts). */
+export const TOKEN_NAME_MAX = 60;
+export const DOCK_TOKEN_NAME = 'OBS dock';
+export const DOCK_SCOPES: readonly ApiScope[] = ['status:read', 'chat:read'];
+
+export const API_SCOPE_INFO: Readonly<Record<ApiScope, { label: string; help: string }>> = {
+  'chat:read': { label: 'Read chat', help: 'Chat history and live chat: messages, alerts (subs, gifts, Super Chats…) and removed messages.' },
+  'status:read': { label: 'Read status', help: 'Stream, feed and destination status, bitrates, viewers and notices.' },
+};
+
+/** Scopes in the standard order, unknown ones dropped. */
+export function orderedScopes(scopes: readonly string[]): ApiScope[] {
+  return API_SCOPES.filter((s) => scopes.includes(s));
+}
+
+// C0/C1 controls and bidi overrides (the server rejects them too).
+const CONTROL_RE = /[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/;
+
+export function validateTokenForm(name: string, scopes: readonly ApiScope[]): { name?: string; scopes?: string } {
+  const e: { name?: string; scopes?: string } = {};
+  const n = name.trim();
+  if (!n) e.name = 'Give the token a name, e.g. the app that will use it.';
+  else if (n.length > TOKEN_NAME_MAX) e.name = `Use at most ${TOKEN_NAME_MAX} characters.`;
+  else if (CONTROL_RE.test(n)) e.name = 'Use plain text without control characters.';
+  if (orderedScopes(scopes).length === 0) e.scopes = 'Pick at least one permission.';
+  return e;
+}
+
+const API_SUFFIX = '/api/v1';
+
+/** The site root of an API base URL ("https://h:30443/api/v1" -> "https://h:30443"), or null. */
+export function apiSiteRoot(base: string | null | undefined): string | null {
+  if (!base) return null;
+  let u: URL;
+  try {
+    u = new URL(base);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  let path = u.pathname.replace(/\/+$/, '');
+  if (path.endsWith(API_SUFFIX)) path = path.slice(0, -API_SUFFIX.length);
+  return `${u.origin}${path.replace(/\/+$/, '')}`;
+}
+
+/** The OBS dock URL for a site root: the token goes in the fragment, which browsers never send. */
+export function dockUrlFor(base: string | null | undefined, secret: string): string | null {
+  const root = apiSiteRoot(base);
+  return root ? `${root}/dock#${new URLSearchParams({ token: secret }).toString()}` : null;
+}
+
+/**
+ * The OBS dock URL: on the LAN address when known (OBS runs on the same network; plain HTTP there
+ * needs no certificate), else the HTTPS address.
+ */
+export function dockUrl(access: Pick<ApiAccessInfo, 'lanBaseUrl' | 'baseUrl'>, secret: string): { url: string; lan: boolean } | null {
+  const lan = dockUrlFor(access.lanBaseUrl, secret);
+  if (lan) return { url: lan, lan: true };
+  const pub = dockUrlFor(access.baseUrl, secret);
+  return pub ? { url: pub, lan: false } : null;
+}
+
+/** The New-token modal: the form, a create request in flight, then the secret (shown once). */
+export interface TokenModalState<T> {
+  open: boolean;
+  /** A create request is in flight: the modal can't close, or the new secret would be lost. */
+  busy: boolean;
+  created: T | null;
+}
+
+export type TokenModalAction<T> = { type: 'open' } | { type: 'close' } | { type: 'busy'; busy: boolean } | { type: 'created'; result: T };
+
+export function tokenModalInitial<T>(): TokenModalState<T> {
+  return { open: false, busy: false, created: null };
+}
+
+export function tokenModalReducer<T>(state: TokenModalState<T>, action: TokenModalAction<T>): TokenModalState<T> {
+  switch (action.type) {
+    case 'open':
+      // Always starts at the form, never at an earlier secret.
+      return { open: true, busy: false, created: null };
+    case 'close':
+      return state.busy || !state.open ? state : tokenModalInitial<T>();
+    case 'busy':
+      return state.busy === action.busy ? state : { ...state, busy: action.busy };
+    case 'created':
+      return { open: true, busy: false, created: action.result };
+  }
+}
+
+/** Escape and the backdrop don't close it while creating or while the secret is shown (only Done / ×). */
+export function tokenModalDismissible(state: TokenModalState<unknown>): boolean {
+  return !state.busy && state.created === null;
 }
 
 // ---------------------------------------------------------------------------

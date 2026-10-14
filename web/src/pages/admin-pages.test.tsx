@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { ConnectStart, SettingsResponse } from '@shared/api';
-import type { Account, Destination, PlatformInfo, TlsStatus } from '@shared/types';
+import type { ApiAccessInfo, ConnectStart, SettingsResponse } from '@shared/api';
+import type { Account, ApiTokenInfo, Destination, PlatformInfo, TlsStatus } from '@shared/types';
 import { AuthProvider } from '../state/auth';
 import { LiveProvider } from '../state/live';
 import { AccountForm } from './accounts/AddAccountModal';
@@ -10,6 +10,7 @@ import { ConnectModal, Instructions, type ConnectState } from './accounts/Connec
 import { DestinationForm } from './destinations/DestinationForm';
 import { PlatformPicker } from './destinations/PlatformPicker';
 import { AboutTab } from './settings/AboutTab';
+import { AccessCard, DockCard, NewTokenForm, TokenSecret, TokensCard } from './settings/ApiTab';
 import { GeneralTab } from './settings/GeneralTab';
 import { HttpsTab } from './settings/HttpsTab';
 
@@ -270,5 +271,94 @@ describe('settings tabs (static render)', () => {
 
   it('About tab shows the version', () => {
     expect(html(<AboutTab version="1.2.3" />)).toContain('1.2.3');
+  });
+});
+
+describe('Settings → API (static render)', () => {
+  const NOW = Date.parse('2026-10-14T12:00:00Z');
+  const token: ApiTokenInfo = {
+    id: 't1',
+    name: 'CTD Overlay',
+    scopes: ['status:read', 'chat:read'],
+    prefix: 'ctd_pat_3fK9',
+    createdAt: '2026-10-01T10:00:00Z',
+    createdBy: 'admin',
+    lastUsedAt: '2026-10-14T09:00:00Z',
+  };
+  const access: ApiAccessInfo = {
+    baseUrl: 'https://203.0.113.7/api/v1',
+    lanBaseUrl: 'http://192.168.1.20:30080/api/v1',
+    tlsFingerprint256: 'AB:CD:EF:01',
+    openApiUrl: 'https://203.0.113.7/api/v1/openapi.json',
+  };
+  const secret = 'ctd_pat_3fK9wQ1vSECRETSECRETSECRETSECRETSECRETxx';
+  const asyncNoop = async () => undefined;
+
+  it('lists tokens with scopes, prefix, dates and a two-step revoke', () => {
+    const out = html(<TokensCard tokens={[token]} now={NOW} onNew={noop} onRevoke={asyncNoop} />);
+    expect(out).toContain('CTD Overlay');
+    expect(out.indexOf('chat:read')).toBeLessThan(out.indexOf('status:read'));
+    expect(out).toContain('ctd_pat_3fK9…');
+    expect(out).toContain('by admin');
+    expect(out).toContain('Last used 3 hours ago');
+    expect(out).toContain('Revoke');
+    expect(out).toContain('New token');
+    expect(html(<TokensCard tokens={[{ ...token, lastUsedAt: null }]} now={NOW} onNew={noop} onRevoke={asyncNoop} />)).toContain('Never used');
+    expect(html(<TokensCard tokens={[]} now={NOW} onNew={noop} onRevoke={asyncNoop} />)).toContain('No tokens yet');
+  });
+
+  it('new token form: name and a checkbox per scope', () => {
+    const out = html(<NewTokenForm onCreated={noop} onCancel={noop} />);
+    expect(out).toContain('type="checkbox"');
+    expect(out.match(/type="checkbox"/g)).toHaveLength(2);
+    expect(out).toContain('chat:read');
+    expect(out).toContain('status:read');
+    expect(out).toContain('maxLength="60"');
+    expect(out).toContain('Create token');
+  });
+
+  it('shows a new secret once, masked, with a clear warning', () => {
+    const out = html(<TokenSecret created={{ token, secret }} access={access} onDone={noop} />);
+    expect(out).toContain("you won&#x27;t see it again");
+    expect(out).not.toContain(secret);
+    expect(out).toContain('Copy');
+    expect(out).toContain('Show');
+    expect(out).toContain('http://192.168.1.20:30080/api/v1');
+  });
+
+  it('OBS dock: one button, then the dock URL (masked) and the OBS steps', () => {
+    const before = html(<DockCard access={access} created={null} busy={false} onCreate={noop} />);
+    expect(before).toContain('Create dock link');
+    expect(before).toContain('Custom Browser Docks');
+    expect(before).not.toContain('Dock URL');
+    const after = html(<DockCard access={access} created={{ token: { ...token, name: 'OBS dock' }, secret }} busy={false} onCreate={noop} />);
+    expect(after).toContain('Dock URL');
+    expect(after).not.toContain(secret);
+    expect(after).toContain("LAN address");
+    expect(after).toContain('Create another dock link');
+  });
+
+  it('without a LAN address: a hint, and the HTTPS base for the dock', () => {
+    const noLan = { ...access, lanBaseUrl: null };
+    const dock = html(<DockCard access={noLan} created={{ token, secret }} busy={false} onCreate={noop} />);
+    expect(dock).toContain('LAN_HTTP_HOST');
+    expect(dock).toContain('192.168.x.x:30443');
+    expect(dock).toContain('Uses the HTTPS address');
+    const conn = html(<AccessCard access={noLan} />);
+    expect(conn).toContain('LAN_HTTP_HOST');
+    expect(conn).not.toContain('On your network (LAN)');
+  });
+
+  it('connection details: both URLs, fingerprint and OpenAPI with copy buttons', () => {
+    const out = html(<AccessCard access={access} />);
+    expect(out).toContain('value="http://192.168.1.20:30080/api/v1"');
+    expect(out).toContain('value="https://203.0.113.7/api/v1"');
+    expect(out).toContain('value="AB:CD:EF:01"');
+    expect(out).toContain('value="https://203.0.113.7/api/v1/openapi.json"');
+    expect(out).toContain('href="https://203.0.113.7/api/v1/openapi.json"');
+    expect(out).toContain('rel="noopener noreferrer"');
+    expect(out.match(/>Copy</g)?.length).toBe(4);
+    const unsafe = html(<AccessCard access={{ ...access, openApiUrl: 'javascript:alert(1)' }} />);
+    expect(unsafe).not.toContain('href="javascript:');
   });
 });

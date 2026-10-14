@@ -14,6 +14,7 @@ const TitleBody = z.object({
 });
 
 const AutoBody = z.object({ autoGoLive: z.boolean() });
+const TestModeBody = z.object({ testMode: z.boolean() });
 
 function issues(err: z.ZodError): string {
   return err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ');
@@ -51,6 +52,24 @@ const sessionRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }
     if (!parsed.success) return sendError(reply, 400, issues(parsed.error), 'invalid');
     orchestrator().setAutoGoLive(parsed.data.autoGoLive);
     audit(services, req, 'session.auto', parsed.data.autoGoLive ? 'on' : 'off');
+    return orchestrator().state();
+  });
+
+  // Test mode: private/test setting per platform, the rest skipped. Only while no session runs.
+  app.put('/api/session/test-mode', { preHandler: requireUser }, async (req, reply) => {
+    const parsed = TestModeBody.safeParse(req.body);
+    if (!parsed.success) return sendError(reply, 400, issues(parsed.error), 'invalid');
+    try {
+      orchestrator().setTestMode(parsed.data.testMode);
+    } catch (err) {
+      const e = err as { statusCode?: unknown; code?: unknown; message?: unknown };
+      if (e.statusCode === 409) {
+        const message = typeof e.message === 'string' && e.message ? e.message : 'A session is running';
+        return sendError(reply, 409, message, typeof e.code === 'string' ? e.code : 'session_live');
+      }
+      throw err;
+    }
+    audit(services, req, 'session.test_mode', parsed.data.testMode ? 'on' : 'off');
     return orchestrator().state();
   });
 };
