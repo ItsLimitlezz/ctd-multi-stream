@@ -1,13 +1,14 @@
 import crypto from 'node:crypto';
-import type { Account, AccountStatus, PlatformId } from '../../../shared/types.js';
+import { DEFAULT_PROFILE_ID, type Account, type AccountStatus, type PlatformId } from '../../../shared/types.js';
 import type { AccountsRepo } from '../services.js';
 import { NotFoundError, jsonObject, nowIso, str, strOrNull, updateById, type Row, type Stmt } from './rows.js';
 
-const COLUMNS = 'id, platform, label, status, status_message, options, created_at, updated_at';
+const COLUMNS = 'id, profile_id, platform, label, status, status_message, options, created_at, updated_at';
 
 function toAccount(row: Row): Account {
   return {
     id: str(row, 'id'),
+    profileId: str(row, 'profile_id'),
     platform: str(row, 'platform') as PlatformId,
     label: str(row, 'label'),
     status: str(row, 'status') as AccountStatus,
@@ -25,19 +26,22 @@ export function createAccountsRepo(stmt: Stmt): AccountsRepo {
   };
 
   return {
-    list() {
-      return stmt(`SELECT ${COLUMNS} FROM accounts ORDER BY created_at, rowid`).all().map(toAccount);
+    list(profileId) {
+      if (profileId === undefined) {
+        return stmt(`SELECT ${COLUMNS} FROM accounts ORDER BY created_at, rowid`).all().map(toAccount);
+      }
+      return stmt(`SELECT ${COLUMNS} FROM accounts WHERE profile_id = ? ORDER BY created_at, rowid`).all(profileId).map(toAccount);
     },
 
     get,
 
-    create({ platform, label, options }) {
+    create({ profileId, platform, label, options }) {
       const id = crypto.randomUUID();
       const now = nowIso();
       stmt(
-        `INSERT INTO accounts (id, platform, label, status, status_message, options, created_at, updated_at)
-         VALUES (?, ?, ?, 'pending', NULL, ?, ?, ?)`,
-      ).run(id, platform, label, JSON.stringify(options ?? {}), now, now);
+        `INSERT INTO accounts (id, profile_id, platform, label, status, status_message, options, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?, ?)`,
+      ).run(id, profileId || DEFAULT_PROFILE_ID, platform, label, JSON.stringify(options ?? {}), now, now);
       const created = get(id);
       if (!created) throw new Error('Account insert failed');
       return created;

@@ -1,9 +1,9 @@
 import type { Logger } from 'pino';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessage, ChatModeration } from '../../../shared/types.js';
+import type { ChatMessage, ChatModeration, Profile } from '../../../shared/types.js';
 import { EventBus } from '../events.js';
 import type { ChatMessageInput, ChatSourceItem } from '../platforms/types.js';
-import type { ChatHub, ScopedSecrets } from '../services.js';
+import type { ChatHub, ScopedSecrets, SecretsRepo } from '../services.js';
 import { BACKOFF_MAX_MS, DEDUPE_SIZE, RING_SIZE, createChatHub } from './chat-hub.js';
 
 // ---- fakes ----
@@ -335,7 +335,7 @@ describe('moderation', () => {
     await flush();
     expect(hub.recent().map((m) => m.id)).toEqual(['twitch:m2']);
     expect(moderations).toEqual([
-      { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', ts: expect.any(String), messageId: 'twitch:m1', platformMessageId: 'm1' },
+      { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', profileId: 'default', ts: expect.any(String), messageId: 'twitch:m1', platformMessageId: 'm1' },
     ]);
   });
 
@@ -372,8 +372,8 @@ describe('moderation', () => {
     await flush();
     expect(hub.recent().map((m) => m.id)).toEqual(['twitch:1', 'twitch:2']);
     expect(moderations).toEqual([
-      { kind: 'user-cleared', platform: 'twitch', destinationId: 'b', ts: expect.any(String), userId: 'uid-Ann', userName: null },
-      { kind: 'message-deleted', platform: 'twitch', destinationId: 'b', ts: expect.any(String), messageId: 'twitch:2', platformMessageId: '2' },
+      { kind: 'user-cleared', platform: 'twitch', destinationId: 'b', profileId: 'default', ts: expect.any(String), userId: 'uid-Ann', userName: null },
+      { kind: 'message-deleted', platform: 'twitch', destinationId: 'b', profileId: 'default', ts: expect.any(String), messageId: 'twitch:2', platformMessageId: '2' },
     ]);
   });
 
@@ -413,7 +413,7 @@ describe('moderation', () => {
     hub.attach('b', 'youtube', staticSource([user('2', 'Bob'), user('3', 'Cy'), { kind: 'cleared' }]), parent.signal);
     await flush();
     expect(hub.recent().map((m) => m.id)).toEqual(['twitch:1']);
-    expect(moderations).toEqual([{ kind: 'cleared', platform: 'youtube', destinationId: 'b', ts: expect.any(String) }]);
+    expect(moderations).toEqual([{ kind: 'cleared', platform: 'youtube', destinationId: 'b', profileId: 'default', ts: expect.any(String) }]);
   });
 
   it('a deleted message is not re-added when the source replays it', async () => {
@@ -505,5 +505,177 @@ describe('overlay token', () => {
     secrets.get.mockRejectedValueOnce(new Error('db locked'));
     await expect(hub.overlayToken()).rejects.toThrow('db locked');
     expect(await hub.overlayToken()).toMatch(/^[\w-]{43}$/);
+  });
+});
+
+// ---- profiles ----
+
+const DPRTMNT = 'p-dprtmnt';
+
+function fakeSecretsRepo(initial: Record<string, Record<string, string>> = {}) {
+  const scopes = new Map(Object.entries(initial).map(([scope, values]) => [scope, new Map(Object.entries(values))]));
+  const scoped = (scope: string): ScopedSecrets => {
+    const m = () => {
+      let s = scopes.get(scope);
+      if (!s) scopes.set(scope, (s = new Map()));
+      return s;
+    };
+    return {
+      get: async (k) => m().get(k) ?? null,
+      set: async (k, v) => void m().set(k, v),
+      delete: async (k) => void m().delete(k),
+      getJson: async () => null,
+      setJson: async () => {},
+    };
+  };
+  const repo: SecretsRepo = { scoped: vi.fn(scoped), deleteScope: (scope) => void scopes.delete(scope) };
+  return { repo, scopes };
+}
+
+function fakeProfiles(ids: string[]) {
+  const list = new Set(ids);
+  const profile = (id: string): Profile => ({ id, name: id, slug: id, color: null, createdAt: '', updatedAt: '' });
+  return {
+    ids: list,
+    repo: {
+      list: () => [...list].map(profile),
+      get: (id: string) => (list.has(id) ? profile(id) : null),
+    },
+  };
+}
+
+describe('profiles: chat', () => {
+  it('stamps the profile on messages and moderation (default profile when attach gets none)', async () => {
+    const moderations: ChatModeration[] = [];
+    bus.on('chat-moderation', (m) => moderations.push(m));
+    hub.attach('d-main', 'twitch', staticSource([msg('1')]), parent.signal);
+    hub.attach('d-club', 'kick', staticSource([msg('2'), { kind: 'cleared' }]), parent.signal, DPRTMNT);
+    await flush();
+    expect(emitted.find((m) => m.destinationId === 'd-main')).toMatchObject({ id: 'twitch:1', profileId: 'default' });
+    expect(emitted.find((m) => m.destinationId === 'd-club')).toMatchObject({ id: 'kick:2', profileId: DPRTMNT });
+    // The profile sits right after the destination (readable JSON for API clients).
+    expect(Object.keys(emitted[0]!).slice(0, 4)).toEqual(['id', 'platform', 'destinationId', 'profileId']);
+    expect(moderations).toEqual([{ kind: 'cleared', platform: 'kick', destinationId: 'd-club', profileId: DPRTMNT, ts: expect.any(String) }]);
+  });
+
+  it('keeps a separate ring buffer per profile', async () => {
+    hub.attach('a', 'twitch', staticSource([msg('1'), msg('2')]), parent.signal);
+    hub.attach('b', 'youtube', staticSource([msg('3')]), parent.signal, DPRTMNT);
+    await flush();
+    expect(hub.recent().map((m) => m.id)).toEqual(['twitch:1', 'twitch:2']);
+    expect(hub.recent(200, 'default').map((m) => m.id)).toEqual(['twitch:1', 'twitch:2']);
+    expect(hub.recent(200, DPRTMNT).map((m) => m.id)).toEqual(['youtube:3']);
+    expect(hub.recent(200, 'nobody')).toEqual([]);
+
+    // A busy profile never pushes another profile's chat out of its buffer.
+    const flood = Array.from({ length: RING_SIZE + 10 }, (_, i) => msg(`f${i}`));
+    hub.attach('c', 'kick', staticSource(flood), parent.signal, DPRTMNT);
+    await flush();
+    expect(hub.recent(RING_SIZE, DPRTMNT)).toHaveLength(RING_SIZE);
+    expect(hub.recent(RING_SIZE).map((m) => m.id)).toEqual(['twitch:1', 'twitch:2']);
+  });
+
+  it('de-duplicates per profile', async () => {
+    hub.attach('a', 'twitch', staticSource([msg('1'), msg('1')]), parent.signal);
+    hub.attach('b', 'twitch', staticSource([msg('1'), msg('1')]), parent.signal, DPRTMNT);
+    await flush();
+    expect(emitted.map((m) => `${m.profileId}/${m.id}`).sort()).toEqual(['default/twitch:1', `${DPRTMNT}/twitch:1`]);
+  });
+});
+
+describe('profiles: overlay tokens', () => {
+  const EXISTING = 'E'.repeat(43); // the token in an OBS browser source from before profiles
+
+  function build(opts: { profiles?: string[]; scopes?: Record<string, Record<string, string>> } = {}) {
+    const secretsRepo = fakeSecretsRepo(opts.scopes ?? { chat: { overlayToken: EXISTING } });
+    const profiles = fakeProfiles(opts.profiles ?? ['default', DPRTMNT]);
+    const h = createChatHub({ bus, log: log as unknown as Logger, secrets: secretsRepo.repo, profiles: profiles.repo });
+    return { h, secretsRepo, profiles };
+  }
+
+  it("keeps the default profile's existing token in the legacy 'chat' scope", async () => {
+    const { h, secretsRepo } = build();
+    expect(await h.overlayToken()).toBe(EXISTING);
+    expect(await h.overlayToken('default')).toBe(EXISTING);
+    expect(await h.profileForOverlayToken(EXISTING)).toBe('default');
+    expect(secretsRepo.scopes.get('chat')?.get('overlayToken')).toBe(EXISTING);
+  });
+
+  it("gives every other profile its own token in scope 'chat:<id>'", async () => {
+    const { h, secretsRepo } = build();
+    const club = await h.overlayToken(DPRTMNT);
+    expect(club).toMatch(/^[\w-]{43}$/);
+    expect(club).not.toBe(EXISTING);
+    expect(secretsRepo.scopes.get(`chat:${DPRTMNT}`)?.get('overlayToken')).toBe(club);
+    expect(await h.profileForOverlayToken(club)).toBe(DPRTMNT);
+    expect(await h.profileForOverlayToken(EXISTING)).toBe('default');
+    expect(await h.profileForOverlayToken('nope')).toBeNull();
+    expect(await h.profileForOverlayToken('')).toBeNull();
+  });
+
+  it('rotating one profile leaves the others alone', async () => {
+    const { h } = build();
+    const club = await h.overlayToken(DPRTMNT);
+    const rotated = await h.rotateOverlayToken(DPRTMNT);
+    expect(rotated).not.toBe(club);
+    expect(await h.profileForOverlayToken(club)).toBeNull();
+    expect(await h.profileForOverlayToken(rotated)).toBe(DPRTMNT);
+    expect(await h.overlayToken()).toBe(EXISTING);
+  });
+
+  it("finds every profile's token after a restart (without anyone opening the overlay page first)", async () => {
+    const first = build();
+    const club = await first.h.overlayToken(DPRTMNT);
+    const restarted = createChatHub({
+      bus: new EventBus(),
+      log: log as unknown as Logger,
+      secrets: first.secretsRepo.repo,
+      profiles: first.profiles.repo,
+    });
+    expect(await restarted.profileForOverlayToken(club)).toBe(DPRTMNT);
+    expect(await restarted.profileForOverlayToken(EXISTING)).toBe('default');
+  });
+
+  it('refuses tokens for unknown profiles', async () => {
+    const { h, secretsRepo } = build();
+    await expect(h.overlayToken('ghost')).rejects.toMatchObject({ statusCode: 404, code: 'unknown_profile' });
+    await expect(h.rotateOverlayToken('ghost')).rejects.toMatchObject({ code: 'unknown_profile' });
+    expect(secretsRepo.scopes.has('chat:ghost')).toBe(false);
+  });
+
+  it("forgets a deleted profile's token and chat", async () => {
+    const { h, secretsRepo, profiles } = build();
+    const club = await h.overlayToken(DPRTMNT);
+    h.attach('b', 'twitch', staticSource([msg('1')]), parent.signal, DPRTMNT);
+    await flush();
+    expect(h.recent(200, DPRTMNT)).toHaveLength(1);
+
+    // What DELETE /api/profiles/:id does: drop its secret scopes, the row, then announce it.
+    secretsRepo.repo.deleteScope(`chat:${DPRTMNT}`);
+    profiles.ids.delete(DPRTMNT);
+    bus.emit('profiles-changed');
+    expect(await h.profileForOverlayToken(club)).toBeNull();
+    expect(h.recent(200, DPRTMNT)).toEqual([]);
+    expect(await h.profileForOverlayToken(EXISTING)).toBe('default');
+  });
+
+  it('never logs a token', async () => {
+    const { h } = build();
+    const club = await h.overlayToken(DPRTMNT);
+    const rotated = await h.rotateOverlayToken(DPRTMNT);
+    const logged = JSON.stringify([log.info.mock.calls, log.warn.mock.calls, log.debug.mock.calls]);
+    expect(logged).not.toContain(club);
+    expect(logged).not.toContain(rotated);
+    expect(logged).not.toContain(EXISTING);
+  });
+
+  it("with only the legacy 'chat' scope: the default profile persists, others stay in memory (with a warning)", async () => {
+    const club = await hub.overlayToken(DPRTMNT);
+    expect(await hub.profileForOverlayToken(club)).toBe(DPRTMNT);
+    expect(secrets.store.size).toBe(0); // nothing of DPRTMNT's in the default profile's scope
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const main = await hub.overlayToken();
+    expect(secrets.store.get('overlayToken')).toBe(main);
+    expect(await hub.profileForOverlayToken(main)).toBe('default');
   });
 });

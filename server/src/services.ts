@@ -13,6 +13,10 @@ import type {
   ApiTokenInfo,
   AuditEntry,
   ChatMessage,
+  ConnectedApp,
+  PairingRequest,
+  Profile,
+  ProfileSummary,
   Destination,
   Feed,
   FeedState,
@@ -24,6 +28,7 @@ import type {
   TlsStatus,
   User,
 } from '../../shared/types.js';
+import { DEFAULT_PROFILE_ID } from '../../shared/types.js';
 import type { AppConfig } from './config.js';
 import type { EventBus } from './events.js';
 import type { ChatSourceItem, DriverContext, PlatformDriver, PushPlan } from './platforms/types.js';
@@ -101,10 +106,35 @@ export interface AuthSessionsRepo {
   purgeExpired(): void;
 }
 
+export interface ProfilesRepo {
+  /** Oldest first; the default profile always exists. */
+  list(): Profile[];
+  get(id: string): Profile | null;
+  getBySlug(slug: string): Profile | null;
+  /** Slug is derived from the name and made unique; fixed afterwards. */
+  create(input: { name: string; color: string | null }): Profile;
+  update(id: string, patch: Partial<{ name: string; color: string | null }>): Profile;
+  /** Removes the profile row only (callers clean up its destinations/accounts/secrets first). */
+  delete(id: string): void;
+}
+
+/** Registered external apps (the hub registry). Persisted so resources survive restarts. */
+export interface ConnectedAppsRepo {
+  list(): ConnectedApp[];
+  get(id: string): ConnectedApp | null;
+  /** Insert or replace (only by the token that first registered it — callers check tokenId). */
+  upsert(app: Omit<ConnectedApp, 'online' | 'registeredAt' | 'lastSeenAt'> & { registeredAt?: string }): ConnectedApp;
+  touch(id: string): void;
+  delete(id: string): void;
+  /** Remove every app registered by a token (token revoked). */
+  deleteByToken(tokenId: string): void;
+}
+
 export interface AccountsRepo {
-  list(): Account[];
+  /** All profiles when profileId is omitted. */
+  list(profileId?: string): Account[];
   get(id: string): Account | null;
-  create(input: { platform: PlatformId; label: string; options: Record<string, unknown> }): Account;
+  create(input: { profileId: string; platform: PlatformId; label: string; options: Record<string, unknown> }): Account;
   update(
     id: string,
     patch: Partial<{ label: string; status: AccountStatus; statusMessage: string | null; options: Record<string, unknown> }>,
@@ -113,9 +143,11 @@ export interface AccountsRepo {
 }
 
 export interface DestinationsRepo {
-  list(): Destination[];
+  /** All profiles when profileId is omitted. */
+  list(profileId?: string): Destination[];
   get(id: string): Destination | null;
   create(input: {
+    profileId: string;
     platform: PlatformId;
     accountId: string | null;
     name: string;
@@ -163,7 +195,10 @@ export interface AuditRepo {
 export interface ApiTokensRepo {
   list(): ApiTokenInfo[];
   /** Creates a token; the secret (`ctd_pat_…`) is returned once and never stored in plain text. */
-  create(input: { name: string; scopes: ApiScope[]; createdBy: string | null }): { token: ApiTokenInfo; secret: string };
+  create(input: { name: string; scopes: ApiScope[]; createdBy: string | null; profileId?: string | null }): {
+    token: ApiTokenInfo;
+    secret: string;
+  };
   /** Look up a presented secret; null if unknown. Updates lastUsedAt (at most once a minute). */
   verify(secret: string): ApiTokenInfo | null;
   delete(id: string): void;
@@ -178,6 +213,20 @@ export interface Repos {
   secrets: SecretsRepo;
   audit: AuditRepo;
   apiTokens: ApiTokensRepo;
+  profiles: ProfilesRepo;
+  connectedApps: ConnectedAppsRepo;
+}
+
+/**
+ * Per-profile storage keys. The default profile keeps the pre-profiles keys so existing installs
+ * need no data migration: settings 'session.title' / 'session.autoGoLive' / 'session.testMode',
+ * secret scopes 'ingest' (OBS keys) and 'chat' (overlay token). Other profiles prefix them.
+ */
+export function profileSettingKey(profileId: string, key: string): string {
+  return profileId === DEFAULT_PROFILE_ID ? key : `profile:${profileId}:${key}`;
+}
+export function profileSecretScope(profileId: string, scope: 'ingest' | 'chat'): string {
+  return profileId === DEFAULT_PROFILE_ID ? scope : `${scope}:${profileId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,19 +246,29 @@ export interface MediaMtxAuthRequest {
   userAgent?: string;
 }
 
-/** MediaMTX wrapper: ingest of the two OBS feeds. */
+/**
+ * MediaMTX wrapper: ingest of each profile's two OBS feeds. Paths: default profile
+ * `live/landscape` + `live/vertical` (unchanged from before profiles); other profiles
+ * `live/<slug>/landscape` + `live/<slug>/vertical`. Each profile has its own OBS keys.
+ */
 export interface MediaServer {
   start(): Promise<void>;
   stop(): Promise<void>;
-  feeds(): FeedState[];
-  feed(feed: Feed): FeedState;
-  /** Local URL FFmpeg uses to read a feed (includes internal read credentials). */
-  readUrl(feed: Feed): string;
+  /** Both feeds of one profile. */
+  feeds(profileId: string): FeedState[];
+  feed(profileId: string, feed: Feed): FeedState;
+  /** Local URL FFmpeg uses to read a profile's feed (includes internal read credentials). */
+  readUrl(profileId: string, feed: Feed): string;
   /** Decide a MediaMTX HTTP auth request (called by the internal auth route). */
   authorize(req: MediaMtxAuthRequest): boolean;
-  /** Stream keys for OBS (generated on first run, stored encrypted). */
-  ingestKeys(): Promise<Record<Feed, string>>;
-  rotateIngestKey(feed: Feed): Promise<string>;
+  /** A profile's OBS stream keys (generated on first use, stored encrypted). */
+  ingestKeys(profileId: string): Promise<Record<Feed, string>>;
+  rotateIngestKey(profileId: string, feed: Feed): Promise<string>;
+  /** OBS "Stream Key" field value for a feed: `landscape?key=…` or `<slug>/landscape?key=…`. */
+  streamKeyField(profileId: string, feed: Feed): Promise<string>;
+  /** Profile created/deleted: start/stop accepting its paths, drop its keys on delete. */
+  profileAdded(profile: Profile): Promise<void>;
+  profileRemoved(profileId: string): Promise<void>;
   /** Path under the RTMP server, e.g. 'live'. OBS server URL = rtmp://<host>:<port>/<appName>. */
   readonly appName: string;
 }
@@ -264,19 +323,40 @@ export interface ChatHub {
     platform: PlatformId,
     source: (signal: AbortSignal) => AsyncIterable<ChatSourceItem>,
     signal: AbortSignal,
+    /** Profile of the destination; stamped on every message/moderation. Default: default profile. */
+    profileId?: string,
   ): void;
-  recent(limit?: number): ChatMessage[];
-  /** Token for the OBS chat overlay URL (created on first call). */
-  overlayToken(): Promise<string>;
-  rotateOverlayToken(): Promise<string>;
+  /** Recent chat of one profile (oldest first). Default: the default profile. */
+  recent(limit?: number, profileId?: string): ChatMessage[];
+  /** Per-profile token for the OBS chat overlay URL (created on first call). */
+  overlayToken(profileId?: string): Promise<string>;
+  rotateOverlayToken(profileId?: string): Promise<string>;
+  /** Which profile an overlay token belongs to (null = unknown token). */
+  profileForOverlayToken(token: string): Promise<string | null>;
 }
 
 // ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
 
+/** One orchestrator (go-live engine) per profile; they run independently and simultaneously. */
+export interface OrchestratorRegistry {
+  /** Throws an error with statusCode 404 / code 'unknown_profile' for an unknown profile. */
+  get(profileId: string): Orchestrator;
+  all(): Orchestrator[];
+  /** Create + init the orchestrator of a new profile. */
+  add(profile: Profile): Promise<void>;
+  /** Stop (if running) and drop a profile's orchestrator. */
+  remove(profileId: string): Promise<void>;
+  /** Every profile with its live situation (for switchers, WS 'profiles', the external API). */
+  summaries(): ProfileSummary[];
+  init(): Promise<void>;
+  shutdown(): Promise<void>;
+}
+
 export interface Orchestrator {
-  /** Subscribe to feed events, restore title/auto setting. */
+  readonly profileId: string;
+  /** Subscribe to this profile's feed events, restore its title/auto/test-mode settings. */
   init(): Promise<void>;
   state(): SessionState;
   start(trigger: 'auto' | 'manual'): Promise<void>;
@@ -338,6 +418,37 @@ export interface PlatformRegistry {
   all(): PlatformDriver[];
 }
 
+// ---------------------------------------------------------------------------
+// Hub: connected apps + pairing (implemented in server/src/api/)
+// ---------------------------------------------------------------------------
+
+/** Presence + registry of external apps. Emits 'apps-changed' on the bus. */
+export interface AppRegistry {
+  /** Apps with `online` computed; resources filtered to `profileId` (+ unassigned) when given. */
+  list(profileId?: string | null): ConnectedApp[];
+  get(id: string): ConnectedApp | null;
+  /** Register or update (heartbeat). Throws 409 'app_owned' if another token registered `id`. */
+  register(token: ApiTokenInfo, input: Omit<ConnectedApp, 'tokenId' | 'profileId' | 'registeredAt' | 'lastSeenAt' | 'online'>): ConnectedApp;
+  heartbeat(token: ApiTokenInfo, id: string): ConnectedApp;
+  remove(id: string): void;
+  /** Token revoked: drop its apps. */
+  removeByToken(tokenId: string): void;
+}
+
+/** "Connect this app" requests, approved by an admin. Emits 'pairings-changed' on the bus. */
+export interface PairingService {
+  /** Unauthenticated (rate-limited by the route). Returns the secret the app polls with. */
+  create(input: { appName: string; kind: string; requestedScopes: ApiScope[]; requestedProfileId: string | null; ip: string | null }): {
+    pairing: PairingRequest;
+    pollSecret: string;
+  };
+  /** 'pending' | 'denied' | 'expired' | { token secret + info, once } */
+  poll(id: string, pollSecret: string): { status: 'pending' | 'denied' | 'expired' } | { status: 'approved'; secret: string; token: ApiTokenInfo };
+  list(): PairingRequest[];
+  approve(id: string, opts: { name?: string; scopes: ApiScope[]; profileId: string | null; approvedBy: string | null }): ApiTokenInfo;
+  deny(id: string): void;
+}
+
 export interface AppServices {
   config: AppConfig;
   log: Logger;
@@ -349,7 +460,10 @@ export interface AppServices {
   browser: BrowserManager;
   chat: ChatHub;
   platforms: PlatformRegistry;
-  orchestrator: Orchestrator;
+  /** One go-live engine per profile. */
+  orchestrators: OrchestratorRegistry;
+  apps: AppRegistry;
+  pairings: PairingService;
   tls: TlsManager;
   /** Build a DriverContext for a platform call. */
   driverContext(opts: {

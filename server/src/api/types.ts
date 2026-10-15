@@ -2,7 +2,9 @@
 
 import type {
   ApiScope,
+  AppResource,
   ChatAlertKind,
+  ConnectedApp,
   DestinationPhase,
   Feed,
   FeedState,
@@ -31,6 +33,10 @@ export type ApiEventType =
   | 'destination.down'
   | 'destination.up'
   | 'system.notice'
+  | 'profile.status'
+  | 'profiles.changed'
+  | 'apps.changed'
+  | 'app.message'
   | 'system.reset';
 
 /** Scope each event type needs. system.reset is a control frame every stream may get. */
@@ -54,6 +60,10 @@ export const EVENT_SCOPES: Record<ApiEventType, ApiScope | null> = {
   'destination.down': 'status:read',
   'destination.up': 'status:read',
   'system.notice': 'status:read',
+  'profile.status': 'status:read',
+  'profiles.changed': 'status:read',
+  'apps.changed': 'apps:read',
+  'app.message': 'apps:read',
   'system.reset': null,
 };
 
@@ -65,6 +75,11 @@ export interface EnvelopeSource {
   connection: string;
   /** PlatformId, or 'core'. */
   platform: PlatformId | typeof CORE;
+  /**
+   * Profile the event belongs to, or null for events about no single profile (profiles.changed,
+   * apps.changed, app.message without a profile, notices for the whole server, system.reset).
+   */
+  profile: string | null;
 }
 
 export interface Envelope<T = unknown> {
@@ -224,4 +239,65 @@ export interface ApiDestinationUp {
 export interface ApiNotice {
   level: 'info' | 'warn' | 'error';
   message: string;
+}
+
+// ---- profiles + the hub (v1.2) ----
+
+/** GET /profiles item and profile.status data (a ProfileSummary). */
+export interface ApiProfile {
+  id: string;
+  name: string;
+  slug: string;
+  color: string | null;
+  status: SessionStatus;
+  startedAt: string | null;
+  testMode: boolean;
+  destinations: number;
+  live: number;
+  down: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /profiles/{id}/ingest */
+export interface ApiIngest {
+  profileId: string;
+  serverUrl: string;
+  feeds: { feed: Feed; streamKey: string; fullUrl: string }[];
+}
+
+/** A connected app as other apps see it (the registering token's id stays internal). */
+export type ApiConnectedApp = Omit<ConnectedApp, 'tokenId'>;
+
+export type ApiAppResource = AppResource;
+
+/** apps.changed data. */
+export interface ApiAppsChanged {
+  apps: ApiConnectedApp[];
+}
+
+/** GET /profiles/{id}/overlays item. */
+export interface ApiOverlay {
+  appId: string;
+  appName: string;
+  appOnline: boolean;
+  id: string;
+  name: string;
+  url?: string;
+  width?: number;
+  height?: number;
+  meta?: Record<string, unknown>;
+}
+
+/** app.message data. */
+export interface ApiAppMessage {
+  id: string;
+  from: string | null;
+  to: string | null;
+  type: string;
+  profileId: string | null;
+  replyTo: string | null;
+  data: Record<string, unknown>;
+  /** Epoch ms. */
+  ts: number;
 }

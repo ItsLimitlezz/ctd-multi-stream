@@ -13,6 +13,7 @@ import { Spinner } from '../../components/Spinner';
 import { TextInput } from '../../components/TextInput';
 import { Link } from '../../router';
 import { errorMessage, isApiError } from '../../state/errors';
+import { useProfileId } from '../../state/profile';
 import { PlatformPicker } from '../destinations/PlatformPicker';
 import { fieldForMessage, hasErrors } from '../settings/settings-helpers';
 import { connectablePlatforms, connectMethodFor, developerAppBadge, needsDeveloperApp } from './connect-flow';
@@ -155,6 +156,8 @@ export function AccountForm({ info, apps, onBack, onCancel, onCreated }: Account
   const [errors, setErrors] = useState<FormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The account belongs to the streaming profile on screen.
+  const profileId = useProfileId();
   // E.g. Facebook: a Page account needs the Meta app, a profile account doesn't.
   const appNeeded = needsDeveloperApp(info, apps, values);
 
@@ -169,6 +172,7 @@ export function AccountForm({ info, apps, onBack, onCancel, onCreated }: Account
     setBusy(true);
     try {
       const account = await api.createAccount({
+        profileId,
         platform: info.id,
         label: label.trim() || undefined,
         options: cleanValues(info.accountFields, values),

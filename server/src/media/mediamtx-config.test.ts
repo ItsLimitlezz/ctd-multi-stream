@@ -23,8 +23,20 @@ describe('buildMediaMtxConfig', () => {
     expect(yml).toMatch(/authHTTPExclude:\n {2}- action: api\n {2}- action: metrics\n/);
   });
 
-  it('declares exactly the two feed paths (no all_others)', () => {
-    expect(yml).toMatch(/paths:\n {2}live\/landscape:\n {4}source: publisher\n {2}live\/vertical:\n {4}source: publisher\n/);
+  it("declares the default profile's two feed paths and one regex for every other profile (no all_others)", () => {
+    expect(yml).toContain(
+      [
+        'paths:',
+        '  live/landscape:',
+        '    source: publisher',
+        '  live/vertical:',
+        '    source: publisher',
+        '  "~^live/[a-z0-9-]{1,32}/(landscape|vertical)$":',
+        '    source: publisher',
+        '',
+      ].join('\n'),
+    );
+    expect(yml.trimEnd().endsWith('    source: publisher')).toBe(true);
     expect(yml).not.toContain('all_others');
     expect(yml).not.toContain('all:');
   });

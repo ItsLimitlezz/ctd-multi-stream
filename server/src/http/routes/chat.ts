@@ -1,4 +1,9 @@
 // Chat REST routes + the token-protected OBS chat overlay (/overlay/*).
+//
+// Chat is per profile: `?profile=` (default: the default profile) on recent/overlay/rotate. Each
+// profile has its own overlay token, and the public overlay (/overlay/chat?token=…, /overlay/ws)
+// serves only the chat of the token's profile. The default profile keeps its pre-profiles token,
+// so an overlay URL already pasted into OBS keeps working.
 
 import { createHash } from 'node:crypto';
 import type {} from '@fastify/rate-limit'; // route `config.rateLimit` typings
@@ -6,11 +11,12 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { WebSocket } from 'ws';
 import { z } from 'zod';
 import type { OverlayInfo, WsServerMessage } from '../../../../shared/api.js';
+import { DEFAULT_PROFILE_ID } from '../../../../shared/types.js';
 import { OVERLAY_CSS, OVERLAY_HTML, OVERLAY_JS } from '../../chat/overlay-assets.js';
 import { safeErrorMessage } from '../../chat/redact.js';
-import { tokensEqual } from '../../chat/token.js';
 import type { AppServices } from '../../services.js';
 import { audit, requireAdmin, requireUser, sendError, type RouteOptions } from '../guards.js';
+import { installErrorHandler, profileFromQuery } from '../validation.js';
 
 export const OVERLAY_HISTORY = 50;
 export const OVERLAY_PING_MS = 30_000;
@@ -51,9 +57,10 @@ function queryToken(req: FastifyRequest): string | null {
   return typeof token === 'string' && token.length > 0 && token.length <= MAX_TOKEN_LENGTH ? token : null;
 }
 
-async function isValidOverlayToken(services: AppServices, token: string | null): Promise<boolean> {
-  if (token === null) return false;
-  return tokensEqual(token, await services.chat.overlayToken());
+/** Profile of a presented overlay token, or null (missing/unknown/rotated token). */
+async function overlayProfile(services: AppServices, token: string | null): Promise<string | null> {
+  if (token === null) return null;
+  return services.chat.profileForOverlayToken(token);
 }
 
 function overlayUrl(services: AppServices, token: string): OverlayInfo {
@@ -63,27 +70,48 @@ function overlayUrl(services: AppServices, token: string): OverlayInfo {
 
 const chatRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) => {
   const log = services.log.child({ mod: 'chat-routes' });
-  /** Open overlay sockets, closed when the token is rotated. */
-  const overlaySockets = new Set<WebSocket>();
+  installErrorHandler(app); // `?profile=` errors: 400 invalid / 404 unknown_profile
+  /** Open overlay sockets and the profile each one shows (closed when that profile's token is rotated). */
+  const overlaySockets = new Map<WebSocket, { token: string; profileId: string }>();
+
+  /** Close every overlay socket whose token no longer belongs to its profile (rotated/deleted). */
+  function recheckOverlaySockets(): void {
+    for (const [socket, { token, profileId }] of overlaySockets) {
+      overlayProfile(services, token).then(
+        (current) => {
+          if (current !== profileId) socket.close(WS_CLOSE_UNAUTHORIZED, 'Token rotated');
+        },
+        () => {},
+      );
+    }
+  }
+  // A deleted profile's overlays stop at once (its token is deleted with it).
+  const offProfiles = services.bus.on('profiles-changed', recheckOverlaySockets);
+  app.addHook('onClose', async () => offProfiles());
 
   // ---- authenticated API ----
 
   app.get('/api/chat/recent', { preHandler: requireUser }, async (req, reply) => {
     const parsed = RecentQuery.safeParse(req.query ?? {});
     if (!parsed.success) return sendError(reply, 400, 'limit must be an integer between 1 and 500', 'invalid');
-    return services.chat.recent(parsed.data.limit);
+    return services.chat.recent(parsed.data.limit, profileFromQuery(services, req.query));
   });
 
-  app.get('/api/chat/overlay', { preHandler: requireAdmin }, async (_req, reply) => {
-    const info = overlayUrl(services, await services.chat.overlayToken());
+  app.get('/api/chat/overlay', { preHandler: requireAdmin }, async (req, reply) => {
+    const profileId = profileFromQuery(services, req.query);
+    const info = overlayUrl(services, await services.chat.overlayToken(profileId));
     return reply.header('Cache-Control', 'no-store').send(info);
   });
 
   app.post('/api/chat/overlay/rotate', { preHandler: requireAdmin }, async (req, reply) => {
-    const token = await services.chat.rotateOverlayToken();
-    audit(services, req, 'chat.overlay_rotate');
-    for (const socket of overlaySockets) socket.close(WS_CLOSE_UNAUTHORIZED, 'Token rotated');
-    overlaySockets.clear();
+    const profileId = profileFromQuery(services, req.query);
+    const token = await services.chat.rotateOverlayToken(profileId);
+    audit(services, req, 'chat.overlay_rotate', profileId === DEFAULT_PROFILE_ID ? null : `profile=${profileId}`);
+    for (const [socket, info] of overlaySockets) {
+      if (info.profileId !== profileId) continue;
+      socket.close(WS_CLOSE_UNAUTHORIZED, 'Token rotated');
+      overlaySockets.delete(socket);
+    }
     return reply.header('Cache-Control', 'no-store').send(overlayUrl(services, token));
   });
 
@@ -91,7 +119,7 @@ const chatRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) =
 
   app.get('/overlay/chat', { config: { rateLimit: OVERLAY_RATE_LIMIT } }, async (req, reply) => {
     // Same 404 as any unknown path, so the endpoint can't be probed for valid tokens.
-    if (!(await isValidOverlayToken(services, queryToken(req)))) return sendError(reply, 404, 'Not found', 'not_found');
+    if ((await overlayProfile(services, queryToken(req))) === null) return sendError(reply, 404, 'Not found', 'not_found');
     return reply
       .header('Cache-Control', 'no-store')
       .header('X-Robots-Tag', 'noindex, nofollow')
@@ -104,19 +132,20 @@ const chatRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) =
 
   app.get('/overlay/ws', { websocket: true, config: { rateLimit: OVERLAY_RATE_LIMIT } }, async (socket, req) => {
     const token = queryToken(req);
-    let valid: boolean;
+    let profileId: string | null;
     try {
-      valid = await isValidOverlayToken(services, token);
+      profileId = await overlayProfile(services, token);
     } catch (err) {
       log.error({ reason: safeErrorMessage(err) }, 'overlay token lookup failed');
       socket.close(1011, 'Server error');
       return;
     }
-    if (!valid || token === null) {
+    if (profileId === null || token === null) {
       socket.close(WS_CLOSE_UNAUTHORIZED, 'Unauthorized');
       return;
     }
     if (socket.readyState !== socket.OPEN) return; // client left while we checked
+    const profile = profileId;
 
     const send = (msg: WsServerMessage): void => {
       if (socket.readyState !== socket.OPEN) return;
@@ -127,9 +156,12 @@ const chatRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) =
       socket.send(JSON.stringify(msg));
     };
 
-    for (const message of services.chat.recent(OVERLAY_HISTORY)) send({ type: 'chat', message });
-    const unsubscribe = services.bus.on('chat', (message) => send({ type: 'chat', message }));
-    overlaySockets.add(socket);
+    // Only the token's profile: another profile's chat never reaches this overlay.
+    for (const message of services.chat.recent(OVERLAY_HISTORY, profile)) send({ type: 'chat', message });
+    const unsubscribe = services.bus.on('chat', (message) => {
+      if ((message.profileId ?? DEFAULT_PROFILE_ID) === profile) send({ type: 'chat', message });
+    });
+    overlaySockets.set(socket, { token, profileId: profile });
 
     // Heartbeat: drop dead connections, and re-check the token in case it was rotated elsewhere.
     let alive = true;
@@ -148,9 +180,9 @@ const chatRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) =
         socket.terminate();
         return;
       }
-      isValidOverlayToken(services, token).then(
-        (ok) => {
-          if (!ok) socket.close(WS_CLOSE_UNAUTHORIZED, 'Token rotated');
+      overlayProfile(services, token).then(
+        (current) => {
+          if (current !== profile) socket.close(WS_CLOSE_UNAUTHORIZED, 'Token rotated');
         },
         () => {},
       );

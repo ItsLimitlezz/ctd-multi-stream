@@ -15,12 +15,14 @@ import { Link, navigate, useRoute, type RouteName } from './router';
 import { AuthProvider, rememberReturnTo, takeReturnTo, useAuth } from './state/auth';
 import { reloadingImport } from './state/chunk-reload';
 import { LiveProvider, useSession } from './state/live';
+import { ProfileProvider, useProfileContext } from './state/profile';
 
 // Admin pages are loaded on demand (they're built by another module and may grow large).
 // After a container update the old chunks are gone: reload once to get the new build.
 const DestinationsPage = lazy(reloadingImport(() => import('./pages/DestinationsPage')));
 const AccountsPage = lazy(reloadingImport(() => import('./pages/AccountsPage')));
 const SettingsPage = lazy(reloadingImport(() => import('./pages/SettingsPage')));
+const ProfilesPage = lazy(reloadingImport(() => import('./pages/ProfilesPage')));
 
 const PAGES: Record<Exclude<RouteName, 'login' | 'setup'>, ComponentType> = {
   dashboard: DashboardPage,
@@ -28,6 +30,7 @@ const PAGES: Record<Exclude<RouteName, 'login' | 'setup'>, ComponentType> = {
   destinations: DestinationsPage,
   accounts: AccountsPage,
   settings: SettingsPage,
+  profiles: ProfilesPage,
   profile: ProfilePage,
 };
 
@@ -35,9 +38,11 @@ export default function App() {
   return (
     <ToastProvider>
       <AuthProvider>
-        <LiveProvider>
-          <Root />
-        </LiveProvider>
+        <ProfileProvider>
+          <LiveProvider>
+            <Root />
+          </LiveProvider>
+        </ProfileProvider>
       </AuthProvider>
     </ToastProvider>
   );
@@ -54,6 +59,7 @@ function FullPageSpinner({ label = 'Loading…' }: { label?: string }) {
 function Root() {
   const auth = useAuth();
   const route = useRoute();
+  const profile = useProfileContext();
   const { status } = auth;
 
   // Keep the URL in line with the auth state.
@@ -109,8 +115,11 @@ function Root() {
   return (
     <AppShell>
       <DocumentTitle label={route.label} />
-      <ErrorBoundary key={route.name}>
-        {route.adminOnly && !auth.isAdmin ? (
+      {/* Keyed by profile too: switching profile starts the page fresh (no data from the other one). */}
+      <ErrorBoundary key={`${route.name}:${profile.profileId}`}>
+        {!profile.ready ? (
+          <FullPageSpinner label="Loading profiles…" />
+        ) : route.adminOnly && !auth.isAdmin ? (
           <EmptyState
             icon={<ShieldIcon />}
             title="Admins only"
@@ -131,11 +140,16 @@ function Root() {
   );
 }
 
-/** "Chat · CTD Multi-Stream", prefixed with "LIVE" while streaming. */
+/**
+ * "Chat · CTD Multi-Stream", prefixed with "LIVE" while streaming; with several profiles, the
+ * profile's name follows the page ("LIVE · Dashboard · DPRTMNT · CTD Multi-Stream").
+ */
 function DocumentTitle({ label }: { label: string }) {
   const live = useSession()?.status === 'live';
+  const { profiles, current } = useProfileContext();
+  const profileName = current && profiles && profiles.length > 1 ? current.name : null;
   useEffect(() => {
-    document.title = `${live ? 'LIVE · ' : ''}${label} · CTD Multi-Stream`;
-  }, [label, live]);
+    document.title = `${live ? 'LIVE · ' : ''}${label}${profileName ? ` · ${profileName}` : ''} · CTD Multi-Stream`;
+  }, [label, live, profileName]);
   return null;
 }

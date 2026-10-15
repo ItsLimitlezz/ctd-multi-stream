@@ -5,11 +5,11 @@
 
 import { execFile, type ChildProcess } from 'node:child_process';
 import type { Logger } from 'pino';
-import type { Feed, PushStats } from '../../../shared/types.js';
+import { DEFAULT_PROFILE_ID, type Feed, type PushStats } from '../../../shared/types.js';
 import type { AppConfig } from '../config.js';
 import type { EventBus, PushStatus } from '../events.js';
 import type { PushPlan } from '../platforms/types.js';
-import type { MediaServer, PushSupervisor } from '../services.js';
+import type { DestinationsRepo, MediaServer, PushSupervisor } from '../services.js';
 import { buildPushArgs, capabilitiesFromVersion, type FfmpegCapabilities } from './ffmpeg-args.js';
 import { ProgressParser, type ProgressBlock } from './ffmpeg-progress.js';
 import { defaultSpawn, onLines, terminate, type SpawnFn } from './process-utils.js';
@@ -110,6 +110,8 @@ export function explainFfmpegError(line: string): string | null {
 interface Push {
   id: string;
   plan: PushPlan;
+  /** Profile whose OBS feeds this push reads (the destination's profile); null = unknown destination. */
+  profileId: string | null;
   log: Logger;
   secrets: string[];
   stopped: boolean;
@@ -134,10 +136,19 @@ function defaultProbe(bin: string): () => Promise<FfmpegCapabilities> {
     });
 }
 
-export function createPushSupervisor(
-  { config, bus, log, media }: { config: AppConfig; bus: EventBus; log: Logger; media: MediaServer },
-  deps: PushSupervisorDeps = {},
-): PushSupervisor {
+export interface PushSupervisorOptions {
+  config: AppConfig;
+  bus: EventBus;
+  log: Logger;
+  media: MediaServer;
+  /**
+   * Push ids are destination ids: the destination's profile decides which OBS feeds are read
+   * (each profile has its own). Looked up once when a push starts.
+   */
+  repos: { destinations: Pick<DestinationsRepo, 'get'> };
+}
+
+export function createPushSupervisor({ config, bus, log, media, repos }: PushSupervisorOptions, deps: PushSupervisorDeps = {}): PushSupervisor {
   const spawn = deps.spawn ?? defaultSpawn;
   const now = deps.now ?? Date.now;
   const stallTimeoutMs = deps.stallTimeoutMs ?? 30_000;
@@ -289,10 +300,12 @@ export function createPushSupervisor(
     if (p.stopped || pushes.get(p.id) !== p) return;
     let args: string[];
     try {
+      // Never fall back to another profile's feed: that would send the wrong OBS to this platform.
+      if (p.profileId === null) throw new Error('Unknown destination: no profile to read the feed from');
       const c = p.plan.mode === 'multitrack' ? await capabilities() : { multitrack: true };
       if (p.stopped || pushes.get(p.id) !== p) return;
       const inputs: Partial<Record<Feed, string>> = {};
-      for (const feed of p.plan.feeds) inputs[feed] = media.readUrl(feed);
+      for (const feed of p.plan.feeds) inputs[feed] = media.readUrl(p.profileId, feed);
       args = buildPushArgs(p.plan, inputs, c);
     } catch (err) {
       fail(p, redactSecretsInText(err instanceof Error ? err.message : String(err)));
@@ -313,9 +326,11 @@ export function createPushSupervisor(
   const supervisor: PushSupervisor = {
     start(id, plan) {
       const prev = pushes.get(id);
+      const dest = repos.destinations.get(id);
       const p: Push = {
         id,
         plan,
+        profileId: dest ? (dest.profileId ?? DEFAULT_PROFILE_ID) : null,
         log: log.child({ push: id }),
         secrets: urlSecretFragments(plan.url),
         stopped: false,
@@ -331,7 +346,10 @@ export function createPushSupervisor(
         lines: [],
       };
       pushes.set(id, p);
-      p.log.info({ target: redactUrl(plan.url), mode: plan.mode, feeds: plan.feeds, restart: Boolean(prev) }, 'push starting');
+      p.log.info(
+        { target: redactUrl(plan.url), mode: plan.mode, feeds: plan.feeds, profileId: p.profileId, restart: Boolean(prev) },
+        'push starting',
+      );
       emit(p, 'starting');
       // On restart, wait for the old FFmpeg to exit first (a stop() meanwhile waits for it too).
       const ready = (prev ? retire(prev) : Promise.resolve()).catch((err: unknown) =>

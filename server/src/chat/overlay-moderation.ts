@@ -3,17 +3,17 @@
 // messages off the screen.
 //
 // The overlay route (routes/chat.ts) owns those sockets; this plugin observes them through the
-// websocket server's 'connection' event (emitted by @fastify/websocket for every upgrade), checks
-// the overlay token the same way the route does, and stops on close. Register after
-// @fastify/websocket.
+// websocket server's 'connection' event (emitted by @fastify/websocket for every upgrade), resolves
+// the overlay token to its profile the same way the route does, forwards only that profile's
+// moderation, and stops on close. Register after @fastify/websocket.
 
 import type { IncomingMessage } from 'node:http';
 import type { FastifyPluginAsync } from 'fastify';
 import type { WebSocket } from 'ws';
 import type { WsServerMessage } from '../../../shared/api.js';
+import { DEFAULT_PROFILE_ID } from '../../../shared/types.js';
 import type { RouteOptions } from '../http/guards.js';
 import { safeErrorMessage } from './redact.js';
-import { tokensEqual } from './token.js';
 
 export const OVERLAY_WS_PATH = '/overlay/ws';
 const MAX_TOKEN_LENGTH = 256;
@@ -51,10 +51,11 @@ const overlayModeration: FastifyPluginAsync<RouteOptions> = async (app, { servic
       unsubscribe?.();
     });
 
-    services.chat.overlayToken().then(
-      (current) => {
-        if (closed || socket.readyState !== socket.OPEN || !tokensEqual(token, current)) return;
+    services.chat.profileForOverlayToken(token).then(
+      (profileId) => {
+        if (closed || socket.readyState !== socket.OPEN || profileId === null) return;
         unsubscribe = services.bus.on('chat-moderation', (moderation) => {
+          if ((moderation.profileId ?? DEFAULT_PROFILE_ID) !== profileId) return;
           if (socket.readyState !== socket.OPEN) return;
           if (socket.bufferedAmount > MAX_BUFFERED_BYTES) return; // the route terminates slow readers
           const msg: WsServerMessage = { type: 'chat-moderation', moderation };

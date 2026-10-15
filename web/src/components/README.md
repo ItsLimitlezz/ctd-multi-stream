@@ -61,7 +61,13 @@ Also on the dashboard (helpers in `pages/dashboard-helpers.ts`):
 - **Test mode:** a labelled switch next to Go live (`PUT /api/session/test-mode`), locked while a session runs. While on, an orange banner lists every enabled destination with what happens there (`testModePlan` / `testModeSummary`, from `PlatformInfo.testMode`; Facebook depends on the account type, resolved from the account for admins; a Facebook destination without an account, or whose account was deleted, is skipped like the server does), skipped destinations show "Skipped in test mode", and supported ones "Private test".
 - **Viewers:** live destination cards show `DestinationState.viewers` when the platform reports it, and the status card shows the sum of the known counts (`destinationViewers`, `totalViewers`, `formatViewers`); unknown counts are hidden, never shown as 0.
 
-Settings → **API** (`pages/settings/ApiTab.tsx`) lists the external-API tokens (revoke with a `ConfirmButton`), creates new ones (the secret is shown once, masked, in a modal that only closes with Done and can't close while the token is being created: `tokenModalReducer`), creates the **OBS dock** link in one click (`dockUrl(access, secret)`: LAN base when known, else the HTTPS base; token in the URL fragment) and shows the connection details with Copy buttons.
+Settings → **API** (`pages/settings/ApiTab.tsx`, helpers in `state/hub.ts`):
+
+- **App pairing:** pending requests ("CTD OBS plugin wants to connect", from WS `pairings` + `GET /api/pairings`) with the app's code, requested profile/scopes, IP and expiry. A single request (or the one named by `?pair=<id>`, the app's `approveUrl`) opens straight into the approve form: token name, **Profile** (each profile or "Every profile", starting from what the app asked for; a removed profile falls back to the default one) and the permissions (requested ones tagged; `ingest:read` shows a stream-key warning). Approve / Deny / Later. `PairingBanner` repeats it on every page for admins.
+- **Tokens:** list (with the profile each is limited to, or "Every profile" for tokens from before profiles) and revoke; new tokens pick a **Profile** (default: the one on screen) and start with `chat:read` + `status:read` only (`DEFAULT_TOKEN_SCOPES`). The secret is shown once, masked, in a modal that only closes with Done and can't close while the token is being created (`tokenModalReducer`).
+- **Connected apps:** every registered app (WS `apps` + `GET /api/apps`) with online/offline, kind, version, its token's profile, a safe "Open app" link and its resources grouped by profile ("DPRTMNT: 2 overlays (…)", `groupResources`); Remove unregisters it (revoking the token disconnects it for good).
+- **OBS dock:** one link per profile (profile picker when there are several; the token is limited to that profile and named "OBS dock — <profile>"); `dockUrl(access, secret)`: LAN base when known, else the HTTPS base; token in the URL fragment.
+- Connection details with Copy buttons, and how pairing works.
 
 ### Modal
 `<Modal open onClose title footer size="sm|md|lg" dismissible>{children}</Modal>` uses the native `<dialog>` element, so the focus trap, Escape and top-layer stacking come from the browser. Children mount only while the modal is open, so forms inside start fresh each time. Clicking the backdrop closes it when `dismissible` is set (the default). With `dismissible={false}`, Escape is stopped at keydown; if the browser still forces a close (Android back, a repeated Escape), the dialog is shown again. A dismissible modal closed by the browser calls `onClose`, so React state and the DOM never disagree. Open modals are tracked in `state/modal-stack.ts`.
@@ -123,8 +129,15 @@ Pure helpers, all exported from the barrel: `messageAlert(m)` (the alert of an e
 ### Toasts
 `toast(message, { tone, durationMs })`, `toast.success/info/warn/error(message)` and `dismissToast(id)` work anywhere, with no hook needed. `<ToastProvider>`, mounted once in `App.tsx`, renders them. A repeated identical message bumps a counter instead of stacking. At most 4 are visible. `durationMs: 0` keeps a toast until it is dismissed. The store lives in `state/toast.ts`. While a modal is open, the toasts render inside the topmost one (a modal dialog makes the rest of the page inert and covers it).
 
+### Profiles (`ProfileSwitcher.tsx`, `ProfileBadge.tsx`, `PairingBanner.tsx`)
+- `ProfileSwitcher` (top bar): "● DPRTMNT ▾" with the profile's colour; a red dot when another profile is live; the menu (`role="menu"`, `menuitemradio`, arrow keys) lists every profile with LIVE / Starting / test mode and "Manage profiles" for admins. `ProfileSwitcherView` is the prop-driven version (tests).
+- `LiveProfilesIndicator`: "2 live: Miami or Bust · DPRTMNT" (just "2 live" below 1440 px, hidden below 560 px) whenever several profiles are live or the live one isn't on screen.
+- `ProfileDot` (colour dot, hollow ring without a colour; only `#RRGGBB` reaches a style), `ProfileStatusBadge`, `ProfileTag` ("Profile: ● DPRTMNT", on every profile-scoped page and tab).
+- The current profile's colour underlines the top bar (`--profile-color`).
+- `PairingBanner`: admins see "<app> wants to connect (code …) · Review" on every page except Settings → API.
+
 ### Other
-- `AppShell` is the top bar (brand, live indicator, nav, user menu) plus the main area. The nav collapses to a menu below 900 px.
+- `AppShell` is the top bar (brand, profile switcher, live indicators, nav, user menu) plus the main area. The nav collapses to a menu below 1100 px; the brand text and user name hide below 1360 px, the brand below 480 px.
 - `LiveIndicator` is the session status pill and shows "Reconnecting…" while the socket is down.
 - `TestModeIndicator` is the orange "TEST MODE" pill (just "TEST" below 480 px) shown in the top bar on every page while `session.testMode` is on.
 - `AuthLayout` is the centered card used by the sign-in and setup pages.
@@ -145,7 +158,20 @@ The router has no dependencies and is based on `pushState`.
 - `buildSearch(record)` and `ROUTES`.
 - `matchRoute(path)` sends unknown paths to the dashboard.
 
-The routes are `/`, `/chat`, `/destinations`\*, `/accounts`\*, `/settings`\*, `/profile`, `/login` and `/setup`. The ones marked \* are admin-only: `App.tsx` shows "Admins only" to operators, and `AppShell` hides them from the operator nav.
+The routes are `/`, `/chat`, `/destinations`\*, `/accounts`\*, `/settings`\*, `/profiles`\* (streaming profiles; not in the main nav: reached from the switcher and Settings), `/profile` (the signed-in user's own page), `/login` and `/setup`. The ones marked \* are admin-only: `App.tsx` shows "Admins only" to operators, and `AppShell` hides them from the operator nav.
+
+**Sticky parameters:** `?profile=` follows the user: `navigate()` and `<Link>` (including its `href`, for new tabs) keep the current value when the target doesn't set one (`withStickyParams`). `setQuery` merges into the current query, so it can remove it on purpose.
+
+## Profiles (`state/profile.tsx`, logic in `state/profiles.ts`)
+
+A profile is an independent streaming set-up (accounts, destinations, title, OBS keys, test mode, chat); several can be live at once. Developer apps, users, settings, HTTPS, API tokens and audit are shared.
+
+- `ProfileProvider` (inside `AuthProvider`, around `LiveProvider`) loads `GET /api/profiles` at login (retrying with backoff) and then follows the live socket (`hello.profiles`, `profiles` messages).
+- **Current profile:** `?profile=<id>` in the URL; without it, the last profile used in this browser (`localStorage` `ctd.profile`, every access in try/catch); unknown or deleted ids fall back to it, then to the default profile (`resolveProfileId`). Once the list is known the URL is kept in line (the parameter is left out on an install with only the default profile).
+- Hooks: `useProfileContext()` → `{ profiles, profileId, current, ready, select(id, to?), refresh(), apply(list) }`, plus `useProfiles()`, `useProfileId()`, `useCurrentProfile()`. Outside a provider (static renders) it is the default profile (`STATIC_PROFILE_CONTEXT`).
+- Every profile-scoped call passes the profile: `api.session/startSession/stopSession/setTitle/setAutoGoLive/setTestMode/destinations/accounts/ingest/rotateIngestKey/recentChat/overlay/rotateOverlay(…, profileId)` send `?profile=`; `createAccount` / `createDestination` send `profileId` in the body (the forms use `useProfileId()`). Routes on one id (`/api/destinations/:id`, …) need no profile.
+- `App.tsx` keys each page by route **and profile**, so switching starts the page fresh, and waits for the list (`ready`) before rendering pages.
+- `/profiles` (`pages/ProfilesPage.tsx`): every profile with colour, status, counts, OBS key prefix and set-up links; create (name + colour; then "next steps"), rename/recolour (the slug and OBS keys never change), delete (disabled with the reason for the default profile and while its session isn't offline).
 
 ## State (`web/src/state/`)
 
@@ -156,22 +182,27 @@ The routes are `/`, `/chat`, `/destinations`\*, `/accounts`\*, `/settings`\*, `/
 On boot the app calls `api.setupStatus()`. If setup is needed it goes to `/setup`; otherwise it calls `api.me()` and either signs in or goes to `/login`. Any 401 `unauthenticated` response clears the user and redirects to `/login`. The page the user was on is remembered and restored after login; use `rememberReturnTo` and `takeReturnTo` to control this. Call `refresh()` after anything that changes the current user, for example enabling 2FA. `MIN_PASSWORD` is 10.
 
 ### Live store (`live.tsx`, logic in `live-store.ts`)
-While a user is logged in, the app keeps one WebSocket open to `/api/ws`. If it drops, it reconnects with backoff (1 s, 2 s, 4 s, 8 s, then 15 s). It reconnects immediately when the network comes back or the tab becomes visible again. If a connection fails before the server's `hello`, the client calls `api.me()` first and stops if the session is gone.
+While a user is logged in, the app keeps one WebSocket open to `/api/ws?profile=<current profile>`; switching profile closes it and opens one for the new profile (`store.startProfile(id)` clears session, chat and accounts but keeps pairings and connected apps, which are shared). Session, feed, destination and chat messages stamped with another profile are ignored, and REST results pushed through `useLiveActions()` are bound to the profile on screen when the hook ran, so an answer arriving after a switch is dropped. If it drops, it reconnects with backoff (1 s, 2 s, 4 s, 8 s, then 15 s). It reconnects immediately when the network comes back or the tab becomes visible again. If a connection fails before the server's `hello`, the client calls `api.me()` first (and re-checks the profile list, in case the profile was deleted) and stops if the session is gone. Admins reload pending pairings (`GET /api/pairings`) on every `hello`.
 
 | Hook | Returns |
 |---|---|
-| `useSession()` | `SessionState \| null`, kept current from `hello`, `session`, `feed` and `destination` messages |
-| `useChat()` | `ChatMessage[]`, oldest first, the last 500, deduplicated by id, without messages removed by moderation |
+| `useSession()` | `SessionState \| null`, kept current from `hello`, `session`, `feed` and `destination` messages; `null` while the store still holds another profile (the first render after a switch), so REST fallbacks run |
+| `useChat()` | `ChatMessage[]`, oldest first, the last 500, deduplicated by id, without messages removed by moderation; empty while the store still holds another profile |
 | `useLiveStatus()` | `boolean`: socket connected |
+| `useLiveSocketReady()` | `boolean`: the socket of the profile on screen is connected (use it to decide whether a REST fallback is needed) |
 | `useLiveConnections()` | number of successful connections (0 means still connecting) |
 | `useAccountUpdates()` | `Record<accountId, Account>`, the latest pushed `account` messages |
 | `useAccountsVersion()` | number that changes on every `account` message and after a reconnect; use it as a refetch dependency |
 | `useDestinationsVersion()` | number that changes on `destinations-changed` and after a reconnect |
+| `usePairings()` | pending app pairings (every profile), `null` until loaded |
+| `useConnectedApps()` | connected apps (every profile), `null` until loaded |
 | `useLiveEvent(type, handler)` | runs the handler for each server message of that `type` |
-| `useLiveActions()` | `{ applySession, seedSession, patchSession, mergeChat }`, which push REST results into the store |
+| `useLiveActions()` | `{ applySession, seedSession, patchSession, mergeChat, loadPairings, loadApps }`, which push REST results into the store (a REST list never replaces a newer pushed one) |
 | `useLiveState(selector)` | any slice of the state; the selector must return a stable reference |
 
 `notice` messages are shown as toasts automatically, and passed to `alertForNotice` (below).
+
+The socket only carries the current profile's notices, so **other live profiles** are watched through successive `profiles` pushes (`profileAlerts` in `profiles.ts`): more destinations down on another streaming profile → a `warn` toast + alert naming it ("DPRTMNT · 1 destination down. Switch to DPRTMNT to see which."); all back → an `info` toast + chime; live → offline without passing through `stopping` → an `info` toast only. The baseline is reset on every `hello` (connect, reconnect, profile switch), so nothing stale is replayed. If the server ever stamps notices with a `profileId` and sends them to every socket, a summary alert for a profile that had its own notice in the last 15 s is skipped.
 
 `chat-moderation` messages remove chat, always within the moderated destination: `message-deleted` drops one message (by hub id, `platformMessageId`, or the derived `<platform>:<id>`), `user-cleared` drops that user's messages (ids win when both sides have one, else display name or login, case-insensitively, like the server), `cleared` drops the destination's whole chat. The removed ids (last 1000, `removedChat`) are remembered so a history snapshot taken before the removal (REST `recentChat`, a reconnect's `hello`) can't bring them back. Pure helpers: `applyModeration`, `moderationRemoves`, `messageFromUser`, `rememberRemoved`.
 
@@ -196,7 +227,7 @@ useLiveEvent('account', (m) => { if (m.account.status === 'connected') toast.suc
 
 ### Hooks (`hooks.ts`)
 - `useApi(fetcher, deps)` returns `{ data, error, loading, reload, setData }`. It reloads when `deps` change, ignores stale responses and keeps the old data while reloading.
-- `useDestinations()` is `useApi(api.destinations)` that refetches on `useDestinationsVersion()`.
+- `useDestinations()` is `useApi(api.destinations)` for the current profile that refetches on `useDestinationsVersion()` and on a profile change.
 - `useNow(intervalMs | null)` returns the current time in milliseconds, updated on an interval, for elapsed timers.
 
 ### Errors (`errors.ts`)

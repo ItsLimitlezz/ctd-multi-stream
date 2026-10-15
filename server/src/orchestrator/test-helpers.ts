@@ -3,17 +3,19 @@
 import pino from 'pino';
 import { vi, type Mock } from 'vitest';
 import type { AppSettings } from '../../../shared/api.js';
-import type {
-  Account,
-  ChatMessage,
-  Destination,
-  DestinationPhase,
-  DestinationState,
-  Feed,
-  FeedState,
-  PlatformId,
-  PlatformInfo,
-  SessionState,
+import {
+  DEFAULT_PROFILE_ID,
+  type Account,
+  type ChatMessage,
+  type Destination,
+  type DestinationPhase,
+  type DestinationState,
+  type Feed,
+  type FeedState,
+  type PlatformId,
+  type PlatformInfo,
+  type Profile,
+  type SessionState,
 } from '../../../shared/types.js';
 import { EventBus, type PushEvent, type PushStatus } from '../events.js';
 import type { ChatSourceItem, DriverContext, PlatformDriver, PreparedLive, PushPlan } from '../platforms/types.js';
@@ -23,11 +25,13 @@ import type {
   ChatHub,
   MediaServer,
   Orchestrator,
+  OrchestratorRegistry,
   PushSupervisor,
   Repos,
   ScopedSecrets,
 } from '../services.js';
-import { createOrchestrator, type OrchestratorTimings } from './orchestrator.js';
+import type { OrchestratorTimings } from './orchestrator.js';
+import { createOrchestratorRegistry } from './registry.js';
 
 export const PLAN: PushPlan = { url: 'rtmp://ingest.example.com/app/secret-key', mode: 'copy', feeds: ['landscape'] };
 export const STATS = { bitrateKbps: 6000, fps: 60, speed: 1, uptimeSec: 4 };
@@ -42,29 +46,41 @@ export async function advance(ms: number): Promise<void> {
   await flush();
 }
 
-export function offlineFeed(feed: Feed): FeedState {
-  return { feed, online: false, since: null, video: null, audio: null, bitrateKbps: null };
+export function offlineFeed(feed: Feed, profileId: string = DEFAULT_PROFILE_ID): FeedState {
+  return { profileId, feed, online: false, since: null, video: null, audio: null, bitrateKbps: null };
 }
 
+export function profile(id: string, name: string, over: Partial<Profile> = {}): Profile {
+  return {
+    id,
+    name,
+    slug: id === DEFAULT_PROFILE_ID ? 'main' : id,
+    color: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
+  };
+}
+
+export const DEFAULT_PROFILE: Profile = profile(DEFAULT_PROFILE_ID, 'Main');
+
+/** OBS feeds of every profile (FeedState.profileId set, like the real media server). */
 export class FakeMedia {
-  private readonly states = new Map<Feed, FeedState>([
-    ['landscape', offlineFeed('landscape')],
-    ['vertical', offlineFeed('vertical')],
-  ]);
+  private readonly states = new Map<string, FeedState>();
   constructor(private readonly bus: EventBus) {}
-  feeds(): FeedState[] {
-    return [...this.states.values()];
+  feeds(profileId: string = DEFAULT_PROFILE_ID): FeedState[] {
+    return (['landscape', 'vertical'] as const).map((f) => this.feed(profileId, f));
   }
-  feed(f: Feed): FeedState {
-    return this.states.get(f)!;
+  feed(profileId: string, f: Feed): FeedState {
+    return this.states.get(`${profileId}/${f}`) ?? offlineFeed(f, profileId);
   }
   /** Change state without emitting (initial conditions). */
-  preset(f: Feed, online: boolean): void {
-    this.states.set(f, { ...offlineFeed(f), online, since: online ? new Date().toISOString() : null });
+  preset(f: Feed, online: boolean, profileId: string = DEFAULT_PROFILE_ID): void {
+    this.states.set(`${profileId}/${f}`, { ...offlineFeed(f, profileId), online, since: online ? new Date().toISOString() : null });
   }
-  set(f: Feed, online: boolean, bitrateKbps: number | null = null): void {
-    const s: FeedState = { ...offlineFeed(f), online, since: online ? new Date().toISOString() : null, bitrateKbps };
-    this.states.set(f, s);
+  set(f: Feed, online: boolean, bitrateKbps: number | null = null, profileId: string = DEFAULT_PROFILE_ID): void {
+    const s: FeedState = { ...offlineFeed(f, profileId), online, since: online ? new Date().toISOString() : null, bitrateKbps };
+    this.states.set(`${profileId}/${f}`, s);
     this.bus.emit('feed', s);
   }
 }
@@ -98,14 +114,15 @@ export class FakePushes implements PushSupervisor {
 }
 
 export class FakeChat implements ChatHub {
-  attaches: { id: string; platform: PlatformId; signal: AbortSignal }[] = [];
+  attaches: { id: string; platform: PlatformId; signal: AbortSignal; profileId: string | undefined }[] = [];
   attach(
     destinationId: string,
     platform: PlatformId,
     _source: (signal: AbortSignal) => AsyncIterable<ChatSourceItem>,
     signal: AbortSignal,
+    profileId?: string,
   ): void {
-    this.attaches.push({ id: destinationId, platform, signal });
+    this.attaches.push({ id: destinationId, platform, signal, profileId });
   }
   recent(): ChatMessage[] {
     return [];
@@ -115,6 +132,9 @@ export class FakeChat implements ChatHub {
   }
   async rotateOverlayToken(): Promise<string> {
     return 't';
+  }
+  async profileForOverlayToken(): Promise<string | null> {
+    return null;
   }
 }
 
@@ -166,15 +186,21 @@ export function prepared(over: Omit<Partial<PreparedLive>, 'end'> & { end?: EndM
 }
 
 export interface HarnessOptions {
+  /** Destinations without a profileId belong to the default profile. */
   dests: Destination[];
   drivers: PlatformDriver[];
   settings?: Record<string, unknown>;
   graceSec?: number;
   accounts?: Account[];
   timings?: Partial<OrchestratorTimings>;
+  /** Profiles besides the default one ("Main"). */
+  profiles?: Profile[];
 }
 
 export type Harness = ReturnType<typeof harness>;
+
+const inProfile = (item: { profileId?: string }, profileId: string | undefined): boolean =>
+  profileId === undefined || (item.profileId ?? DEFAULT_PROFILE_ID) === profileId;
 
 export function harness(opts: HarnessOptions) {
   const bus = new EventBus();
@@ -183,6 +209,7 @@ export function harness(opts: HarnessOptions) {
   const chat = new FakeChat();
   const dests = new Map(opts.dests.map((d) => [d.id, d]));
   const accounts = new Map((opts.accounts ?? []).map((a) => [a.id, a]));
+  const profiles = new Map([DEFAULT_PROFILE, ...(opts.profiles ?? [])].map((p) => [p.id, p]));
   const settings = new Map<string, unknown>(Object.entries(opts.settings ?? {}));
   const secrets = new Map<string, string>();
   const drivers = new Map(opts.drivers.map((d) => [d.info.id, d]));
@@ -201,12 +228,16 @@ export function harness(opts: HarnessOptions) {
   });
 
   const repos = {
+    profiles: {
+      list: () => [...profiles.values()],
+      get: (id: string) => profiles.get(id) ?? null,
+    },
     destinations: {
-      list: () => [...dests.values()],
+      list: (profileId?: string) => [...dests.values()].filter((d) => inProfile(d, profileId)),
       get: (id: string) => dests.get(id) ?? null,
     },
     accounts: {
-      list: () => [...accounts.values()],
+      list: (profileId?: string) => [...accounts.values()].filter((a) => inProfile(a, profileId)),
       get: (id: string) => accounts.get(id) ?? null,
     },
     settings: {
@@ -258,18 +289,25 @@ export function harness(opts: HarnessOptions) {
     },
   } as Partial<AppServices> as AppServices;
 
-  const orch: Orchestrator = createOrchestrator(services, opts.timings ? { timings: opts.timings } : {});
-  services.orchestrator = orch;
+  const registry: OrchestratorRegistry = createOrchestratorRegistry(services, opts.timings ? { timings: opts.timings } : {});
+  services.orchestrators = registry;
+  /** The default profile's orchestrator (the only one most tests use). */
+  const orch: Orchestrator = registry.get(DEFAULT_PROFILE_ID);
 
   const destEvents: DestinationState[] = [];
   const sessionEvents: SessionState[] = [];
-  const notices: { level: string; message: string }[] = [];
+  const notices: { level: string; message: string; profileId?: string }[] = [];
   bus.on('destination', (s) => destEvents.push(s));
   bus.on('session', (s) => sessionEvents.push(s));
   bus.on('notice', (n) => notices.push(n));
 
+  /** A destination's state, looked up in its own profile's orchestrator. */
   const destState = (id: string): DestinationState => {
-    const s = orch.state().destinations.find((d) => d.destinationId === id);
+    const profileId = dests.get(id)?.profileId ?? DEFAULT_PROFILE_ID;
+    const s = registry
+      .get(profileId)
+      .state()
+      .destinations.find((d) => d.destinationId === id);
     if (!s) throw new Error(`no state for ${id}`);
     return s;
   };
@@ -280,10 +318,12 @@ export function harness(opts: HarnessOptions) {
     pushes,
     chat,
     dests,
+    profiles,
     settings,
     secrets,
     contexts,
     services,
+    registry,
     orch,
     destEvents,
     sessionEvents,

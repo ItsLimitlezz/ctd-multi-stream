@@ -2,7 +2,7 @@
 // WebSocket client. React bindings live in live.tsx.
 
 import type { WsServerMessage } from '@shared/api';
-import type { Account, ChatMessage, ChatModeration, SessionState } from '@shared/types';
+import type { Account, ChatMessage, ChatModeration, ConnectedApp, PairingRequest, SessionState } from '@shared/types';
 
 export const CHAT_LIMIT = 500;
 /**
@@ -19,6 +19,11 @@ export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 15_000;
 
 export interface LiveState {
+  /**
+   * Profile the socket (and so session, feeds, destinations and chat) is for; null before the first
+   * connection. Messages stamped with another profile are ignored.
+   */
+  profileId: string | null;
   /** WebSocket open and greeted by the server. */
   connected: boolean;
   /** Number of successful connections (hello messages) so far. */
@@ -37,9 +42,21 @@ export interface LiveState {
   accountsVersion: number;
   /** Bumped on every 'destinations-changed' message and on reconnect. */
   destinationsVersion: number;
+  /**
+   * Pending app pairings (admins; every profile). null until loaded over REST or pushed. Kept when
+   * the profile changes.
+   */
+  pairings: PairingRequest[] | null;
+  /** Bumped on every pushed 'pairings' list, so an older REST answer never replaces a newer push. */
+  pairingsSeq: number;
+  /** Connected apps (every profile). null until loaded over REST or pushed. Kept when the profile changes. */
+  apps: ConnectedApp[] | null;
+  /** Bumped on every pushed 'apps' list. */
+  appsSeq: number;
 }
 
 export const initialLiveState: LiveState = {
+  profileId: null,
   connected: false,
   connections: 0,
   session: null,
@@ -48,6 +65,10 @@ export const initialLiveState: LiveState = {
   accounts: {},
   accountsVersion: 0,
   destinationsVersion: 0,
+  pairings: null,
+  pairingsSeq: 0,
+  apps: null,
+  appsSeq: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -70,7 +91,16 @@ export function parseServerMessage(raw: unknown): WsServerMessage | null {
   if (!isObject(d)) return null;
   switch (d.type) {
     case 'hello':
-      return isObject(d.session) && Array.isArray(d.chat) ? (d as WsServerMessage) : null;
+      // `profiles` is optional here (servers before profiles don't send it).
+      return isObject(d.session) && Array.isArray(d.chat) && (d.profiles === undefined || Array.isArray(d.profiles))
+        ? (d as WsServerMessage)
+        : null;
+    case 'profiles':
+      return Array.isArray(d.profiles) ? (d as WsServerMessage) : null;
+    case 'pairings':
+      return Array.isArray(d.pairings) ? (d as WsServerMessage) : null;
+    case 'apps':
+      return Array.isArray(d.apps) ? (d as WsServerMessage) : null;
     case 'session':
       return isObject(d.session) ? (d as WsServerMessage) : null;
     case 'feed':
@@ -264,8 +294,23 @@ function upsert<T>(list: readonly T[], item: T, same: (x: T) => boolean): T[] {
   return copy;
 }
 
+/**
+ * Whether something stamped with `profileId` belongs to the store's profile. Unstamped data (older
+ * servers) and a store without a profile accept everything.
+ */
+export function sameProfile(state: Pick<LiveState, 'profileId'>, profileId: string | null | undefined): boolean {
+  return !profileId || !state.profileId || profileId === state.profileId;
+}
+
 export function reduceLive(state: LiveState, msg: WsServerMessage): LiveState {
   switch (msg.type) {
+    case 'profiles':
+      // Every profile's summary: handled by the profile provider, not stored here.
+      return state;
+    case 'pairings':
+      return { ...state, pairings: msg.pairings, pairingsSeq: state.pairingsSeq + 1 };
+    case 'apps':
+      return { ...state, apps: msg.apps, appsSeq: state.appsSeq + 1 };
     case 'hello': {
       // On a reconnect, anything may have changed while we were away: let pages refetch.
       const bump = state.connections > 0 ? 1 : 0;
@@ -280,15 +325,16 @@ export function reduceLive(state: LiveState, msg: WsServerMessage): LiveState {
       };
     }
     case 'session':
+      if (!sameProfile(state, msg.session.profileId)) return state;
       return { ...state, session: msg.session };
     case 'feed':
-      if (!state.session) return state;
+      if (!state.session || !sameProfile(state, msg.feed.profileId)) return state;
       return {
         ...state,
         session: { ...state.session, feeds: upsert(state.session.feeds, msg.feed, (f) => f.feed === msg.feed.feed) },
       };
     case 'destination':
-      if (!state.session) return state;
+      if (!state.session || !sameProfile(state, msg.state.profileId)) return state;
       return {
         ...state,
         session: {
@@ -301,10 +347,12 @@ export function reduceLive(state: LiveState, msg: WsServerMessage): LiveState {
         },
       };
     case 'chat': {
+      if (!sameProfile(state, msg.message.profileId)) return state;
       const chat = mergeChat(state.chat, [msg.message], CHAT_LIMIT, state.removedChat);
       return chat === state.chat ? state : { ...state, chat };
     }
     case 'chat-moderation': {
+      if (!sameProfile(state, msg.moderation.profileId)) return state;
       const { chat, removedIds } = applyModeration(state.chat, msg.moderation);
       // A deleted message we never received (or already dropped) is remembered too, by both id forms.
       const ids = removedIds.slice();
@@ -369,24 +417,57 @@ export class LiveStore {
     if (this.state.connected !== connected) this.set({ ...this.state, connected });
   }
 
-  /** Apply a SessionState returned by a REST call (e.g. start/stop). */
-  applySession(session: SessionState): void {
+  /**
+   * Start showing `profileId`: its session, chat and accounts start empty (the next 'hello' fills
+   * them); pairings and connected apps (shared by every profile) are kept.
+   */
+  startProfile(profileId: string): void {
+    const s = this.state;
+    if (s.profileId === profileId && s.connections === 0 && s.session === null) return;
+    this.set({ ...initialLiveState, profileId, pairings: s.pairings, pairingsSeq: s.pairingsSeq, apps: s.apps, appsSeq: s.appsSeq });
+  }
+
+  /**
+   * Apply a SessionState returned by a REST call (e.g. start/stop). `profileId` = the profile the
+   * caller asked about: an answer that arrives after a profile switch is dropped.
+   */
+  applySession(session: SessionState, profileId?: string): void {
+    if (!sameProfile(this.state, profileId) || !sameProfile(this.state, session.profileId)) return;
     this.set({ ...this.state, session });
   }
 
   /** Use a REST snapshot only while the WebSocket hasn't delivered one yet. */
-  seedSession(session: SessionState): void {
-    if (!this.state.session) this.applySession(session);
+  seedSession(session: SessionState, profileId?: string): void {
+    if (!this.state.session) this.applySession(session, profileId);
   }
 
   /** Merge fields into the current session (e.g. the title after a successful update). */
-  patchSession(patch: Partial<SessionState>): void {
-    if (this.state.session) this.applySession({ ...this.state.session, ...patch });
+  patchSession(patch: Partial<SessionState>, profileId?: string): void {
+    if (this.state.session && sameProfile(this.state, profileId)) this.applySession({ ...this.state.session, ...patch }, profileId);
   }
 
-  mergeChat(messages: readonly ChatMessage[]): void {
-    const chat = mergeChat(this.state.chat, messages, CHAT_LIMIT, this.state.removedChat);
+  mergeChat(messages: readonly ChatMessage[], profileId?: string): void {
+    if (!sameProfile(this.state, profileId)) return;
+    const mine = messages.filter((m) => sameProfile(this.state, m.profileId));
+    const chat = mergeChat(this.state.chat, mine, CHAT_LIMIT, this.state.removedChat);
     if (chat !== this.state.chat) this.set({ ...this.state, chat });
+  }
+
+  /**
+   * Load pairings over REST. Ignored when a pushed list arrived while the request was in flight
+   * (the push is newer). Rejects with the request's error.
+   */
+  async loadPairings(fetch: () => Promise<PairingRequest[]>): Promise<void> {
+    const seq = this.state.pairingsSeq;
+    const list = await fetch();
+    if (this.state.pairingsSeq === seq) this.set({ ...this.state, pairings: list });
+  }
+
+  /** Load connected apps over REST (same rule as loadPairings). */
+  async loadApps(fetch: () => Promise<ConnectedApp[]>): Promise<void> {
+    const seq = this.state.appsSeq;
+    const list = await fetch();
+    if (this.state.appsSeq === seq) this.set({ ...this.state, apps: list });
   }
 
   reset(): void {

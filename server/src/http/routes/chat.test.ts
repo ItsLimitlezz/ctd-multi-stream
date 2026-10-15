@@ -10,11 +10,12 @@ import { EventBus } from '../../events.js';
 import type { AppServices, ChatHub } from '../../services.js';
 import chatRoutes, { OVERLAY_HISTORY, OVERLAY_PING_MS, WS_CLOSE_UNAUTHORIZED } from './chat.js';
 
-function message(i: number): ChatMessage {
+function message(i: number, profileId?: string): ChatMessage {
   return {
     id: `twitch:${i}`,
     platform: 'twitch',
-    destinationId: 'd1',
+    destinationId: profileId === 'club' ? 'd9' : 'd1',
+    ...(profileId ? { profileId } : {}),
     author: { name: `viewer${i}` },
     text: `hello ${i}`,
     ts: '2026-10-11T12:00:00.000Z',
@@ -22,19 +23,30 @@ function message(i: number): ChatMessage {
   };
 }
 
-function fakeHub(messages: ChatMessage[]) {
-  let token = 'A'.repeat(43);
+const CLUB_TOKEN = 'C'.repeat(43);
+
+/** Two profiles: the default one (token 'AAA…') and 'club' (token 'CCC…'). */
+function fakeHub(messages: ChatMessage[], clubMessages: ChatMessage[] = []) {
+  const tokens: Record<string, string> = { default: 'A'.repeat(43), club: CLUB_TOKEN };
   let n = 0;
   return {
-    recent: vi.fn((limit = 200) => messages.slice(-Math.min(limit, 500))),
-    overlayToken: vi.fn(async () => token),
-    rotateOverlayToken: vi.fn(async () => {
-      token = `${String(++n).padStart(3, '0')}${'B'.repeat(40)}`;
-      return token;
+    tokens,
+    recent: vi.fn((limit = 200, profileId = 'default') =>
+      (profileId === 'default' ? messages : profileId === 'club' ? clubMessages : []).slice(-Math.min(limit, 500)),
+    ),
+    overlayToken: vi.fn(async (profileId = 'default') => tokens[profileId]!),
+    rotateOverlayToken: vi.fn(async (profileId = 'default') => {
+      tokens[profileId] = `${String(++n).padStart(3, '0')}${(profileId === 'club' ? 'D' : 'B').repeat(40)}`;
+      return tokens[profileId];
     }),
+    profileForOverlayToken: vi.fn(async (token: string) => Object.entries(tokens).find(([, t]) => t === token)?.[0] ?? null),
     attach: vi.fn(),
   };
 }
+
+const profilesRepo = {
+  get: (id: string) => (id === 'default' || id === 'club' ? { id, name: id, slug: id, color: null, createdAt: '', updatedAt: '' } : null),
+};
 
 let app: FastifyInstance;
 let bus: EventBus;
@@ -61,7 +73,7 @@ async function build(opts: { rateLimit?: boolean } = {}): Promise<FastifyInstanc
     log: pino({ level: 'silent' }),
     bus,
     chat: hub as unknown as ChatHub,
-    repos: { audit: { log: auditLog } },
+    repos: { audit: { log: auditLog }, profiles: profilesRepo },
     publicBaseUrl: () => 'https://203.0.113.7/',
   } as unknown as AppServices;
   await instance.register(chatRoutes, { services });
@@ -71,7 +83,10 @@ async function build(opts: { rateLimit?: boolean } = {}): Promise<FastifyInstanc
 
 beforeEach(async () => {
   bus = new EventBus();
-  hub = fakeHub(Array.from({ length: 80 }, (_, i) => message(i)));
+  hub = fakeHub(
+    Array.from({ length: 80 }, (_, i) => message(i)),
+    [message(500, 'club'), message(501, 'club')],
+  );
   auditLog = vi.fn();
   app = await build();
 });
@@ -90,7 +105,7 @@ describe('GET /api/chat/recent', () => {
     const res = await app.inject({ method: 'GET', url: '/api/chat/recent', headers: { 'x-test-role': 'operator' } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toHaveLength(80);
-    expect(hub.recent).toHaveBeenLastCalledWith(200);
+    expect(hub.recent).toHaveBeenLastCalledWith(200, 'default');
 
     const five = await app.inject({ method: 'GET', url: '/api/chat/recent?limit=5', headers: { 'x-test-role': 'operator' } });
     expect(five.json().map((m: ChatMessage) => m.id)).toEqual(['twitch:75', 'twitch:76', 'twitch:77', 'twitch:78', 'twitch:79']);
@@ -221,7 +236,7 @@ describe('WS /overlay/ws', () => {
   it('sends the last 50 messages, then live chat events', async () => {
     const { ws, messages } = await connect(`/overlay/ws?token=${'A'.repeat(43)}`);
     await until(() => messages.length === OVERLAY_HISTORY);
-    expect(hub.recent).toHaveBeenLastCalledWith(OVERLAY_HISTORY);
+    expect(hub.recent).toHaveBeenLastCalledWith(OVERLAY_HISTORY, 'default');
     expect(messages[0]).toEqual({ type: 'chat', message: message(30) });
     expect(messages.at(-1)).toEqual({ type: 'chat', message: message(79) });
 
@@ -261,5 +276,89 @@ describe('WS /overlay/ws', () => {
   it('a plain GET to the websocket route is a 404', async () => {
     const res = await app.inject({ method: 'GET', url: `/overlay/ws?token=${'A'.repeat(43)}` });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// ---- profiles ----
+
+describe('profiles', () => {
+  const as = (role: Role) => ({ 'x-test-role': role });
+
+  it('GET /api/chat/recent?profile= returns that profile only; unknown → 404, malformed → 400', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/chat/recent?profile=club&limit=10', headers: as('operator') });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().map((m: ChatMessage) => m.id)).toEqual(['twitch:500', 'twitch:501']);
+    expect(hub.recent).toHaveBeenLastCalledWith(10, 'club');
+
+    const ghost = await app.inject({ method: 'GET', url: '/api/chat/recent?profile=ghost', headers: as('operator') });
+    expect(ghost.statusCode).toBe(404);
+    expect(ghost.json()).toMatchObject({ code: 'unknown_profile' });
+    const twice = await app.inject({ method: 'GET', url: '/api/chat/recent?profile=club&profile=default', headers: as('operator') });
+    expect(twice.statusCode).toBe(400);
+  });
+
+  it('overlay info + rotate per profile; the default URL stays the same', async () => {
+    const club = await app.inject({ method: 'GET', url: '/api/chat/overlay?profile=club', headers: as('admin') });
+    expect(club.json()).toEqual({ url: `https://203.0.113.7/overlay/chat?token=${CLUB_TOKEN}` });
+    expect(hub.overlayToken).toHaveBeenLastCalledWith('club');
+
+    const rotated = await app.inject({ method: 'POST', url: '/api/chat/overlay/rotate?profile=club', headers: as('admin') });
+    expect(rotated.json()).toEqual({ url: `https://203.0.113.7/overlay/chat?token=001${'D'.repeat(40)}` });
+    expect(auditLog).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'chat.overlay_rotate', detail: 'profile=club' }));
+
+    const main = await app.inject({ method: 'GET', url: '/api/chat/overlay', headers: as('admin') });
+    expect(main.json()).toEqual({ url: `https://203.0.113.7/overlay/chat?token=${'A'.repeat(43)}` });
+    expect((await app.inject({ method: 'GET', url: '/api/chat/overlay?profile=ghost', headers: as('admin') })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'POST', url: '/api/chat/overlay/rotate?profile=ghost', headers: as('admin') })).statusCode).toBe(404);
+    expect(hub.rotateOverlayToken).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves each profile's overlay page with its own token", async () => {
+    expect((await app.inject({ method: 'GET', url: `/overlay/chat?token=${CLUB_TOKEN}` })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: `/overlay/chat?token=${'A'.repeat(43)}` })).statusCode).toBe(200);
+  });
+
+  it("an overlay socket gets only its token's profile chat (history and live)", async () => {
+    const main = await connect(`/overlay/ws?token=${'A'.repeat(43)}`);
+    const club = await connect(`/overlay/ws?token=${CLUB_TOKEN}`);
+    await until(() => main.messages.length === OVERLAY_HISTORY && club.messages.length === 2);
+    expect(club.messages).toEqual([
+      { type: 'chat', message: message(500, 'club') },
+      { type: 'chat', message: message(501, 'club') },
+    ]);
+
+    bus.emit('chat', message(900, 'club'));
+    bus.emit('chat', message(901, 'default'));
+    bus.emit('chat', message(902)); // no profile (older emitters): the default profile
+    await until(() => club.messages.length === 3 && main.messages.length === OVERLAY_HISTORY + 2);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(club.messages.at(-1)).toEqual({ type: 'chat', message: message(900, 'club') });
+    expect(main.messages.slice(-2)).toEqual([
+      { type: 'chat', message: message(901, 'default') },
+      { type: 'chat', message: message(902) },
+    ]);
+    expect(club.messages).toHaveLength(3);
+  });
+
+  it("rotating one profile's token disconnects only that profile's overlays", async () => {
+    const main = await connect(`/overlay/ws?token=${'A'.repeat(43)}`);
+    const club = await connect(`/overlay/ws?token=${CLUB_TOKEN}`);
+    await until(() => main.messages.length === OVERLAY_HISTORY && club.messages.length === 2);
+    await app.inject({ method: 'POST', url: '/api/chat/overlay/rotate?profile=club', headers: as('admin') });
+    expect(await club.closed).toBe(WS_CLOSE_UNAUTHORIZED);
+    expect(main.ws.readyState).toBe(main.ws.OPEN);
+    bus.emit('chat', message(950));
+    await until(() => main.messages.length === OVERLAY_HISTORY + 1);
+  });
+
+  it("a deleted profile's overlays close as soon as profiles change", async () => {
+    const club = await connect(`/overlay/ws?token=${CLUB_TOKEN}`);
+    const main = await connect(`/overlay/ws?token=${'A'.repeat(43)}`);
+    await until(() => club.messages.length === 2 && main.messages.length === OVERLAY_HISTORY);
+    delete hub.tokens.club; // the profile route deleted its secret scope
+    bus.emit('profiles-changed');
+    expect(await club.closed).toBe(WS_CLOSE_UNAUTHORIZED);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(main.ws.readyState).toBe(main.ws.OPEN);
   });
 });

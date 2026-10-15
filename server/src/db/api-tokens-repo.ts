@@ -14,7 +14,7 @@ export const API_TOKEN_PREFIX_LENGTH = 12;
 /** last_used_at is written at most this often per token. */
 export const LAST_USED_WRITE_INTERVAL_MS = 60_000;
 
-const COLUMNS = 'id, name, scopes, prefix, secret_hash, created_at, created_by, last_used_at';
+const COLUMNS = 'id, name, scopes, prefix, secret_hash, created_at, created_by, last_used_at, profile_id';
 
 export function hashApiToken(secret: string): string {
   return crypto.createHash('sha256').update(secret, 'utf8').digest('hex');
@@ -42,6 +42,8 @@ function toInfo(row: Row): ApiTokenInfo {
     id: str(row, 'id'),
     name: str(row, 'name'),
     scopes: parseScopes(row.scopes),
+    // NULL = every profile (also every token created before profiles existed).
+    profileId: strOrNull(row, 'profile_id'),
     prefix: str(row, 'prefix'),
     createdAt: str(row, 'created_at'),
     createdBy: strOrNull(row, 'created_by'),
@@ -60,11 +62,11 @@ export function createApiTokensRepo(stmt: Stmt, now: () => number = Date.now): A
       return stmt(`SELECT ${COLUMNS} FROM api_tokens ORDER BY created_at, rowid`).all().map(toInfo);
     },
 
-    create({ name, scopes, createdBy }) {
+    create({ name, scopes, createdBy, profileId }) {
       const id = crypto.randomUUID();
       const secret = generateApiTokenSecret();
       const clean = API_SCOPES.filter((s) => scopes.includes(s));
-      stmt(`INSERT INTO api_tokens (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`).run(
+      stmt(`INSERT INTO api_tokens (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`).run(
         id,
         name,
         JSON.stringify(clean),
@@ -72,6 +74,7 @@ export function createApiTokensRepo(stmt: Stmt, now: () => number = Date.now): A
         hashApiToken(secret),
         new Date(now()).toISOString(),
         createdBy,
+        profileId ?? null,
       );
       const token = get(id);
       if (!token) throw new Error('API token insert failed');

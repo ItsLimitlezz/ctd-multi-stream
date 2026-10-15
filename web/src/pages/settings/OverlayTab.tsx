@@ -6,15 +6,19 @@ import { ConfirmButton } from '../../components/ConfirmButton';
 import { CopyField } from '../../components/CopyField';
 import { EmptyState } from '../../components/EmptyState';
 import { Field } from '../../components/Field';
+import { ProfileTag } from '../../components/ProfileBadge';
 import { Spinner } from '../../components/Spinner';
 import { TextInput } from '../../components/TextInput';
 import { toast } from '../../components/Toast';
 import { errorMessage } from '../../state/errors';
 import { useApi } from '../../state/hooks';
+import { useProfileContext } from '../../state/profile';
 import { OVERLAY_DEFAULT_MAX, OVERLAY_FADE_MAX, OVERLAY_MAX_LIMIT, overlayUrlWithParams, parseWholeNumber } from './settings-helpers';
 
+/** The chat overlay of the current profile (each profile has its own overlay URL and chat). */
 export function OverlayTab() {
-  const overlay = useApi(() => api.overlay(), []);
+  const { profileId, current, profiles } = useProfileContext();
+  const overlay = useApi(() => api.overlay(profileId), [profileId]);
   const [fade, setFade] = useState('');
   const [max, setMax] = useState('');
 
@@ -27,7 +31,7 @@ export function OverlayTab() {
 
   const rotate = async () => {
     try {
-      overlay.setData(await api.rotateOverlay());
+      overlay.setData(await api.rotateOverlay(profileId));
       toast.warn('New overlay URL. Update the browser source in OBS; the old URL stopped working.');
     } catch (err) {
       toast.error(errorMessage(err));
@@ -63,8 +67,17 @@ export function OverlayTab() {
 
   return (
     <>
-      <Card title="Chat overlay" subtitle="Combined chat from every platform as a transparent OBS browser source.">
+      <Card
+        title={current ? `Chat overlay for ${current.name}` : 'Chat overlay'}
+        subtitle="Combined chat from every platform of this profile as a transparent OBS browser source."
+        actions={<ProfileTag />}
+      >
         <div className="stack">
+          {(profiles?.length ?? 1) > 1 && (
+            <p className="muted small">
+              Each profile has its own overlay URL showing only its own chat. Switch profile in the top bar for another one.
+            </p>
+          )}
           <CopyField
             label="Overlay URL"
             value={url}

@@ -100,6 +100,42 @@ export const MIGRATIONS: readonly string[] = [
     last_used_at TEXT
   );
   `,
+  // v3: profiles (independent streaming set-ups that can be live at once) and the hub's connected
+  // apps. Everything that existed joins the default profile ('default'), which keeps the legacy
+  // settings keys and secret scopes; existing API tokens stay "every profile" (NULL).
+  `
+  CREATE TABLE profiles (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    slug       TEXT NOT NULL UNIQUE, -- OBS stream key prefix for non-default profiles; never changes
+    color      TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  INSERT INTO profiles (id, name, slug, color, created_at, updated_at)
+  VALUES ('default', 'Main', 'main', NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+  ALTER TABLE accounts ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'default';
+  ALTER TABLE destinations ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'default';
+  ALTER TABLE api_tokens ADD COLUMN profile_id TEXT; -- NULL = every profile
+  CREATE INDEX accounts_profile ON accounts(profile_id);
+  CREATE INDEX destinations_profile ON destinations(profile_id);
+
+  CREATE TABLE connected_apps (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    version       TEXT,
+    base_url      TEXT,
+    capabilities  TEXT NOT NULL DEFAULT '[]', -- JSON array of strings
+    resources     TEXT NOT NULL DEFAULT '[]', -- JSON array of AppResource
+    token_id      TEXT NOT NULL,              -- API token that registered the app (only it may change it)
+    profile_id    TEXT,                       -- that token's profile (NULL = every profile)
+    registered_at TEXT NOT NULL,
+    last_seen_at  TEXT NOT NULL
+  );
+  CREATE INDEX connected_apps_token ON connected_apps(token_id);
+  `,
 ];
 
 /** Run `fn` inside a transaction (BEGIN IMMEDIATE), rolling back on error. Not reentrant. */

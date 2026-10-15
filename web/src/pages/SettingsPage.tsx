@@ -1,11 +1,12 @@
 import { useEffect, type ReactNode } from 'react';
 import { api } from '../api';
-import { Button } from '../components/Button';
+import { Button, buttonClass } from '../components/Button';
 import { Card } from '../components/Card';
 import { EmptyState } from '../components/EmptyState';
+import { LayersIcon } from '../components/icons';
 import { Spinner } from '../components/Spinner';
 import { tabId, TabPanel, Tabs } from '../components/Tabs';
-import { setQuery, useQuery } from '../router';
+import { Link, setQuery, useQuery } from '../router';
 import { useApi, type ApiResource } from '../state/hooks';
 import type { SettingsResponse } from '@shared/api';
 import { AboutTab } from './settings/AboutTab';
@@ -38,8 +39,11 @@ export default function SettingsPage() {
       <div className="page-header">
         <div>
           <h1>Settings</h1>
-          <p>Server, security, OBS and API configuration.</p>
+          <p>Server, security, OBS and API configuration. OBS setup and the chat overlay are per profile; the rest is shared.</p>
         </div>
+        <Link to="/profiles" className={buttonClass('secondary', 'sm')}>
+          <LayersIcon width={16} height={16} /> Streaming profiles
+        </Link>
       </div>
       <Tabs
         tabs={SETTINGS_TABS}

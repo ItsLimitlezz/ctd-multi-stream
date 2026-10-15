@@ -1,16 +1,19 @@
 import { useState } from 'react';
 import type { IngestInfo } from '@shared/api';
-import type { Feed } from '@shared/types';
+import type { Feed, Profile } from '@shared/types';
+import { DEFAULT_PROFILE_ID } from '@shared/types';
 import { api } from '../../api';
 import { Button } from '../../components/Button';
 import { Card } from '../../components/Card';
 import { ConfirmButton } from '../../components/ConfirmButton';
 import { CopyField } from '../../components/CopyField';
 import { EmptyState } from '../../components/EmptyState';
+import { ProfileTag } from '../../components/ProfileBadge';
 import { Spinner } from '../../components/Spinner';
 import { toast } from '../../components/Toast';
 import { errorMessage } from '../../state/errors';
 import { useApi } from '../../state/hooks';
+import { useProfileContext } from '../../state/profile';
 import { FEED_LABEL } from '../destinations/destination-form';
 
 /** Recommended OBS encoder settings per feed (the app relays without re-encoding). */
@@ -23,13 +26,14 @@ export const ENCODER_ROWS: { setting: string; landscape: string; vertical: strin
 ];
 
 export function ObsTab() {
-  const ingest = useApi(() => api.ingest(), []);
+  const { profileId, current, profiles } = useProfileContext();
+  const ingest = useApi(() => api.ingest(profileId), [profileId]);
   const [rotating, setRotating] = useState<Feed | null>(null);
 
   const rotate = async (feed: Feed) => {
     setRotating(feed);
     try {
-      ingest.setData(await api.rotateIngestKey(feed));
+      ingest.setData(await api.rotateIngestKey(feed, profileId));
       toast.warn(`New ${FEED_LABEL[feed].toLowerCase()} stream key. Paste it into OBS before you stream again.`);
     } catch (err) {
       toast.error(errorMessage(err));
@@ -62,7 +66,13 @@ export function ObsTab() {
 
   return (
     <>
-      <IngestCard info={ingest.data} rotating={rotating} onRotate={rotate} />
+      <IngestCard
+        info={ingest.data}
+        profile={current}
+        profileCount={profiles?.length ?? 1}
+        rotating={rotating}
+        onRotate={rotate}
+      />
       <div className="settings-grid">
         <Card title="Main output (landscape)" subtitle="OBS → Settings → Stream">
           <ol className="steps">
@@ -115,10 +125,33 @@ export function ObsTab() {
   );
 }
 
-function IngestCard({ info, rotating, onRotate }: { info: IngestInfo; rotating: Feed | null; onRotate: (feed: Feed) => Promise<void> }) {
+export interface IngestCardProps {
+  info: IngestInfo;
+  /** The profile these keys belong to (null while the profile list is loading). */
+  profile: Pick<Profile, 'id' | 'name' | 'color'> | null;
+  /** How many profiles exist (with one, the per-profile notes are left out). */
+  profileCount: number;
+  rotating: Feed | null;
+  onRotate: (feed: Feed) => Promise<void>;
+}
+
+export function IngestCard({ info, profile, profileCount, rotating, onRotate }: IngestCardProps) {
+  const isDefault = (profile?.id ?? info.profileId) === DEFAULT_PROFILE_ID;
   return (
-    <Card title="Stream to this server" subtitle="Copy these into OBS. Each feed has its own key; treat the keys like passwords.">
+    <Card
+      title={profile ? `Stream to ${profile.name}` : 'Stream to this server'}
+      subtitle="Copy these into OBS. Each feed has its own key; treat the keys like passwords."
+      actions={<ProfileTag profile={profile} />}
+    >
       <div className="stack">
+        {profileCount > 1 && (
+          <div className="alert">
+            <strong>Each profile has its own stream keys.</strong> OBS streams into the profile whose key it uses, so two
+            profiles can be live at once: give each its own OBS (or a second OBS stream output) with that profile's server
+            and keys.
+            {isDefault && ' These are your original keys: OBS set up before profiles keeps working unchanged.'}
+          </div>
+        )}
         <CopyField label="Server" value={info.serverUrl} help="Use the server's LAN address. If it shows your public address, set Settings → General → Ingest host." />
         {info.feeds.map((f) => (
           <div key={f.feed} className="stack-sm">
@@ -136,6 +169,10 @@ function IngestCard({ info, rotating, onRotate }: { info: IngestInfo; rotating: 
             </div>
           </div>
         ))}
+        <p className="muted small">
+          Using the CTD OBS plugin? Connect it in Settings → API and pick this profile in the plugin: it fills in the server and
+          keys (main output and Aitum Vertical) for you.
+        </p>
         <div className="alert alert-warn">
           <strong>Never port-forward 1935.</strong> RTMP from OBS is meant for your local network only (or a VPN). Only the web
           port belongs on the internet.

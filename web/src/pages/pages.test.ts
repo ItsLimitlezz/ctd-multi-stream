@@ -101,7 +101,7 @@ describe('dashboard status', () => {
 
   it("the auto toggle's REST snapshot doesn't undo a newer WebSocket 'live'", () => {
     const store = new LiveStore();
-    store.dispatch({ type: 'hello', session: session({ autoGoLive: false }), chat: [] } as WsServerMessage);
+    store.dispatch({ type: 'hello', session: session({ autoGoLive: false }), chat: [], profiles: [] } as WsServerMessage);
     // The auto start triggered by the toggle reaches the socket before the PUT's reply.
     store.dispatch({ type: 'session', session: session({ status: 'live', sessionId: 's1', autoGoLive: true }) });
     applySessionResult('auto', session({ status: 'offline', autoGoLive: true }), store);
@@ -114,7 +114,7 @@ describe('dashboard status', () => {
 
   it('the test-mode toggle only merges the flag (an auto start may already be under way)', () => {
     const store = new LiveStore();
-    store.dispatch({ type: 'hello', session: session({ testMode: false }), chat: [] } as WsServerMessage);
+    store.dispatch({ type: 'hello', session: session({ testMode: false }), chat: [], profiles: [] } as WsServerMessage);
     store.dispatch({ type: 'session', session: session({ status: 'starting', sessionId: 's2', testMode: true }) });
     applySessionResult('test', session({ status: 'offline', testMode: true }), store);
     expect(store.getState().session).toMatchObject({ status: 'starting', sessionId: 's2', testMode: true });

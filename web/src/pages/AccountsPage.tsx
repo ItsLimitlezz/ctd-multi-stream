@@ -11,6 +11,7 @@ import { plural } from '../components/format';
 import { ShieldIcon } from '../components/icons';
 import { Modal } from '../components/Modal';
 import { PlatformBadge, platformName } from '../components/PlatformBadge';
+import { ProfileTag } from '../components/ProfileBadge';
 import { Spinner } from '../components/Spinner';
 import { TextInput } from '../components/TextInput';
 import { toast } from '../components/Toast';
@@ -18,6 +19,7 @@ import { Link, setQuery, useQuery } from '../router';
 import { errorMessage } from '../state/errors';
 import { useApi, useDestinations } from '../state/hooks';
 import { useAccountsVersion } from '../state/live';
+import { useProfileId } from '../state/profile';
 import { AddAccountModal, MAX_ACCOUNT_LABEL } from './accounts/AddAccountModal';
 import { ConnectModal, type ConnectState } from './accounts/ConnectModal';
 import {
@@ -39,7 +41,8 @@ interface Flow {
 
 export default function AccountsPage() {
   const version = useAccountsVersion();
-  const accounts = useApi(() => api.accounts(), [version]);
+  const profileId = useProfileId();
+  const accounts = useApi(() => api.accounts(profileId), [version, profileId]);
   const platforms = useApi(() => api.platforms(), []);
   const apps = useApi(() => api.platformApps(), []);
   const dests = useDestinations();
@@ -223,7 +226,11 @@ export default function AccountsPage() {
       <div className="page-header">
         <div>
           <h1>Accounts</h1>
-          <p>Platform logins the app uses for stream keys, titles, chat and going live.</p>
+          <p>
+            This profile's platform logins, used for stream keys, titles, chat and going live. They connect through the
+            developer apps in <Link to="/settings?tab=apps">Settings → Developer apps</Link>, shared by every profile.
+          </p>
+          <ProfileTag className="page-profile" />
         </div>
         {accounts.data && sorted.length > 0 && addButton}
       </div>

@@ -1,20 +1,28 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import type { SessionStatus } from '@shared/types';
 import { Link, ROUTES, useRoute } from '../router';
 import { useAuth } from '../state/auth';
 import { useNow } from '../state/hooks';
 import { useLiveConnections, useLiveStatus, useSession } from '../state/live';
+import { useProfileContext } from '../state/profile';
+import { profileColor } from '../state/profiles';
 import { Button } from './Button';
 import { elapsedSeconds, formatDuration } from './format';
 import { CloseIcon, FlaskIcon, MenuIcon } from './icons';
+import { PairingBanner } from './PairingBanner';
+import { LiveProfilesIndicator, ProfileSwitcher } from './ProfileSwitcher';
 import { StatusDot } from './StatusDot';
 import { cx, type Tone } from './utils';
 
-/** Top bar (brand, live indicator, nav, user menu) + main content area. */
+/** Top bar (brand, profile switcher, live indicators, nav, user menu) + main content area. */
 export function AppShell({ children }: { children: ReactNode }) {
   const { user, isAdmin, logout } = useAuth();
+  const { current } = useProfileContext();
   const route = useRoute();
   const [navOpen, setNavOpen] = useState(false);
+  // The current profile's colour underlines the top bar, so it's clear which set-up is on screen.
+  const accent = profileColor(current);
+  const appStyle = accent ? ({ '--profile-color': accent } as CSSProperties) : undefined;
 
   // Close the mobile menu on navigation and on Escape.
   useEffect(() => setNavOpen(false), [route.pathname]);
@@ -30,7 +38,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const items = ROUTES.filter((r) => r.nav && (!r.adminOnly || isAdmin));
 
   return (
-    <div className="app">
+    <div className={cx('app', accent && 'has-profile-color')} style={appStyle}>
       <header className="topbar">
         <div className="topbar-inner">
           <button
@@ -47,6 +55,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <img src="/favicon.svg" alt="" width={26} height={26} />
             <span className="brand-text">CTD Multi-Stream</span>
           </Link>
+          <ProfileSwitcher />
           <nav id="main-nav" className={cx('nav', navOpen && 'is-open')} aria-label="Main">
             {items.map((r) => (
               <Link key={r.name} to={r.path} className="nav-link" aria-current={route.name === r.name ? 'page' : undefined}>
@@ -65,12 +74,14 @@ export function AppShell({ children }: { children: ReactNode }) {
             )}
           </nav>
           <div className="spacer" />
+          <LiveProfilesIndicator />
           <TestModeIndicator />
           <LiveIndicator />
           {user && <UserMenu username={user.username} role={user.role} onLogout={() => void logout()} />}
         </div>
       </header>
       <main className="main" id="main">
+        <PairingBanner />
         {children}
       </main>
     </div>
@@ -100,11 +111,15 @@ export function TestModeIndicator() {
   );
 }
 
-/** Session status pill (links to the dashboard); shows reconnecting when the socket is down. */
+/**
+ * The current profile's session status pill (links to the dashboard); shows reconnecting when the
+ * socket is down.
+ */
 export function LiveIndicator() {
   const session = useSession();
   const connected = useLiveStatus();
   const connections = useLiveConnections();
+  const { current } = useProfileContext();
   const live = session?.status === 'live';
   const now = useNow(live ? 1000 : null);
 
@@ -118,8 +133,9 @@ export function LiveIndicator() {
     );
   }
   const ui = STATUS_UI[session?.status ?? 'offline'];
+  const whose = current ? ` (${current.name})` : '';
   return (
-    <Link to="/" className={cx('live-pill', live && 'is-live')} title="Stream status" aria-label={`Stream status: ${ui.label}`}>
+    <Link to="/" className={cx('live-pill', live && 'is-live')} title={`Stream status${whose}`} aria-label={`Stream status${whose}: ${ui.label}`}>
       <StatusDot tone={ui.tone} pulse={ui.pulse} />
       {ui.label}
       {live && <span className="live-elapsed">{formatDuration(elapsedSeconds(session?.startedAt, now))}</span>}

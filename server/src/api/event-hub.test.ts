@@ -66,11 +66,11 @@ describe('envelopes', () => {
       id: expect.stringMatching(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/),
       type: 'system.notice',
       ts: T0,
-      src: { connector: 'ctd-multi-stream', connection: 'core', platform: 'core' },
+      src: { connector: 'ctd-multi-stream', connection: 'core', platform: 'core', profile: null },
       data: { level: 'warn', message: 'Instagram ended the live' },
     });
     expect(msg.id > notice.id).toBe(true);
-    expect(msg.src).toEqual({ connector: 'ctd-multi-stream', connection: 't1', platform: 'twitch' });
+    expect(msg.src).toEqual({ connector: 'ctd-multi-stream', connection: 't1', platform: 'twitch', profile: 'default' });
     expect(msg.data).toMatchObject({ id: 'twitch:1', channel: 'Twitch', user: { id: 'twitch:u-ann' } });
   });
 
@@ -155,7 +155,7 @@ describe('down/up edges', () => {
       phase: 'recovering',
       reason: 'Instagram ended the live (copyright). Starting a new one…',
     });
-    expect(down.src).toEqual({ connector: 'ctd-multi-stream', connection: 'i1', platform: 'instagram' });
+    expect(down.src).toEqual({ connector: 'ctd-multi-stream', connection: 'i1', platform: 'instagram', profile: 'default' });
     // destination.status (with down: true) comes before destination.down
     expect(types().indexOf('destination.status')).toBeLessThan(types().indexOf('destination.down'));
 

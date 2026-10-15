@@ -7,7 +7,9 @@ import { Card } from '../components/Card';
 import { ChatLog } from '../components/ChatLog';
 import { plural } from '../components/format';
 import { PlatformBadge, platformName } from '../components/PlatformBadge';
-import { useChat, useLiveActions, useLiveStatus } from '../state/live';
+import { ProfileTag } from '../components/ProfileBadge';
+import { useChat, useLiveActions, useLiveSocketReady, useLiveStatus } from '../state/live';
+import { useProfileId } from '../state/profile';
 
 /** Platforms that appear in the chat (plus any selected), in the standard platform order. */
 export function chatPlatforms(chat: readonly ChatMessage[], selected: ReadonlySet<PlatformId>): { id: PlatformId; count: number }[] {
@@ -25,12 +27,16 @@ export default function ChatPage() {
   const chat = useChat();
   const connected = useLiveStatus();
   const { mergeChat } = useLiveActions();
+  const profileId = useProfileId();
   const [selected, setSelected] = useState<ReadonlySet<PlatformId>>(() => new Set());
 
-  // REST fallback for history if the live socket isn't up yet on mount (merge dedupes by id).
-  const connectedOnMount = connected;
+  // REST fallback for history if the live socket isn't up yet on mount or after a profile switch
+  // (merge dedupes by id). During the first render after a switch the old profile's socket still
+  // counts as connected, hence the profile-aware check.
+  const socketReady = useLiveSocketReady();
+  const connectedOnMount = socketReady;
   useEffect(() => {
-    if (!connectedOnMount) api.recentChat(200).then(mergeChat, () => undefined);
+    if (!connectedOnMount) api.recentChat(200, profileId).then(mergeChat, () => undefined);
   }, [mergeChat]);
 
   const platforms = useMemo(() => chatPlatforms(chat, selected), [chat, selected]);
@@ -50,7 +56,8 @@ export default function ChatPage() {
       <div className="page-header">
         <div>
           <h1>Chat</h1>
-          <p>Read-only chat from every platform, newest at the bottom.</p>
+          <p>Read-only chat from every platform of this profile, newest at the bottom.</p>
+          <ProfileTag className="page-profile" />
         </div>
         <div className="row">
           {!connected && (

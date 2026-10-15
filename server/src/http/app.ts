@@ -23,7 +23,9 @@ import chatRoutes from './routes/chat.js';
 import destinationRoutes from './routes/destinations.js';
 import healthRoutes from './routes/health.js';
 import ingestRoutes from './routes/ingest.js';
+import pairingRoutes from './routes/pairings.js';
 import platformRoutes from './routes/platforms.js';
+import profileRoutes from './routes/profiles.js';
 import sessionRoutes from './routes/session.js';
 import settingsRoutes from './routes/settings.js';
 import setupRoutes from './routes/setup.js';
@@ -98,6 +100,8 @@ export async function buildApp(services: AppServices, tlsMaterial: TlsMaterial |
   await app.register(userRoutes, opts);
   await app.register(auditRoutes, opts);
   await app.register(platformRoutes, opts);
+  // Profiles: independent streaming set-ups (per-profile routes take ?profile=, see shared/api.ts).
+  await app.register(profileRoutes, opts);
   await app.register(accountRoutes, opts);
   await app.register(destinationRoutes, opts);
   await app.register(sessionRoutes, opts);
@@ -107,6 +111,8 @@ export async function buildApp(services: AppServices, tlsMaterial: TlsMaterial |
   await app.register(browserRoutes, opts);
   await app.register(wsRoutes, opts);
   await app.register(tokenRoutes, opts);
+  // The hub's admin side: pending app pairings + connected apps (Settings → API).
+  await app.register(pairingRoutes, opts);
   await app.register(overlayModeration, opts);
   // External API (bearer tokens, docs/API.md) + the OBS dock page that uses it.
   await app.register(v1Routes, { ...opts, prefix: API_PREFIX });

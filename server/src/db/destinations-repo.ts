@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { Destination, Feed, PlatformId } from '../../../shared/types.js';
+import { DEFAULT_PROFILE_ID, type Destination, type Feed, type PlatformId } from '../../../shared/types.js';
 import type { DestinationsRepo } from '../services.js';
 import {
   NotFoundError,
@@ -14,11 +14,12 @@ import {
 } from './rows.js';
 
 const COLUMNS =
-  'id, platform, account_id, name, feed, enabled, options, ingest_url, has_stream_key, created_at, updated_at';
+  'id, profile_id, platform, account_id, name, feed, enabled, options, ingest_url, has_stream_key, created_at, updated_at';
 
 function toDestination(row: Row): Destination {
   return {
     id: str(row, 'id'),
+    profileId: str(row, 'profile_id'),
     platform: str(row, 'platform') as PlatformId,
     accountId: strOrNull(row, 'account_id'),
     name: str(row, 'name'),
@@ -41,8 +42,13 @@ export function createDestinationsRepo(stmt: Stmt): DestinationsRepo {
   };
 
   return {
-    list() {
-      return stmt(`SELECT ${COLUMNS} FROM destinations ORDER BY created_at, rowid`).all().map(toDestination);
+    list(profileId) {
+      if (profileId === undefined) {
+        return stmt(`SELECT ${COLUMNS} FROM destinations ORDER BY created_at, rowid`).all().map(toDestination);
+      }
+      return stmt(`SELECT ${COLUMNS} FROM destinations WHERE profile_id = ? ORDER BY created_at, rowid`)
+        .all(profileId)
+        .map(toDestination);
     },
 
     get,
@@ -50,8 +56,9 @@ export function createDestinationsRepo(stmt: Stmt): DestinationsRepo {
     create(input) {
       const id = crypto.randomUUID();
       const now = nowIso();
-      stmt(`INSERT INTO destinations (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`).run(
+      stmt(`INSERT INTO destinations (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`).run(
         id,
+        input.profileId || DEFAULT_PROFILE_ID,
         input.platform,
         input.accountId,
         input.name,

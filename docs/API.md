@@ -1,13 +1,15 @@
 # External API (v1)
 
-Read-only API for other apps: **CTD Overlay** (merged chat, stream status), the **CTD OBS plugin**
-(bitrates, which streams are down, chat), bots and scripts. It is separate from the web UI's own
-session-cookie API.
+API for other apps: **CTD Overlay** (merged chat, stream status, overlays per profile), the **CTD
+OBS plugin** (OBS settings per profile, bitrates, which streams are down, chat, overlays), bots and
+scripts. It is separate from the web UI's own session-cookie API.
 
 - Base path: `/api/v1`. Breaking changes ship as `/api/v2`.
 - JSON, UTF-8, `camelCase`. Times: ISO 8601 UTC in resources, epoch milliseconds in live envelopes.
 - Machine-readable description: `GET /api/v1/openapi.json` (no auth).
-- Everything here is `GET` (read-only). Nothing in v1 changes the stream.
+- Reading is `GET`. Since v1.2 apps also write to **the hub** (§9.2: register themselves and what
+  they offer, message each other) and can **pair** (§9.3). Nothing in v1 changes the stream (going
+  live, titles, test mode): the web UI does that.
 
 ## 1. Where to connect
 
@@ -35,7 +37,8 @@ the HTTP port as seen from the LAN. With `LAN_HTTP=off` the LAN URL is the HTTPS
 
 ## 2. Authentication
 
-Create a token in the web UI: **Settings → API → New token** (admin). The secret is shown once:
+Create a token in the web UI: **Settings → API → New token** (admin), or let the app ask for one
+with **pairing** (§9.3: the admin only approves a code). The secret is shown once:
 
 ```
 ctd_pat_3fK9wQ1v…        (ctd_pat_ + 43 base64url characters)
@@ -50,18 +53,26 @@ Authorization: Bearer ctd_pat_3fK9wQ1v…
 | Scope | Grants |
 |---|---|
 | `chat:read` | `GET /chat`, `chat.*` and `alert.*` events |
-| `status:read` | `GET /status`, `stream.*`, `feed.*`, `destination.*`, `system.notice` events |
+| `status:read` | `GET /status`, `GET /profiles`, `stream.*`, `feed.*`, `destination.*`, `profile.status`, `profiles.changed`, `system.notice` events |
+| `ingest:read` | `GET /profiles/{id}/ingest`: OBS server URL and **stream keys** (only for apps that configure OBS) |
+| `apps:read` | `GET /apps`, `GET /profiles/{id}/overlays`, `apps.changed` and `app.message` events |
+| `apps:write` | `PUT`/`DELETE /apps/{id}`, `POST /apps/{id}/heartbeat`, `POST /messages` |
 
-`/`, `/events` and `/events/poll` return whatever the token's scopes allow. Browser-only
-fallback: `GET /events` also accepts `?access_token=` (prefer the header; query strings can end up
-in proxy logs). Tokens are stored hashed; revoking one in Settings → API takes effect immediately
-(open streams are closed within 30 s).
+A token may also be **limited to one profile** (§9.1). `/`, `/events` and `/events/poll` return
+whatever the token's scopes allow. Browser-only fallback: `GET /events` also accepts
+`?access_token=` (prefer the header; query strings can end up in proxy logs). Tokens are stored
+hashed; revoking one in Settings → API takes effect immediately (open streams are closed within
+30 s) and removes the apps it registered.
 
 Limits: 600 requests/minute per token (`429` + `Retry-After`), 5 concurrent event streams per token
-(a 6th gets `429` with `Retry-After: 30`).
+(a 6th gets `429` with `Retry-After: 30`), 120 `POST /messages` per minute per token. Without a
+token: `POST /pairing` 10 per minute and `POST /pairing/{id}/token` 120 per minute per address
+(an IPv6 address counts by its /64).
 
 Responses carry `Access-Control-Allow-Origin: *` and the API never uses or sets cookies, so a
-browser app on another origin can call it with the `Authorization` header.
+browser app on another origin can call it with the `Authorization` header (preflight allows `GET`,
+`POST`, `PUT`, `DELETE`). Request bodies are JSON (`Content-Type: application/json`; an empty body
+counts as none).
 
 ### Errors
 
@@ -81,9 +92,16 @@ browser app on another origin can call it with the `Authorization` header.
 |---|---|---|
 | 401 | `unauthenticated` | No/unknown/revoked token |
 | 403 | `missing_scope` | Token lacks the scope |
-| 400 | `invalid` | Bad query parameter |
-| 404 | `not_found` | Unknown `/api/v1` path |
+| 403 | `profile_forbidden` | Token limited to a profile asked for (or wrote about) another one |
+| 400 | `invalid` | Bad query parameter or body (`413` when the body is too large) |
+| 404 | `not_found` | Unknown `/api/v1` path, or no app registered under that id |
+| 404 | `unknown_profile` | No profile with that id |
+| 409 | `app_owned` | The app id was registered by another token |
+| 409 | `limit` | Too many apps registered (100 in all, 20 per token) |
+| 403 / 410 | `denied` / `expired` | Pairing poll: denied by the admin / expired, collected or unknown (§9.3) |
 | 429 | `rate_limited` | Over the limit (`Retry-After` seconds) |
+
+Treat a `code` you don't know by its HTTP status.
 
 ## 3. Envelope
 
@@ -95,7 +113,7 @@ Every live item (event stream, poll, chat backfill) is an envelope, compatible w
   "id": "01JA7Q8M9X2V4C6B8N0P2R4T6W",
   "type": "chat.message",
   "ts": 1791830000123,
-  "src": { "connector": "ctd-multi-stream", "connection": "5b1c…destination id…", "platform": "twitch" },
+  "src": { "connector": "ctd-multi-stream", "connection": "5b1c…destination id…", "platform": "twitch", "profile": "default" },
   "data": { }
 }
 ```
@@ -107,17 +125,21 @@ Every live item (event stream, poll, chat backfill) is an envelope, compatible w
 | `ts` | Server epoch ms when the event happened. |
 | `src.connection` | Destination id the event belongs to, or `core` for session-wide events. |
 | `src.platform` | `twitch`, `youtube`, `kick`, `facebook`, `x`, `instagram`, `tiktok`, `custom`, or `core`. (CTD Overlay maps the ones its standard doesn't list to `custom`.) |
+| `src.profile` | Profile the event belongs to (§9.1), or `null` for events about no single profile: `profiles.changed`, `apps.changed`, `app.message` without a profile, server-wide `system.notice`, `system.reset`. (v1.2) |
 
 ## 4. Routes
 
 ### `GET /api/v1/`
-Who am I. Any valid token.
+Who am I. Any valid token. `token.profileId` is the profile the token is limited to, or `null`
+(every profile; §9.1).
 ```json
-{ "name": "ctd-multi-stream", "version": "0.2.0", "apiVersion": 1, "token": { "name": "CTD Overlay", "scopes": ["chat:read", "status:read"] } }
+{ "name": "ctd-multi-stream", "version": "0.2.0", "apiVersion": 1,
+  "token": { "name": "CTD Overlay", "scopes": ["chat:read", "status:read"], "profileId": null } }
 ```
 
-### `GET /api/v1/status` — `status:read`
-Everything a dashboard or the OBS plugin needs in one call. Poll it (every 2 s is fine) or use the
+### `GET /api/v1/status?profile=<id>` — `status:read`
+Everything a dashboard or the OBS plugin needs in one call, for one profile (§9.1: the token's
+profile, else `?profile=`, else the default profile). Poll it (every 2 s is fine) or use the
 event stream.
 
 ```json
@@ -181,10 +203,11 @@ event stream.
   of known counts (null if none known); `error` is the message of the first down destination that
   has one (`null` if none does; check `destinations[].down` for the down state itself).
 
-### `GET /api/v1/chat?limit=200&after=<id>` — `chat:read`
-Recent chat still visible after moderation, **oldest first**, as `chat.message` envelopes.
-`limit` 1–500 (default 200). With `after`, only messages newer than that envelope id (incremental
-polling). Session-scoped: the buffer holds the last 500 messages.
+### `GET /api/v1/chat?limit=200&after=<id>&profile=<id>` — `chat:read`
+Recent chat of one profile (chosen like `/status`) still visible after moderation, **oldest
+first**, as `chat.message` envelopes. `limit` 1–500 (default 200). With `after`, only messages
+newer than that envelope id (incremental polling). Session-scoped: the buffer holds the last 500
+messages per profile.
 
 ```json
 { "items": [ { "id": "01JA…", "type": "chat.message", "ts": 1791830000123, "src": { … }, "data": { … } } ],
@@ -205,20 +228,28 @@ data: {"id":"01JA7Q8M9X2V4C6B8N0P2R4T6W","type":"chat.message","ts":179183000012
 
 - `types`: comma-separated globs (`chat.*`, `destination.down`, …); default = everything the
   token's scopes allow.
+- `profile`: a token limited to a profile always streams that profile. A token for every profile
+  streams the profile named by `?profile=<id>`; without it, the **default profile** (as before
+  profiles existed, like `/status`, `/chat` and `/events/poll`); with `?profile=*` (or `all`),
+  **every** profile (tell them apart by `src.profile`). Events about no single profile
+  (`src.profile: null`) reach every stream.
 - **Resume:** send `Last-Event-ID: <id>` (or `?cursor=<id>`). The server replays buffered events
-  after it (buffer: last 2000 events or 15 minutes). If an event you would receive (by `types` and
-  scopes) after that id has already left the buffer, or the id is from before a server restart, the
-  server first sends `event: system.reset` — refetch `/chat` and `/status`, then continue. Events
-  your filter skips never cause a reset.
-- On connect without a cursor, the stream starts with one `stream.status` and one
-  `destination.status` per destination (current state), then live events. Chat backfill is not
-  replayed — call `GET /chat` for that.
+  after it (buffer: last 2000 events or 15 minutes). If an event you would receive (by `types`,
+  scopes and profile) after that id has already left the buffer, or the id is from before a server
+  restart, the server first sends `event: system.reset` — refetch `/chat` and `/status`, then
+  continue. Events your filter skips never cause a reset.
+- On connect without a cursor, the stream starts, for each profile it covers (one, unless
+  `?profile=*`), with one
+  `stream.status` and one `destination.status` per destination (current state), then live
+  events. Chat backfill is not replayed — call `GET /chat` for that.
 - Heartbeat comment `: ping` every 15 s. `retry: 3000` is sent once.
 - A client that stops reading (more than about 1 MB of live events queued for it) is disconnected;
   it resumes with `Last-Event-ID` like after any disconnect.
 
-### `GET /api/v1/events/poll?after=<id>&types=…` — polling alternative
-For clients that can't hold a stream open (e.g. a C plugin). Same envelopes and buffer as `/events`.
+### `GET /api/v1/events/poll?after=<id>&types=…&profile=<id>` — polling alternative
+For clients that can't hold a stream open (e.g. a C plugin). Same envelopes and buffer as `/events`,
+for one profile chosen like `/status` (default: the default profile, as before profiles existed;
+`?profile=*` for every profile, like `/events`) plus the events about no single profile.
 ```json
 { "items": [ … ], "next": "01JA…", "reset": false }
 ```
@@ -398,14 +429,22 @@ Messages the web UI shows as toasts (takedown detected, live again, session stop
 { "level": "warn", "message": "Instagram ended the live (copyright). Starting a new one…" }
 ```
 
+`src.profile` is the profile concerned, or `null` for server-wide notices.
+
+### `profile.status`, `profiles.changed` — `status:read`
+A profile's summary changed / profiles were created, renamed or deleted (§9.1).
+
+### `apps.changed`, `app.message` — `apps:read`
+Connected apps changed / a message from another app (§9.2).
+
 ### `system.reset`
 `data: {}` — events you would have received after your cursor are no longer buffered (or the
 cursor is from before a restart); refetch `/status` and `/chat`.
 
 ## 6. Not in v1 (yet)
 
-- Writing (sending chat, changing the title, going live, test mode). The web UI does that; v1 is
-  read-only.
+- Changing the stream (sending chat, changing the title, going live, test mode). The web UI does
+  that; apps only write to the hub (§9.2).
 - Follows, Kick KICKs and tips as alerts (`alert.follow`, `alert.kicks` and `alert.tip` are
   reserved: no chat source sends them yet).
 - Viewer counts for X (not exposed by X) and custom RTMP servers.
@@ -461,11 +500,263 @@ it. The dock shows live status (with a TEST badge in test mode), feed bitrates, 
 (red when down, with the reason), viewers, and the merged chat. The token stays in the URL
 fragment, so it is never sent to the server in the URL — the page sends it as a header.
 
+**Profiles (v1.2):** the dock shows one profile, with its name and colour in the header: the
+token's profile when the token is limited to one, else the profile named in the fragment
+(`/dock#token=ctd_pat_…&profile=<profile id>`), else the default profile. Settings → API gives a
+dock link per profile.
+
+## 9. Profiles and the hub (v1.2)
+
+### 9.1 Profiles
+
+A **profile** is an independent streaming set-up — its own accounts, destinations, title, OBS
+stream keys, test mode and chat — e.g. "Miami or Bust" (personal) and "DPRTMNT" (the club).
+Profiles can be **live at the same time**. Developer apps, users and API tokens are shared.
+
+- **Tokens limited to a profile** (`profileId` set when the token is created or the pairing is
+  approved — recommended for overlays and docks) only ever see that profile: `/status`, `/chat`,
+  `/events` and the hub routes are filtered to it, and `?profile=` (or a `{id}` in the path) must
+  be omitted or equal (`403 profile_forbidden` otherwise); `?profile=*` means that profile too.
+- **Tokens for every profile** (`profileId: null`, including tokens created before v1.2) pass
+  `?profile=<id>` on `/status`, `/chat`, `/events` and `/events/poll` (default: the default
+  profile, so old clients keep their behaviour). To read **every** profile at once, pass
+  `?profile=*` (or `all`) on `/events` and `/events/poll`. `/apps` without `?profile=` (or with
+  `*`) lists every app with every resource.
+- An unknown profile id is `404 unknown_profile` (in a query, a path or a request body). The
+  default profile's id is `default`.
+- Every envelope's `src` now has `"profile"`: the profile id, or `null` for events about no single
+  profile (§3), which every reader gets. `GET /api/v1/` reports the token's `profileId`.
+
+#### `GET /api/v1/profiles` — `status:read`
+```json
+{ "items": [
+  { "id": "default", "name": "Miami or Bust", "slug": "main", "color": "#3B82F6",
+    "status": "offline", "startedAt": null, "testMode": false, "destinations": 4, "live": 0, "down": 0,
+    "createdAt": "2026-10-11T18:00:00Z", "updatedAt": "2026-10-15T14:00:00Z" },
+  { "id": "6f1d…", "name": "DPRTMNT", "slug": "dprtmnt", "color": "#E11D48",
+    "status": "live", "startedAt": "2026-10-18T03:00:04Z", "testMode": false, "destinations": 3, "live": 3, "down": 0,
+    "createdAt": "2026-10-15T14:05:00Z", "updatedAt": "2026-10-15T14:05:00Z" }
+] }
+```
+A profile-limited token gets only its own profile. `GET /api/v1/profiles/{id}` returns one item.
+`destinations` counts enabled destinations; `live` / `down` count those live / down right now
+(`down` as in `/status`). Event `profile.status` (`status:read`, `src.profile` = that profile)
+carries one item whenever a profile's session status, test mode, counts, name or colour change;
+`profiles.changed` (`data: {}`, `src.profile: null`) when profiles are created, renamed or deleted
+(refetch `GET /profiles`).
+
+#### `GET /api/v1/profiles/{id}/ingest` — `ingest:read`
+What OBS needs to stream into this profile — lets the CTD OBS plugin set OBS's stream output when the
+user picks a profile:
+```json
+{ "profileId": "6f1d…",
+  "serverUrl": "rtmp://192.168.1.50:1936/live",
+  "feeds": [
+    { "feed": "landscape", "streamKey": "dprtmnt/landscape?key=Xb3…", "fullUrl": "rtmp://192.168.1.50:1936/live/dprtmnt/landscape?key=Xb3…" },
+    { "feed": "vertical",  "streamKey": "dprtmnt/vertical?key=Q9k…",  "fullUrl": "rtmp://192.168.1.50:1936/live/dprtmnt/vertical?key=Q9k…" }
+  ] }
+```
+The default profile keeps its pre-profiles keys (`landscape?key=…`). `serverUrl` uses the RTMP
+port and the LAN address: the OBS host set in Settings (the one the web UI's OBS setup shows) when
+there is one, else `LAN_HTTP_HOST`, else the host the app called the API with. **Stream keys are
+secrets**: grant `ingest:read` only to apps that configure OBS (responses carry
+`Cache-Control: no-store`).
+Each profile needs its own OBS output: two OBS (or two outputs) can stream two profiles at once.
+
+### 9.2 Connected apps (the hub)
+
+Apps register themselves and what they offer so other apps can find them through CTD Multi-Stream
+instead of being configured with each other's addresses. Example: CTD Overlay registers its
+overlays with the profile each is assigned to; the CTD OBS plugin, connected only to CTD
+Multi-Stream, lists the overlays for its profile and adds them as browser sources.
+
+#### `PUT /api/v1/apps/{appId}` — `apps:write`
+Register or update this app; call again at least every 60 s as a heartbeat (or
+`POST /api/v1/apps/{appId}/heartbeat`). `appId`: `[a-z0-9-]`, ≤ 40, unique; only the token that
+first registered an id may update or delete it (`409 app_owned`).
+```json
+{ "name": "CTD Overlay", "kind": "ctd-overlay", "version": "1.4.0",
+  "baseUrl": "http://192.168.1.50:30200",
+  "capabilities": ["overlays", "overlay.create"],
+  "resources": [
+    { "type": "overlay", "id": "ovl_h", "name": "DPRTMNT takeover — landscape", "profileId": "6f1d…",
+      "url": "http://192.168.1.50:30200/o/takeover-h?key=…", "width": 1920, "height": 1080 },
+    { "type": "overlay", "id": "ovl_v", "name": "DPRTMNT takeover — vertical", "profileId": "6f1d…",
+      "url": "http://192.168.1.50:30200/o/takeover-v?key=…", "width": 1080, "height": 1920 }
+  ] }
+```
+Response: `200` with the `ConnectedApp` (below). Limits: 200 resources, `meta` ≤ 4 KB each, body
+≤ 256 KB (`413`), 100 apps in all and 20 per token (`409 limit`). A profile-limited token may only
+assign resources to its own profile (or `null`; `403 profile_forbidden`). A resource assigned to
+a profile that doesn't exist (e.g. one deleted since — deleting a profile also removes the resources
+assigned to it) is left out of the saved registration rather than refusing the whole `PUT`: the
+response shows what was kept.
+
+| Field | Rules |
+|---|---|
+| `name` | required, ≤ 80 characters |
+| `kind` | required, `[a-z0-9-]`, ≤ 40 (`ctd-overlay`, `ctd-obs-plugin`, `custom`…) |
+| `version`, `baseUrl` | optional (`null`); `baseUrl` is an `http(s)` URL of the app itself |
+| `capabilities` | optional, ≤ 50 of `[a-z0-9_.:-]`, ≤ 64 each |
+| `resources[]` | `type` (`overlay` or your own `[a-z0-9-]`), `id` (unique in the app, ≤ 100), `name` (≤ 120), `profileId` (or `null`/omitted), `url` (`http(s)`, **required for overlays**), `width`/`height` (integers), `meta` (object) |
+
+Fields not listed are ignored. Each `PUT` replaces the whole registration (send every resource).
+
+- **One app id per connection.** An app connected several times (e.g. CTD Overlay with one
+  profile-limited token per profile) registers each connection under its own id, e.g.
+  `ctd-overlay-<profile slug>` (and plain `ctd-overlay` for an every-profile token). Other apps find
+  recipients by `kind` + profile through `GET /apps?profile=…`, not by a fixed id.
+- **Recommended overlay `meta` keys:** `canvas`: `"landscape"` | `"vertical"` (which OBS canvas it
+  belongs on — main output vs Aitum Vertical), `fps` (number), `transparent` (boolean), and **`slot`**:
+  a stable role key that is the same for the equivalent overlay in every profile (e.g. `"chat-box"`,
+  `"takeover-lower-third"`; `[a-z0-9-]`, ≤ 64 — typically the template id plus the canvas). The OBS
+  plugin uses `canvas` (falling back to width > height) to place the source, and `slot` + `canvas` to
+  re-point existing browser sources when the user switches profile ("Switch existing").
+
+#### `GET /api/v1/apps?profile=<id>` — `apps:read`
+```json
+{ "items": [
+  { "id": "ctd-overlay", "name": "CTD Overlay", "kind": "ctd-overlay", "version": "1.4.0",
+    "baseUrl": "http://192.168.1.50:30200", "capabilities": ["overlays", "overlay.create"],
+    "resources": [ … only resources assigned to that profile or unassigned … ],
+    "profileId": null, "registeredAt": "…", "lastSeenAt": "…", "online": true }
+] }
+```
+`online` = seen in the last 90 s. With a profile (always, for profile-limited tokens): the apps
+connected for that profile or for every profile — apps connected with a token limited to another
+profile are left out — each with only the resources assigned to that profile or unassigned.
+Without one, or with `?profile=*` (every-profile tokens): every app and resource. `profileId` is the profile of the
+token that registered the app (`null` = every profile).
+
+#### `POST /api/v1/apps/{appId}/heartbeat` — `apps:write`
+No body. Keeps the app online without re-sending its registration → `200` with the
+`ConnectedApp`; `404 not_found` when it isn't registered (register with `PUT`, e.g. after it was
+removed in Settings → API), `409 app_owned` for another token's app.
+
+#### `GET /api/v1/profiles/{id}/overlays` — `apps:read`
+Shortcut for the OBS plugin: every `overlay` resource assigned to that profile (`profileId` equal
+to it; unassigned ones are listed by `GET /apps`), from every app, with its `meta`:
+```json
+{ "items": [ { "appId": "ctd-overlay", "appName": "CTD Overlay", "appOnline": true,
+  "id": "ovl_h", "name": "DPRTMNT takeover — landscape",
+  "url": "http://192.168.1.50:30200/o/takeover-h?key=…", "width": 1920, "height": 1080,
+  "meta": { "canvas": "landscape", "slot": "takeover-landscape" } } ] }
+```
+`url`, `width`, `height` and `meta` are left out when the app didn't send them.
+
+#### `DELETE /api/v1/apps/{appId}` — `apps:write`
+Unregister (the owning token only) → `204`. Revoking a token removes its apps; an admin can also
+remove an app in Settings → API.
+
+#### `POST /api/v1/messages` — `apps:write`
+Send a message to another app (or every app) through the hub. To reach e.g. the CTD Overlay
+connection for a profile, find it with `GET /apps?profile=<id>` (`kind: "ctd-overlay"`, and
+`capabilities` containing what you need, such as `overlay.create`) and use its `id` as `to`:
+```json
+{ "to": "ctd-overlay", "type": "overlay.create", "profileId": "6f1d…",
+  "replyTo": null, "data": { "template": "takeover", "canvas": "vertical" } }
+```
+→ `201 { "id": "01JA…" }`. `to` is required: an app id, or `null` = every app (`404 not_found`
+when no app is registered under it). `type`: `[a-z0-9_.-]`, ≤ 64; `data`: an object ≤ 64 KB
+(default `{}`). `profileId`: the profile it concerns (default: the sending token's profile, or
+`null`; an unknown id is `404 unknown_profile`); a profile-limited token may only name its own
+profile or `null`, and a message about a profile can't go to an app connected for another one
+(`400`). `from` (optional; `null` = omitted): which of your registered app ids sends it (default:
+the one you registered or refreshed last; `null` when you registered none). Delivered as an `app.message` event (below) to tokens with `apps:read` — to
+everyone for broadcasts, else only to the token that registered `to` — and never to tokens limited
+to another profile; like every event, a reader viewing one profile (`?profile=`, or a
+profile-limited token) gets messages about that profile or about none. Reply by sending a message
+with `replyTo` = the original `id` and `to` = its `from`. 120 messages/minute per token.
+Messages are not stored beyond the event buffer (15 minutes): an app that was away resumes with
+its cursor like for any event.
+
+#### Hub events (`apps:read`)
+- `app.message` — `data` = `{ "id", "from", "to", "type", "profileId", "replyTo", "data", "ts" }`
+  (`ts` in epoch ms; `src.profile` = `profileId`).
+- `apps.changed` — `data: { "apps": [ConnectedApp…] }` (filtered like `GET /apps` for the
+  profile you read) whenever an app registers, updates its registration, unregisters, or goes
+  online/offline (noticed within 15 s).
+
+### 9.3 Pairing ("connect to CTD Multi-Stream")
+
+So an app can connect without the user copying tokens: the app asks, the user approves in the web
+UI, the app receives its own token.
+
+1. `POST /api/v1/pairing` — **no auth** (10 requests/minute per address, at most 10 pending; see
+   the limits below):
+   ```json
+   { "appName": "CTD OBS plugin (Studio PC)", "kind": "ctd-obs-plugin",
+     "scopes": ["status:read", "chat:read", "ingest:read", "apps:read", "apps:write"], "profileId": null }
+   ```
+   → `201 { "pairingId": "…", "pollSecret": "…", "code": "KQ7-2MX", "expiresIn": 600, "interval": 3,
+   "approveUrl": "https://192.168.1.50:30443/settings?tab=api&pair=…" }`.
+   The app shows `code` (and `approveUrl`) to the user; `pollSecret` is a secret, never shown.
+   `appName` ≤ 60 characters, `kind` `[a-z0-9-]` ≤ 40; scopes this server doesn't know (any
+   entry, whatever its shape) are ignored (`400` if none is left); `profileId` is a wish, the admin
+   decides (an id that doesn't exist: `404 unknown_profile`; ask for every profile with `null`).
+   Over a pending limit: `429` with `Retry-After` (seconds until the oldest request that counts
+   against it expires). `approveUrl` uses the host you called (the web UI's HTTPS address when you
+   called the LAN plain-HTTP port; the server's public address when that port is a `LAN_HTTP_PORT`
+   override, whose HTTPS counterpart can't be derived).
+
+   **Pending limits** (the endpoint needs no auth and is reachable from the internet): at most 10
+   requests wait at once; at most **3 per address** (an IPv4 address, or an IPv6 /64); and at most
+   **5 from peers outside the LAN**, so requests from the internet can never take the slots the
+   OBS plugin or CTD Overlay pair with from the LAN. "LAN" is decided like the plain-HTTP access in
+   §1: private ranges, or only `LAN_HTTP_CIDRS` when set, nobody with `LAN_HTTP=off`. Behind a
+   reverse proxy or a NAT hop that replaces client addresses (see §1), every client has the same
+   address: set `TRUST_PROXY=true` when a trusted proxy sends `X-Forwarded-For`, and
+   `LAN_HTTP_CIDRS` / `LAN_HTTP=off` so internet clients aren't counted as LAN.
+2. The admin opens **Settings → API** (a banner says an app wants to connect), checks the code,
+   picks the profile (or every profile) and the scopes, and approves or denies.
+3. The app polls `POST /api/v1/pairing/{pairingId}/token` with `{ "pollSecret": "…" }` every
+   `interval` s: `202 { "status": "pending" }` → `200 { "status": "approved", "token": "ctd_pat_…",
+   "profileId": "6f1d…" | null, "scopes": [ … ] }` (returned **once**) | `403 { "code": "denied" }` |
+   `410 { "code": "expired" }` (problem documents).
+
+Requests expire after 10 minutes, and an approved token must be collected within 10 minutes of the
+approval (otherwise it is revoked). `410 expired` also answers an unknown `pairingId`, a wrong
+`pollSecret`, a second collection, and a token an admin revoked before the app collected it; requests live in memory, so after a server restart the app
+gets `410` and simply starts over. Store the token: it never expires (until revoked in
+Settings → API).
+
+### 9.4 Typical set-ups
+
+- **CTD OBS plugin:** pair → the user picks a profile in the plugin → `GET /profiles/{id}/ingest`
+  to set OBS's stream server/key (main output + Aitum Vertical) → `GET /profiles/{id}/overlays` to
+  add overlays as browser sources → `/events` (`?profile=`) for chat, `destination.down/up` and
+  bitrates in its dock. Register itself (`PUT /apps/ctd-obs-plugin-<machine>`) so other apps can
+  message it.
+- **CTD Overlay:** pair (limited to a profile, or every profile) → read chat/alerts per profile
+  (`/events?profile=<id>`, or one stream for every profile with `/events?profile=*`, split by
+  `src.profile`) →
+  register its overlays with their assigned `profileId` (`PUT /apps/ctd-overlay`) → listen for
+  `app.message` (e.g. `overlay.create` from the OBS plugin) and reply.
+
 ## Changelog
 
 `apiVersion` stays `1`: every change below is additive, so clients written for an earlier v1
 keep working (ignore event types and fields you don't know). `GET /api/v1/openapi.json` reports
 the revision in `info.version`.
+
+### v1.2
+
+- **Profiles (§9.1):** several independent streaming set-ups that can be live at once.
+  `GET /profiles`, `GET /profiles/{id}`, `GET /profiles/{id}/ingest` (new scope `ingest:read`),
+  `profile.status` / `profiles.changed` events, `src.profile` on every envelope, tokens optionally
+  limited to one profile, `?profile=` on `/status`, `/chat`, `/events`, `/events/poll`, and
+  `?profile=*` (or `all`) on `/events` / `/events/poll` for every profile at once. Existing tokens
+  and clients keep their behaviour: without `?profile=`, `/status`, `/chat`, `/events` and
+  `/events/poll` read the default profile.
+- **Hub (§9.2):** apps register themselves and their resources (`PUT /apps/{id}`, new scopes
+  `apps:read` / `apps:write`), `GET /apps`, `GET /profiles/{id}/overlays`, app-to-app messages
+  (`POST /messages`, `app.message` events), `apps.changed` events.
+- **Pairing (§9.3):** `POST /pairing` + `POST /pairing/{id}/token`, approved in Settings → API;
+  pending requests limited per address and for peers outside the LAN.
+- **Write methods** (`PUT`, `POST`, `DELETE`, JSON bodies) for the hub and pairing, allowed by the
+  CORS preflight. New problem codes: `unknown_profile`, `profile_forbidden`, `app_owned`, `limit`,
+  `denied`, `expired`.
+- The OBS dock shows one profile (the token's, or `&profile=<id>` in its link).
 
 ### v1.1
 

@@ -11,6 +11,8 @@ import type {
   ApiScope,
   ApiTokenInfo,
   AuditEntry,
+  ConnectedApp,
+  PairingRequest,
   ChatMessage,
   ChatModeration,
   ConnectMethod,
@@ -20,6 +22,8 @@ import type {
   FeedState,
   FieldSpec,
   PlatformId,
+  Profile,
+  ProfileSummary,
   PlatformInfo,
   Role,
   SessionState,
@@ -109,6 +113,41 @@ export interface UpdateUserRequest {
 /** DELETE /api/users/:id -> {} (cannot delete yourself or the last admin) */
 
 // ---------------------------------------------------------------------------
+// Profiles
+//
+// Profile scoping convention: every per-profile route takes `?profile=<id>` (default: the default
+// profile, so pre-profiles clients keep working): GET/POST /api/session*, PUT /api/session/*,
+// GET /api/destinations, GET /api/accounts, GET /api/ingest (+ POST /api/ingest/rotate),
+// GET /api/chat/recent, GET /api/chat/overlay (+ rotate), WS /api/ws.
+// Creates carry the profile in the body (`profileId`, default: default profile). Routes on one
+// destination/account (`/:id`) need no profile: ids are global.
+// Shared by every profile: developer apps (/api/platform-apps), users, settings, TLS, API tokens,
+// audit.
+// ---------------------------------------------------------------------------
+
+/** GET /api/profiles [user] -> ProfilesResponse (every profile + its live situation) */
+export interface ProfilesResponse {
+  profiles: ProfileSummary[];
+}
+/** POST /api/profiles [admin] -> Profile. The slug is derived from the name (made unique). */
+export interface CreateProfileRequest {
+  name: string;
+  color?: string | null;
+}
+/** PATCH /api/profiles/:id [admin] -> Profile. The slug never changes (OBS keys keep working). */
+export interface UpdateProfileRequest {
+  name?: string;
+  color?: string | null;
+}
+/**
+ * DELETE /api/profiles/:id [admin] -> {}. Refused for the default profile (400 'default_profile')
+ * and while that profile's session is not offline (409 'session_live'). Deletes the profile's
+ * destinations and accounts with their keys, tokens and browser sessions, and its OBS keys.
+ */
+
+export type { Profile, ProfileSummary };
+
+// ---------------------------------------------------------------------------
 // Platforms + developer apps
 // ---------------------------------------------------------------------------
 
@@ -137,6 +176,8 @@ export interface PutPlatformAppRequest {
 /** GET /api/accounts -> Account[] */
 /** POST /api/accounts -> Account (status 'pending') */
 export interface CreateAccountRequest {
+  /** Owning profile (default: the default profile). */
+  profileId?: string;
   platform: PlatformId;
   label?: string;
   options?: Record<string, unknown>;
@@ -198,6 +239,8 @@ export interface ConnectCompleteRequest {
 /** GET /api/destinations [user] -> Destination[] */
 /** POST /api/destinations [admin] -> Destination */
 export interface CreateDestinationRequest {
+  /** Owning profile (default: the default profile). The account must belong to the same profile. */
+  profileId?: string;
   platform: PlatformId;
   accountId?: string | null;
   name: string;
@@ -246,8 +289,14 @@ export interface SetTestModeRequest {
 
 /** GET /api/ingest [admin] -> IngestInfo */
 export interface IngestInfo {
+  /** Profile these OBS settings belong to. */
+  profileId: string;
   /** e.g. rtmp://192.168.1.20:1935/live  (host = address the browser used, overridable in settings) */
   serverUrl: string;
+  /**
+   * Default profile: `landscape?key=…` (unchanged from before profiles). Other profiles:
+   * `<slug>/landscape?key=…` — each profile has its own keys, so two OBS can stream at once.
+   */
   feeds: { feed: Feed; streamKey: string; fullUrl: string }[];
 }
 /** POST /api/ingest/rotate [admin] body { feed } -> IngestInfo */
@@ -309,12 +358,27 @@ export interface ApiAccessInfo {
 export interface CreateApiTokenRequest {
   name: string;
   scopes: ApiScope[];
+  /** Limit the token to one profile (recommended for overlays/docks). Omitted/null = every profile. */
+  profileId?: string | null;
 }
 export interface CreateApiTokenResponse {
   token: ApiTokenInfo;
   secret: string;
 }
 /** DELETE /api/tokens/:id -> {} */
+
+/** GET /api/pairings [admin] -> PairingRequest[] (pending app connections, newest first) */
+/** POST /api/pairings/:id/approve [admin] -> CreateApiTokenResponse (the app receives the token itself; the secret is not shown) */
+export interface ApprovePairingRequest {
+  /** Token name (default: the app's name). */
+  name?: string;
+  scopes: ApiScope[];
+  /** Limit to one profile (recommended), or null = every profile. */
+  profileId: string | null;
+}
+/** POST /api/pairings/:id/deny [admin] -> {} */
+
+/** GET /api/apps [admin] -> ConnectedApp[] (for Settings → API; DELETE /api/apps/:id [admin] -> {} removes one) */
 
 // ---------------------------------------------------------------------------
 // Audit [admin]
@@ -367,8 +431,18 @@ export type BrowserClientMessage =
 // ---------------------------------------------------------------------------
 
 /** WS /api/ws [user]. Server pushes: */
+/**
+ * WS /api/ws?profile=<id> [user]: session/feed/destination/chat messages are for that profile
+ * (default profile when omitted); `profiles` summaries cover every profile (sent in hello and on
+ * any profile's session change) so the UI can show which profiles are live.
+ */
 export type WsServerMessage =
-  | { type: 'hello'; session: SessionState; chat: ChatMessage[] }
+  | { type: 'hello'; session: SessionState; chat: ChatMessage[]; profiles: ProfileSummary[] }
+  | { type: 'profiles'; profiles: ProfileSummary[] }
+  /** [admin sockets only] pending pairings changed (show "an app wants to connect"). */
+  | { type: 'pairings'; pairings: PairingRequest[] }
+  /** Connected apps changed (registered/updated/removed/online/offline). */
+  | { type: 'apps'; apps: ConnectedApp[] }
   | { type: 'session'; session: SessionState }
   | { type: 'feed'; feed: FeedState }
   | { type: 'destination'; state: DestinationState }

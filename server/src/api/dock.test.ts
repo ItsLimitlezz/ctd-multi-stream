@@ -138,7 +138,26 @@ function harness(
   extra: Record<string, unknown> = {},
 ) {
   const byId: Record<string, El> = {};
-  for (const id of ['setup', 'setup-reason', 'app', 'status-panel', 'session-pill', 'session-timer', 'test-badge', 'alert-toggle', 'session-title', 'feeds', 'destinations', 'toast', 'chat-panel', 'chat', 'conn']) {
+  for (const id of [
+    'setup',
+    'setup-reason',
+    'app',
+    'status-panel',
+    'session-pill',
+    'profile-chip',
+    'profile-dot',
+    'profile-name',
+    'session-timer',
+    'test-badge',
+    'alert-toggle',
+    'session-title',
+    'feeds',
+    'destinations',
+    'toast',
+    'chat-panel',
+    'chat',
+    'conn',
+  ]) {
     byId[id] = Object.assign(new El('div'), { id });
   }
   byId.setup!.hidden = true;
@@ -257,8 +276,9 @@ describe('dock script', () => {
       data: { id: `twitch:${id}`, platform: 'twitch', destinationId: 't1', platformMessageId: id, user: { id: `twitch:u${id}`, name: `<b>user${id}</b>`, color: '#FF0000', badges: [], roles: [] }, text, fragments: [{ type: 'text', text }], kind: 'message' },
     });
     const h = harness(`#token=${TOKEN}`, {
-      '/api/v1/': () => ({ status: 200, body: { token: { scopes: ['chat:read', 'status:read'] } } }),
+      '/api/v1/': () => ({ status: 200, body: { token: { scopes: ['chat:read', 'status:read'], profileId: null } } }),
       '/api/v1/events/poll': () => ({ status: 200, body: { items: [], next: '01JA7Q8M9X2V4C6B8N0P2R4T00', reset: false } }),
+      '/api/v1/profiles/default': () => ({ status: 200, body: { id: 'default', name: 'Miami or Bust', color: '#3B82F6' } }),
       '/api/v1/status': () => ({
         status: 200,
         body: {
@@ -281,17 +301,28 @@ describe('dock script', () => {
     });
     await flush();
 
-    expect(h.calls.map((c) => c.url)).toEqual(['/api/v1/', '/api/v1/events/poll', '/api/v1/status', '/api/v1/chat?limit=100', '/api/v1/events']);
+    // An every-profile token without #…&profile= shows the default profile.
+    expect(h.calls.map((c) => c.url)).toEqual([
+      '/api/v1/',
+      '/api/v1/events/poll?profile=default',
+      '/api/v1/profiles/default',
+      '/api/v1/status?profile=default',
+      '/api/v1/chat?limit=100&profile=default',
+      '/api/v1/events?profile=default',
+    ]);
     for (const c of h.calls) {
       expect(c.url).not.toContain(TOKEN);
       expect(c.headers.authorization).toBe(`Bearer ${TOKEN}`);
     }
     // Resumes from the cursor taken before loading.
-    expect(h.calls[4]!.headers['last-event-id']).toBe('01JA7Q8M9X2V4C6B8N0P2R4T00');
+    expect(h.calls[5]!.headers['last-event-id']).toBe('01JA7Q8M9X2V4C6B8N0P2R4T00');
 
     const { byId } = h;
     expect(byId.app!.hidden).toBe(false);
     expect(byId['session-pill']!.textContent).toBe('LIVE');
+    expect(byId['profile-chip']!.hidden).toBe(false);
+    expect(byId['profile-name']!.textContent).toBe('Miami or Bust');
+    expect(byId['profile-dot']!.style.backgroundColor).toBe('#3B82F6');
     expect(byId['test-badge']!.hidden).toBe(false);
     expect(byId['session-title']!.textContent).toBe('Show');
     expect(byId.feeds!.textContent).toContain('1920×1080 · 6012 kbps');
@@ -370,7 +401,7 @@ describe('dock script', () => {
       },
     );
     await flush();
-    const streams = () => h.calls.filter((c) => c.url === '/api/v1/events');
+    const streams = () => h.calls.filter((c) => c.url.split('?')[0] === '/api/v1/events');
     expect(streams()).toHaveLength(1);
     expect(timers.filter((t) => !t.done && t.ms === 45000)).toHaveLength(1); // one live watchdog
 
@@ -383,6 +414,45 @@ describe('dock script', () => {
     expect(streams()[1]!.headers['last-event-id']).toBe('01JA7Q8M9X2V4C6B8N0P2R4T31');
   });
 
+  it('a token limited to a profile shows that profile (whatever the link says); profile.status renames it live', async () => {
+    const h = harness(`#token=${TOKEN}&profile=default`, {
+      '/api/v1/': () => ({ status: 200, body: { token: { scopes: ['status:read'], profileId: 'club-1' } } }),
+      '/api/v1/events/poll': () => ({ status: 200, body: { items: [], next: '01JA7Q8M9X2V4C6B8N0P2R4T00', reset: false } }),
+      '/api/v1/profiles/club-1': () => ({ status: 200, body: { id: 'club-1', name: 'DPRTMNT', color: '#E11D48' } }),
+      '/api/v1/status': () => ({ status: 200, body: { session: { status: 'offline' }, feeds: [], destinations: [], platforms: [] } }),
+      '/api/v1/events': () => ({
+        status: 200,
+        stream: sse([
+          { id: '01JA7Q8M9X2V4C6B8N0P2R4T41', type: 'profile.status', data: { id: 'other', name: 'Not mine', color: null } },
+          { id: '01JA7Q8M9X2V4C6B8N0P2R4T42', type: 'profile.status', data: { id: 'club-1', name: 'DPRTMNT Toronto', color: 'red;}' } },
+        ]),
+      }),
+    });
+    await flush();
+    expect(h.calls.map((c) => c.url)).toEqual(['/api/v1/', '/api/v1/events/poll?profile=club-1', '/api/v1/profiles/club-1', '/api/v1/status?profile=club-1', '/api/v1/events?profile=club-1']);
+    expect(h.byId['profile-name']!.textContent).toBe('DPRTMNT Toronto');
+    expect(h.byId['profile-dot']!.style.backgroundColor).toBe(''); // not a #RRGGBB colour: ignored
+  });
+
+  it('an every-profile token follows #…&profile=<id>; an unknown profile explains what to do', async () => {
+    const h = harness(`#token=${TOKEN}&profile=club-1`, {
+      '/api/v1/': () => ({ status: 200, body: { token: { scopes: ['chat:read'], profileId: null } } }),
+      '/api/v1/events/poll': () => ({ status: 200, body: { items: [], next: '01JA7Q8M9X2V4C6B8N0P2R4T00', reset: false } }),
+      '/api/v1/chat': () => ({ status: 200, body: { items: [], next: 'x' } }),
+      '/api/v1/events': () => ({ status: 200, stream: sse([]) }),
+    });
+    await flush();
+    expect(h.calls.map((c) => c.url)).toEqual(['/api/v1/', '/api/v1/events/poll?profile=club-1', '/api/v1/chat?limit=100&profile=club-1', '/api/v1/events?profile=club-1']);
+
+    const gone = harness(`#token=${TOKEN}&profile=deleted`, {
+      '/api/v1/': () => ({ status: 200, body: { token: { scopes: ['chat:read'], profileId: null } } }),
+      '/api/v1/events/poll': () => ({ status: 404, body: { code: 'unknown_profile' } }),
+    });
+    await flush();
+    expect(gone.byId.setup!.hidden).toBe(false);
+    expect(gone.byId['setup-reason']!.textContent).toMatch(/profile/);
+  });
+
   it('a chat-only token hides the status panel', async () => {
     const h = harness(`#token=${TOKEN}`, {
       '/api/v1/': () => ({ status: 200, body: { token: { scopes: ['chat:read'] } } }),
@@ -393,6 +463,6 @@ describe('dock script', () => {
     await flush();
     expect(h.byId['status-panel']!.hidden).toBe(true);
     expect(h.byId['chat-panel']!.hidden).toBe(false);
-    expect(h.calls.map((c) => c.url)).not.toContain('/api/v1/status');
+    expect(h.calls.map((c) => c.url.split('?')[0])).not.toContain('/api/v1/status');
   });
 });

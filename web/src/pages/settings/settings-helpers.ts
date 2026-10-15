@@ -280,8 +280,23 @@ export const DOCK_SCOPES: readonly ApiScope[] = ['status:read', 'chat:read'];
 
 export const API_SCOPE_INFO: Readonly<Record<ApiScope, { label: string; help: string }>> = {
   'chat:read': { label: 'Read chat', help: 'Chat history and live chat: messages, alerts (subs, gifts, Super Chats…) and removed messages.' },
-  'status:read': { label: 'Read status', help: 'Stream, feed and destination status, bitrates, viewers and notices.' },
+  'status:read': { label: 'Read status', help: 'Stream, feed and destination status, bitrates, viewers, notices and the list of profiles.' },
+  'ingest:read': {
+    label: 'Read OBS stream keys',
+    help: "The profile's OBS server and stream keys, so an app (the CTD OBS plugin) can set up OBS. Stream keys are secrets: only for apps that configure OBS.",
+  },
+  'apps:read': {
+    label: 'See connected apps',
+    help: 'The other connected apps and what they offer (e.g. the overlays CTD Overlay assigned to a profile), and messages sent to this app.',
+  },
+  'apps:write': {
+    label: 'Register and message apps',
+    help: 'Register this app and what it offers so other apps can find it, and send messages to other apps through CTD Multi-Stream.',
+  },
 };
+
+/** Permissions a new token starts with (read-only basics; the others are opt-in). */
+export const DEFAULT_TOKEN_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read'];
 
 /** Scopes in the standard order, unknown ones dropped. */
 export function orderedScopes(scopes: readonly string[]): ApiScope[] {

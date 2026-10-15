@@ -7,7 +7,7 @@ import pino from 'pino';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZodError } from 'zod';
 import type { ConnectPoll, PlatformAppStatus, SettingsResponse } from '../../../../shared/api.js';
-import type { Account, Destination, PlatformInfo, TlsStatus } from '../../../../shared/types.js';
+import type { Account, Destination, PlatformInfo, Profile, TlsStatus } from '../../../../shared/types.js';
 import { EventBus } from '../../events.js';
 import { DriverError, type DriverContext, type PlatformDriver } from '../../platforms/types.js';
 import type {
@@ -16,7 +16,8 @@ import type {
   AuditRepo,
   BrowserManager,
   DestinationsRepo,
-  Orchestrator,
+  OrchestratorRegistry,
+  ProfilesRepo,
   ScopedSecrets,
   SecretsRepo,
   SettingsRepo,
@@ -38,9 +39,19 @@ function createFakeRepos() {
   const nextId = (p: string) => `${p}${++seq}`;
   const now = () => new Date().toISOString();
 
+  const profile = (id: string, name: string): Profile => ({ id, name, slug: id === 'default' ? 'main' : id, color: null, createdAt: now(), updatedAt: now() });
+  const profileMap = new Map<string, Profile>([
+    ['default', profile('default', 'Miami or Bust')],
+    ['club', profile('club', 'DPRTMNT')],
+  ]);
+  const profiles = {
+    list: () => [...profileMap.values()],
+    get: (id: string) => profileMap.get(id) ?? null,
+  } as unknown as ProfilesRepo;
+
   const accountMap = new Map<string, Account>();
   const accounts: AccountsRepo = {
-    list: () => [...accountMap.values()],
+    list: (profileId) => [...accountMap.values()].filter((a) => profileId === undefined || a.profileId === profileId),
     get: (id) => accountMap.get(id) ?? null,
     create(input) {
       const a: Account = { id: nextId('acc'), status: 'error', statusMessage: null, createdAt: now(), updatedAt: now(), ...input };
@@ -59,7 +70,7 @@ function createFakeRepos() {
 
   const destMap = new Map<string, Destination>();
   const destinations: DestinationsRepo = {
-    list: () => [...destMap.values()],
+    list: (profileId) => [...destMap.values()].filter((d) => profileId === undefined || d.profileId === profileId),
     get: (id) => destMap.get(id) ?? null,
     create(input) {
       const d: Destination = { id: nextId('dst'), hasStreamKey: false, createdAt: now(), updatedAt: now(), ...input };
@@ -112,7 +123,7 @@ function createFakeRepos() {
     list: () => [],
   };
 
-  return { accounts, destinations, settings, secrets, audit, secretStore, settingsMap, auditEntries };
+  return { profiles, accounts, destinations, settings, secrets, audit, secretStore, settingsMap, auditEntries };
 }
 
 const notUsed = async (): Promise<never> => {
@@ -317,10 +328,20 @@ function createFakeServices() {
   const kickSeen: { pastedUrl?: string; ctx?: DriverContext } = {};
   const drivers = [makeTwitch(), makeKick(kickSeen), makeFacebook(), makeCustom(), makeInstagram()];
 
-  const orchestrator = {
+  const makeOrchestrator = () => ({
     destinationChanged: vi.fn(async (_id: string) => {}),
     destinationRemoved: vi.fn(async (_id: string) => {}),
     retryDestination: vi.fn(async (_id: string) => {}),
+  });
+  /** The default profile's go-live engine, and the 'club' profile's. */
+  const orchestrator = makeOrchestrator();
+  const clubOrchestrator = makeOrchestrator();
+  const orchestrators = {
+    get(id: string) {
+      if (id === 'default') return orchestrator;
+      if (id === 'club') return clubOrchestrator;
+      throw Object.assign(new Error('Profile not found'), { statusCode: 404, code: 'unknown_profile' });
+    },
   };
   const browser = {
     close: vi.fn(async (_id: string, _opts?: { save?: boolean }) => {}),
@@ -359,7 +380,7 @@ function createFakeServices() {
       },
       all: () => drivers,
     },
-    orchestrator: orchestrator as unknown as Orchestrator,
+    orchestrators: orchestrators as unknown as OrchestratorRegistry,
     browser: browser as unknown as BrowserManager,
     tls: { status: () => tlsStatus },
     appSettings,
@@ -367,7 +388,7 @@ function createFakeServices() {
     driverContext,
   } as unknown as AppServices;
 
-  return { services, repos, bus, orchestrator, browser, kickSeen };
+  return { services, repos, bus, orchestrator, clubOrchestrator, browser, kickSeen };
 }
 
 // ---------------------------------------------------------------------------
@@ -384,8 +405,11 @@ async function buildTestApp(services: AppServices): Promise<FastifyInstance> {
       return sendError(reply, 400, err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; '), 'invalid');
     }
     if (err instanceof DriverError) return sendError(reply, 400, err.message, err.code);
-    const e = err as { statusCode?: number; message?: string };
-    if (e.statusCode && e.statusCode >= 400 && e.statusCode < 500) return sendError(reply, e.statusCode, e.message ?? 'Bad request');
+    const e = err as { statusCode?: number; message?: string; code?: unknown };
+    if (e.statusCode && e.statusCode >= 400 && e.statusCode < 500) {
+      const code = typeof e.code === 'string' && !e.code.startsWith('FST_') ? e.code : undefined;
+      return sendError(reply, e.statusCode, e.message ?? 'Bad request', code);
+    }
     return sendError(reply, 500, 'Internal error');
   });
   await app.register(cookie);
@@ -670,7 +694,7 @@ describe('GET /oauth/callback/:platform', () => {
     const path = `/oauth/callback/kick?code=good&state=${account.id}.rnd123`;
     const res = await landing(path, 'admin');
     expect(res.statusCode).toBe(302);
-    expect(res.headers.location).toBe(`/accounts?connected=${account.id}`);
+    expect(res.headers.location).toBe(`/accounts?connected=${account.id}&profile=default`);
     expect(fx.kickSeen.pastedUrl).toBe(`${BASE_URL}${path}`);
     expect(fx.repos.accounts.get(account.id)?.status).toBe('connected');
     expect(fx.repos.auditEntries.at(-1)).toMatchObject({ action: 'account.connect' });
@@ -939,6 +963,128 @@ describe('destinations', () => {
     fx.orchestrator.destinationChanged.mockRejectedValueOnce(new Error('boom'));
     const dest = await createDestination({ platform: 'custom', name: 'C', feed: 'landscape', ingestUrl: 'rtmp://h/app' });
     expect(fx.repos.destinations.get(dest.id)).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Profiles (accounts + destinations per profile)
+// ---------------------------------------------------------------------------
+
+describe('profiles', () => {
+  const kickDest = (extra: object = {}) => ({ platform: 'kick', name: 'Kick', feed: 'landscape', streamKey: 'k1', ...extra });
+
+  it('creates accounts in the default profile unless told otherwise, and lists them per profile', async () => {
+    const main = await createAccount('kick');
+    const club = await createAccount('kick', { profileId: 'club' });
+    expect(main.profileId).toBe('default');
+    expect(club.profileId).toBe('club');
+    expect(fx.repos.auditEntries.at(-1)?.detail).toContain('profile=club');
+
+    const ids = async (url: string) => (await call('GET', url)).json<Account[]>().map((a) => a.id);
+    expect(await ids('/api/accounts')).toEqual([main.id]); // pre-profiles clients: the default profile
+    expect(await ids('/api/accounts?profile=default')).toEqual([main.id]);
+    expect(await ids('/api/accounts?profile=club')).toEqual([club.id]);
+  });
+
+  it('rejects unknown profiles with 404 unknown_profile', async () => {
+    let res = await call('POST', '/api/accounts', 'admin', { platform: 'kick', profileId: 'ghost' });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ code: 'unknown_profile' });
+    res = await call('GET', '/api/accounts?profile=ghost');
+    expect(res.json()).toMatchObject({ code: 'unknown_profile' });
+    res = await call('GET', '/api/destinations?profile=ghost', 'operator');
+    expect(res.statusCode).toBe(404);
+    res = await call('POST', '/api/destinations', 'admin', kickDest({ profileId: 'ghost' }));
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ code: 'unknown_profile' });
+    expect((await call('GET', '/api/destinations?profile=a&profile=b', 'operator')).statusCode).toBe(400);
+    expect(fx.repos.destinations.list()).toEqual([]);
+    expect(fx.repos.accounts.list()).toEqual([]);
+  });
+
+  it("creates a destination in a profile with that profile's account, and talks to that profile's engine", async () => {
+    const clubAccount = await createAccount('kick', { profileId: 'club' });
+    const events: unknown[] = [];
+    fx.bus.on('destinations-changed', (...args) => events.push(args[0]));
+
+    const dest = await createDestination(kickDest({ profileId: 'club', accountId: clubAccount.id }));
+    expect(dest).toMatchObject({ profileId: 'club', accountId: clubAccount.id });
+    expect(fx.clubOrchestrator.destinationChanged).toHaveBeenCalledWith(dest.id);
+    expect(fx.orchestrator.destinationChanged).not.toHaveBeenCalled();
+    expect(events).toEqual([{ profileId: 'club' }]);
+    expect(fx.repos.auditEntries.at(-1)?.detail).toContain('profile=club');
+
+    const list = async (url: string) => (await call('GET', url, 'operator')).json<Destination[]>().map((d) => d.id);
+    expect(await list('/api/destinations?profile=club')).toEqual([dest.id]);
+    expect(await list('/api/destinations')).toEqual([]);
+
+    // /:id routes find the profile themselves.
+    await call('PATCH', `/api/destinations/${dest.id}`, 'admin', { name: 'Kick DPRTMNT' });
+    await call('PUT', `/api/destinations/${dest.id}/enabled`, 'operator', { enabled: false });
+    await call('POST', `/api/destinations/${dest.id}/retry`, 'operator', {});
+    await call('DELETE', `/api/destinations/${dest.id}`);
+    expect(fx.clubOrchestrator.destinationChanged).toHaveBeenCalledTimes(3);
+    expect(fx.clubOrchestrator.retryDestination).toHaveBeenCalledWith(dest.id);
+    expect(fx.clubOrchestrator.destinationRemoved).toHaveBeenCalledWith(dest.id);
+    expect(fx.orchestrator.destinationChanged).not.toHaveBeenCalled();
+    expect(fx.orchestrator.retryDestination).not.toHaveBeenCalled();
+    expect(fx.orchestrator.destinationRemoved).not.toHaveBeenCalled();
+    expect(events).toEqual([{ profileId: 'club' }, { profileId: 'club' }, { profileId: 'club' }, { profileId: 'club' }]);
+  });
+
+  it("refuses another profile's account (400 account_profile_mismatch)", async () => {
+    const mainAccount = await createAccount('kick');
+    const clubAccount = await createAccount('kick', { profileId: 'club' });
+
+    let res = await call('POST', '/api/destinations', 'admin', kickDest({ profileId: 'club', accountId: mainAccount.id }));
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ code: 'account_profile_mismatch' });
+    res = await call('POST', '/api/destinations', 'admin', kickDest({ accountId: clubAccount.id }));
+    expect(res.json()).toMatchObject({ code: 'account_profile_mismatch' });
+    expect(fx.repos.destinations.list()).toEqual([]);
+
+    const dest = await createDestination(kickDest({ accountId: mainAccount.id }));
+    res = await call('PATCH', `/api/destinations/${dest.id}`, 'admin', { accountId: clubAccount.id });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ code: 'account_profile_mismatch' });
+    expect(fx.repos.destinations.get(dest.id)?.accountId).toBe(mainAccount.id);
+  });
+
+  it('keeps a destination in its profile (a patch may echo it, not change it)', async () => {
+    const dest = await createDestination(kickDest({ profileId: 'club' }));
+    let res = await call('PATCH', `/api/destinations/${dest.id}`, 'admin', { profileId: 'club', name: 'Same profile' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<Destination>()).toMatchObject({ profileId: 'club', name: 'Same profile' });
+    res = await call('PATCH', `/api/destinations/${dest.id}`, 'admin', { profileId: 'default', name: 'Moved?' });
+    expect(res.statusCode).toBe(400);
+    expect(fx.repos.destinations.get(dest.id)).toMatchObject({ profileId: 'club', name: 'Same profile' });
+  });
+
+  it("deleting an account retires its destinations through their profile's engine", async () => {
+    const clubAccount = await createAccount('kick', { profileId: 'club' });
+    const dest = await createDestination(kickDest({ profileId: 'club', accountId: clubAccount.id }));
+    fx.clubOrchestrator.destinationChanged.mockClear();
+    const events: unknown[] = [];
+    fx.bus.on('destinations-changed', (...args) => events.push(args[0]));
+
+    const res = await call('DELETE', `/api/accounts/${clubAccount.id}`);
+    expect(res.statusCode).toBe(200);
+    expect(fx.clubOrchestrator.destinationChanged).toHaveBeenCalledWith(dest.id);
+    expect(fx.orchestrator.destinationChanged).not.toHaveBeenCalled();
+    expect(fx.repos.destinations.get(dest.id)?.accountId).toBeNull();
+    expect(events).toEqual([{ profileId: 'club' }]);
+    expect(fx.repos.auditEntries.at(-1)).toMatchObject({ action: 'account.delete', detail: expect.stringContaining('profile=club') });
+  });
+
+  it("lands an OAuth sign-in on the account's profile", async () => {
+    const account = await createAccount('kick', { profileId: 'club' });
+    const ok = await app.inject({ method: 'GET', url: `/oauth/callback/kick?code=good&state=${account.id}.r`, headers: { 'x-test-role': 'admin' } });
+    expect(ok.headers.location).toBe(`/accounts?connected=${account.id}&profile=club`);
+    const bad = await app.inject({ method: 'GET', url: `/oauth/callback/kick?code=bad&state=${account.id}.r`, headers: { 'x-test-role': 'admin' } });
+    const target = new URL(String(bad.headers.location), 'http://x');
+    expect(target.pathname).toBe('/accounts');
+    expect(target.searchParams.get('profile')).toBe('club');
+    expect(target.searchParams.get('error')).toMatch(/Invalid authorization code/);
   });
 });
 

@@ -10,6 +10,7 @@ import { EmptyState } from '../components/EmptyState';
 import { BroadcastIcon, LandscapeIcon, VerticalIcon } from '../components/icons';
 import { Modal } from '../components/Modal';
 import { PlatformBadge, platformName } from '../components/PlatformBadge';
+import { ProfileTag } from '../components/ProfileBadge';
 import { Spinner } from '../components/Spinner';
 import { toast } from '../components/Toast';
 import { Toggle } from '../components/Toggle';
@@ -17,6 +18,7 @@ import { cx } from '../components/utils';
 import { errorMessage } from '../state/errors';
 import { useApi, useDestinations } from '../state/hooks';
 import { useAccountsVersion } from '../state/live';
+import { useProfileId } from '../state/profile';
 import { DestinationForm } from './destinations/DestinationForm';
 import {
   destinationProblems,
@@ -34,9 +36,11 @@ type ModalState = { kind: 'add'; info: PlatformInfo | null } | { kind: 'edit'; d
 
 export default function DestinationsPage() {
   const dests = useDestinations();
+  const profileId = useProfileId();
   const platforms = useApi(() => api.platforms(), []);
   const accountsVersion = useAccountsVersion();
-  const accounts = useApi(() => api.accounts(), [accountsVersion]);
+  // Only this profile's accounts: a destination must use an account of its own profile.
+  const accounts = useApi(() => api.accounts(profileId), [accountsVersion, profileId]);
   const [modal, setModal] = useState<ModalState>(null);
 
   const infoById = useMemo(() => new Map((platforms.data ?? []).map((p) => [p.id as string, p])), [platforms.data]);
@@ -120,7 +124,8 @@ export default function DestinationsPage() {
       <div className="page-header">
         <div>
           <h1>Destinations</h1>
-          <p>Each destination sends one OBS feed to one platform. Turn them on or off at any time.</p>
+          <p>Each destination sends one OBS feed of this profile to one platform. Turn them on or off at any time.</p>
+          <ProfileTag className="page-profile" />
         </div>
         {dests.data && dests.data.length > 0 && addButton}
       </div>

@@ -2,7 +2,7 @@
 
 import net from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessage } from '../../../shared/types.js';
+import { DEFAULT_PROFILE_ID, type ChatMessage } from '../../../shared/types.js';
 import { createTestApi, dstate, session, type TestApi } from './test-helpers.js';
 import type { Envelope } from './types.js';
 import { MAX_STREAMS_PER_TOKEN } from './v1.js';
@@ -108,8 +108,8 @@ function chat(i: number): ChatMessage {
 
 describe('GET /api/v1/events (SSE)', () => {
   it('frames: retry once, then a snapshot (stream.status + destination.status each), then live events', async () => {
-    const a = t.repos.destinations.create({ platform: 'twitch', accountId: null, name: 'Twitch', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
-    const b = t.repos.destinations.create({ platform: 'kick', accountId: null, name: 'Kick', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    const a = t.repos.destinations.create({ profileId: DEFAULT_PROFILE_ID, platform: 'twitch', accountId: null, name: 'Twitch', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    const b = t.repos.destinations.create({ profileId: DEFAULT_PROFILE_ID, platform: 'kick', accountId: null, name: 'Kick', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
     t.state.current = session({ destinations: [dstate(a.id, 'live'), dstate(b.id, 'retrying')] });
 
     const s = await open('/api/v1/events', auth());
@@ -214,6 +214,81 @@ describe('GET /api/v1/events (SSE)', () => {
     await s.waitFor((f) => f.length >= 1);
     await t.close();
     await Promise.race([s.ended, new Promise((_, reject) => setTimeout(() => reject(new Error('stream not closed')), 2000))]);
+  });
+});
+
+describe('GET /api/v1/events (profiles)', () => {
+  const twoProfiles = () => {
+    const club = t.addProfile('DPRTMNT');
+    const a = t.repos.destinations.create({ profileId: DEFAULT_PROFILE_ID, platform: 'twitch', accountId: null, name: 'Main', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    const b = t.repos.destinations.create({ profileId: club.id, platform: 'twitch', accountId: null, name: 'Club', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    return { club, a, b };
+  };
+  const chatIds = (s: Stream) => s.envelopes().filter((e) => e.type === 'chat.message').map((e) => (e.data as { id: string }).id);
+
+  it('a token limited to a profile streams only that profile (snapshot and live events)', async () => {
+    const { club, a, b } = twoProfiles();
+    const limited = t.token(['chat:read', 'status:read'], 'club dock', club.id);
+    const s = await open('/api/v1/events', { authorization: `Bearer ${limited}` });
+    await s.waitFor((f) => dataFrames(f).length >= 2);
+    expect(s.envelopes().map((e) => [e.type, e.src.profile, e.src.connection])).toEqual([
+      ['stream.status', club.id, 'core'],
+      ['destination.status', club.id, b.id],
+    ]);
+    t.bus.emit('chat', { ...chat(1), destinationId: a.id, profileId: DEFAULT_PROFILE_ID });
+    t.bus.emit('chat', { ...chat(2), destinationId: b.id, profileId: club.id });
+    t.bus.emit('notice', { level: 'info', message: 'for everyone' });
+    await s.waitFor((f) => f.some((x) => x.event === 'system.notice'));
+    expect(chatIds(s)).toEqual(['twitch:2']);
+
+    const forbidden = await open(`/api/v1/events?profile=${DEFAULT_PROFILE_ID}`, { authorization: `Bearer ${limited}` });
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.body).toMatchObject({ code: 'profile_forbidden' });
+  });
+
+  it('an every-profile token (e.g. from before v1.2) streams the default profile without ?profile=, as before profiles existed', async () => {
+    const { club, a, b } = twoProfiles();
+    const old = await open('/api/v1/events', auth());
+    await old.waitFor((f) => dataFrames(f).length >= 2);
+    expect(old.envelopes().map((e) => [e.type, e.src.profile, e.src.connection])).toEqual([
+      ['stream.status', DEFAULT_PROFILE_ID, 'core'],
+      ['destination.status', DEFAULT_PROFILE_ID, a.id],
+    ]);
+    t.bus.emit('chat', { ...chat(1), destinationId: a.id, profileId: DEFAULT_PROFILE_ID });
+    t.bus.emit('chat', { ...chat(2), destinationId: b.id, profileId: club.id });
+    t.bus.emit('notice', { level: 'info', message: 'for everyone' });
+    await old.waitFor((f) => f.some((x) => x.event === 'system.notice'));
+    expect(chatIds(old)).toEqual(['twitch:1']);
+  });
+
+  it('an every-profile token streams every profile with ?profile=* (or all), or one with ?profile=<id>', async () => {
+    const { club, a, b } = twoProfiles();
+    const every = await open('/api/v1/events?profile=*', auth());
+    const everyAlias = await open('/api/v1/events?profile=all', auth());
+    const one = await open(`/api/v1/events?profile=${club.id}`, auth());
+    await every.waitFor((f) => dataFrames(f).length >= 4);
+    await everyAlias.waitFor((f) => dataFrames(f).length >= 4);
+    await one.waitFor((f) => dataFrames(f).length >= 2);
+    expect(every.envelopes().filter((e) => e.type === 'stream.status').map((e) => e.src.profile)).toEqual([DEFAULT_PROFILE_ID, club.id]);
+    expect(everyAlias.envelopes().filter((e) => e.type === 'stream.status').map((e) => e.src.profile)).toEqual([DEFAULT_PROFILE_ID, club.id]);
+    expect(one.envelopes().map((e) => e.src.profile)).toEqual([club.id, club.id]);
+
+    t.bus.emit('chat', { ...chat(1), destinationId: a.id, profileId: DEFAULT_PROFILE_ID });
+    t.bus.emit('chat', { ...chat(2), destinationId: b.id, profileId: club.id });
+    await every.waitFor((f) => f.filter((x) => x.event === 'chat.message').length >= 2);
+    await one.waitFor((f) => f.some((x) => x.event === 'chat.message'));
+    expect(chatIds(every)).toEqual(['twitch:1', 'twitch:2']);
+    expect(chatIds(one)).toEqual(['twitch:2']);
+
+    // A token limited to a profile: `*` is everything it can see, i.e. its own profile.
+    const limited = t.token(['chat:read', 'status:read'], 'club dock', club.id);
+    const own = await open('/api/v1/events?profile=*', { authorization: `Bearer ${limited}` });
+    await own.waitFor((f) => dataFrames(f).length >= 2);
+    expect(own.envelopes().map((e) => e.src.profile)).toEqual([club.id, club.id]);
+
+    const unknown = await open('/api/v1/events?profile=nope', auth());
+    expect(unknown.status).toBe(404);
+    expect(unknown.body).toMatchObject({ code: 'unknown_profile' });
   });
 });
 

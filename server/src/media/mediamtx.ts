@@ -1,21 +1,35 @@
-// MediaServer: supervises MediaMTX (RTMP ingest for the two OBS feeds), answers its auth
-// requests, and turns its control API into 'feed' events.
+// MediaServer: supervises MediaMTX (RTMP ingest for every profile's two OBS feeds), answers its
+// auth requests, and turns its control API into 'feed' events.
+//
+// Profiles: the default profile keeps the pre-profiles paths (`live/landscape`, `live/vertical`)
+// and keys (secret scope 'ingest'); every other profile publishes to `live/<slug>/<feed>` with
+// its own keys (scope 'ingest:<profileId>'). MediaMTX accepts every `live/<slug>/<feed>` path through
+// one regex path, and our auth hook only lets in slugs of existing profiles with their own keys,
+// so adding or removing a profile never restarts MediaMTX (and never drops another profile's OBS).
 
 import type { ChildProcess } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Logger } from 'pino';
-import { FEEDS, type Feed, type FeedState } from '../../../shared/types.js';
+import { DEFAULT_PROFILE_ID, FEEDS, type Feed, type FeedState } from '../../../shared/types.js';
 import type { AppConfig } from '../config.js';
 import type { EventBus } from '../events.js';
-import type { MediaMtxAuthRequest, MediaServer, ScopedSecrets } from '../services.js';
+import { profileSecretScope, type MediaMtxAuthRequest, type MediaServer, type Repos } from '../services.js';
 import { startAuthServer, type AuthServer } from './auth-server.js';
-import { authorizeMediaRequest, generateKey, INGEST_SECRET_NAMES, isValidKey, type IngestSecrets } from './authorize.js';
+import {
+  authorizeMediaRequest,
+  FEED_KEY_NAMES,
+  generateKey,
+  INTERNAL_READER_KEY,
+  isValidKey,
+  type IngestAuthState,
+  type ProfileIngestKeys,
+} from './authorize.js';
 import { FeedTracker, offlineFeedState, shouldEmitFeed, type MtxPath } from './feed-state.js';
 import { createMediaMtxApi, type FetchFn } from './mediamtx-api.js';
 import { buildMediaMtxConfig } from './mediamtx-config.js';
-import { APP_NAME, feedPath, INTERNAL_READER_USER } from './paths.js';
+import { APP_NAME, feedPath, INTERNAL_READER_USER, streamKeyPath, type IngestRoute } from './paths.js';
 import { defaultSpawn, onLines, terminate, type SpawnFn } from './process-utils.js';
 import { redactSecretsInText } from './redact.js';
 
@@ -28,15 +42,56 @@ export interface MediaServerDeps {
   readyTimeoutMs?: number;
 }
 
+export interface MediaServerOptions {
+  config: AppConfig;
+  bus: EventBus;
+  log: Logger;
+  /** Profiles (which slugs exist) and encrypted secrets (each profile's OBS keys). */
+  repos: Pick<Repos, 'secrets' | 'profiles'>;
+}
+
 const RESTART_MIN_MS = 1_000;
 const RESTART_MAX_MS = 30_000;
 const HEALTHY_AFTER_MS = 60_000;
 const POLL_FAILURES_BEFORE_OFFLINE = 3;
 
-export function createMediaServer(
-  { config, bus, log, secrets }: { config: AppConfig; bus: EventBus; log: Logger; secrets: ScopedSecrets },
-  deps: MediaServerDeps = {},
-): MediaServer {
+/** Unknown profile id (404 `unknown_profile`, like OrchestratorRegistry.get). */
+export class UnknownProfileError extends Error {
+  readonly statusCode = 404;
+  readonly code = 'unknown_profile';
+  constructor() {
+    super('Profile not found');
+    this.name = 'UnknownProfileError';
+  }
+}
+
+/** The default profile's OBS keys and paths can never be removed. */
+export class DefaultProfileMediaError extends Error {
+  readonly statusCode = 400;
+  readonly code = 'default_profile';
+  constructor() {
+    super('The default profile cannot be removed');
+    this.name = 'DefaultProfileMediaError';
+  }
+}
+
+interface FeedSlot {
+  feed: Feed;
+  path: string;
+  tracker: FeedTracker;
+  emitted: { state: FeedState; at: number };
+}
+
+interface ProfileIngest {
+  profileId: string;
+  /** null = the default profile (legacy paths). */
+  slug: string | null;
+  keys: ProfileIngestKeys | null;
+  loading: Promise<ProfileIngestKeys> | null;
+  feeds: Map<Feed, FeedSlot>;
+}
+
+export function createMediaServer({ config, bus, log, repos }: MediaServerOptions, deps: MediaServerDeps = {}): MediaServer {
   const spawn = deps.spawn ?? defaultSpawn;
   const now = deps.now ?? Date.now;
   const pollIntervalMs = deps.pollIntervalMs ?? 1_000;
@@ -46,9 +101,11 @@ export function createMediaServer(
   const configPath = path.join(workDir, 'mediamtx.yml');
   const bin = config.mediamtxBin;
   const notFound = `MediaMTX not found at ${bin}; run \`npm run setup-tools\` (or set MEDIAMTX_BIN). Feeds stay offline.`;
+  /** The internal reader password lives in the legacy 'ingest' scope (shared by every profile). */
+  const readerScope = repos.secrets.scoped(profileSecretScope(DEFAULT_PROFILE_ID, 'ingest'));
 
-  let keys: IngestSecrets | null = null;
-  let keysLoading: Promise<IngestSecrets> | null = null;
+  let readerPassword: string | null = null;
+  let readerLoading: Promise<string> | null = null;
   let auth: AuthServer | null = null;
   let running = false;
   let proc: ChildProcess | null = null;
@@ -60,54 +117,171 @@ export function createMediaServer(
   let pollFailures = 0;
   let lastError: string | null = null;
 
-  const trackers = new Map<Feed, FeedTracker>(FEEDS.map((f) => [f, new FeedTracker(f)]));
-  const emitted = new Map<Feed, { state: FeedState; at: number }>(FEEDS.map((f) => [f, { state: offlineFeedState(f), at: 0 }]));
+  /** Profiles whose paths are accepted, by id; non-default ones also by slug. */
+  const profiles = new Map<string, ProfileIngest>();
+  const bySlug = new Map<string, string>();
+  /** Deleted profiles: never re-registered (e.g. by a late OBS reconnect before the row is gone). */
+  const removed = new Set<string>();
+
+  // ---- profiles ---------------------------------------------------------
+
+  function register(profileId: string, slug: string | null): ProfileIngest {
+    const existing = profiles.get(profileId);
+    if (existing) return existing;
+    const s = profileId === DEFAULT_PROFILE_ID ? null : slug;
+    const entry: ProfileIngest = {
+      profileId,
+      slug: s,
+      keys: null,
+      loading: null,
+      feeds: new Map(
+        FEEDS.map((feed) => [
+          feed,
+          { feed, path: feedPath(feed, s), tracker: new FeedTracker(feed, profileId), emitted: { state: offlineFeedState(feed, profileId), at: 0 } },
+        ]),
+      ),
+    };
+    profiles.set(profileId, entry);
+    if (s) bySlug.set(s, profileId);
+    return entry;
+  }
+
+  /** A known profile (registering it from the database if needed), else null. */
+  function findProfile(profileId: string): ProfileIngest | null {
+    const known = profiles.get(profileId);
+    if (known) return known;
+    if (profileId === DEFAULT_PROFILE_ID) return register(DEFAULT_PROFILE_ID, null);
+    if (removed.has(profileId)) return null;
+    const row = repos.profiles.get(profileId);
+    return row ? register(row.id, row.slug) : null;
+  }
+
+  function requireProfile(profileId: string): ProfileIngest {
+    const entry = findProfile(profileId);
+    if (!entry) throw new UnknownProfileError();
+    return entry;
+  }
 
   // ---- keys -------------------------------------------------------------
 
-  async function loadKeys(): Promise<IngestSecrets> {
-    const out: Partial<IngestSecrets> = {};
-    for (const name of INGEST_SECRET_NAMES) {
-      let value = await secrets.get(name);
+  async function loadKeys(entry: ProfileIngest): Promise<ProfileIngestKeys> {
+    const scope = repos.secrets.scoped(profileSecretScope(entry.profileId, 'ingest'));
+    const out: Partial<ProfileIngestKeys> = {};
+    for (const name of FEED_KEY_NAMES) {
+      let value = await scope.get(name);
       if (!isValidKey(value)) {
+        if (removed.has(entry.profileId)) throw new UnknownProfileError();
         value = generateKey();
-        await secrets.set(name, value);
-        log.info({ key: name }, 'Generated new ingest secret');
+        await scope.set(name, value);
+        log.info({ profileId: entry.profileId, key: name }, 'Generated new ingest key');
       }
       out[name] = value;
     }
-    return out as IngestSecrets;
+    return out as ProfileIngestKeys;
   }
 
-  function ensureKeys(): Promise<IngestSecrets> {
-    if (keys) return Promise.resolve(keys);
-    keysLoading ??= loadKeys()
-      .then((k) => (keys = k))
+  function ensureKeys(entry: ProfileIngest): Promise<ProfileIngestKeys> {
+    if (entry.keys) return Promise.resolve(entry.keys);
+    entry.loading ??= loadKeys(entry)
+      .then((k) => {
+        if (profiles.get(entry.profileId) === entry) entry.keys = k;
+        return k;
+      })
       .finally(() => {
-        keysLoading = null;
+        entry.loading = null;
       });
-    return keysLoading;
+    return entry.loading;
   }
+
+  async function loadReader(): Promise<string> {
+    let value = await readerScope.get(INTERNAL_READER_KEY);
+    if (!isValidKey(value)) {
+      value = generateKey();
+      await readerScope.set(INTERNAL_READER_KEY, value);
+      log.info({ key: INTERNAL_READER_KEY }, 'Generated new ingest secret');
+    }
+    return value;
+  }
+
+  function ensureReader(): Promise<string> {
+    if (readerPassword) return Promise.resolve(readerPassword);
+    readerLoading ??= loadReader()
+      .then((p) => (readerPassword = p))
+      .finally(() => {
+        readerLoading = null;
+      });
+    return readerLoading;
+  }
+
+  /** Load keys in the background (auth requests are synchronous); OBS retries and gets in. */
+  function warmUp(entry: ProfileIngest): void {
+    if (entry.keys || entry.loading) return;
+    ensureKeys(entry).catch((err: unknown) =>
+      log.error({ profileId: entry.profileId, err: err instanceof Error ? err.message : String(err) }, 'Could not load ingest keys'),
+    );
+  }
+
+  const authState: IngestAuthState = {
+    get readerPassword() {
+      return readerPassword;
+    },
+    publishKey(route: IngestRoute): string | null {
+      let entry: ProfileIngest | null;
+      if (route.slug === null) {
+        entry = findProfile(DEFAULT_PROFILE_ID);
+      } else {
+        const id = bySlug.get(route.slug);
+        if (id !== undefined) {
+          entry = profiles.get(id) ?? null;
+        } else {
+          // A profile created without profileAdded() (or not loaded yet): learn it, deny this time.
+          const row = repos.profiles.getBySlug(route.slug);
+          entry = row && row.id !== DEFAULT_PROFILE_ID && !removed.has(row.id) ? register(row.id, row.slug) : null;
+        }
+      }
+      if (!entry) return null;
+      if (!entry.keys) warmUp(entry);
+      return entry.keys?.[route.feed] ?? null;
+    },
+  };
 
   // ---- feed state -------------------------------------------------------
 
-  function publish(feed: Feed, state: FeedState): void {
-    const prev = emitted.get(feed);
+  function publish(slot: FeedSlot, state: FeedState): void {
     const t = now();
-    if (!shouldEmitFeed(prev?.state ?? null, state, prev?.at ?? 0, t)) return;
-    emitted.set(feed, { state, at: t });
+    if (!shouldEmitFeed(slot.emitted.state, state, slot.emitted.at, t)) return;
+    slot.emitted = { state, at: t };
     bus.emit('feed', { ...state });
   }
 
   function applyPaths(items: MtxPath[]): void {
     const t = now();
-    for (const [feed, tracker] of trackers) {
-      publish(feed, tracker.update(items.find((p) => p.name === feedPath(feed)), t));
+    const byName = new Map(items.map((p) => [p.name, p]));
+    for (const entry of profiles.values()) {
+      for (const slot of entry.feeds.values()) publish(slot, slot.tracker.update(byName.get(slot.path), t));
     }
   }
 
+  function markOffline(entry: ProfileIngest): void {
+    for (const slot of entry.feeds.values()) publish(slot, slot.tracker.reset());
+  }
+
   function markAllOffline(): void {
-    for (const [feed, tracker] of trackers) publish(feed, tracker.reset());
+    for (const entry of profiles.values()) markOffline(entry);
+  }
+
+  function feedState(profileId: string, feed: Feed): FeedState {
+    const state = findProfile(profileId)?.feeds.get(feed)?.tracker.current() ?? offlineFeedState(feed, profileId);
+    return { ...state };
+  }
+
+  async function kick(pathName: string, logFields: Record<string, unknown>, what: string): Promise<void> {
+    if (!proc) return;
+    try {
+      if (await api.kickPublisher(pathName)) log.info(logFields, what);
+    } catch (err) {
+      log.warn({ ...logFields, err: err instanceof Error ? err.message : String(err) }, 'Could not disconnect the current publisher');
+    }
   }
 
   // ---- polling ----------------------------------------------------------
@@ -229,6 +403,20 @@ export function createMediaServer(
     if (child.pid !== undefined) log.info({ pid: child.pid, rtmpPort: config.rtmpPort }, 'MediaMTX started');
   }
 
+  /** Register every profile and load its keys. The default profile must work; others are best effort. */
+  async function loadAllProfiles(): Promise<void> {
+    await ensureReader();
+    await ensureKeys(register(DEFAULT_PROFILE_ID, null));
+    for (const p of repos.profiles.list()) {
+      if (p.id === DEFAULT_PROFILE_ID || removed.has(p.id)) continue;
+      try {
+        await ensureKeys(register(p.id, p.slug));
+      } catch (err) {
+        log.error({ profileId: p.id, err: err instanceof Error ? err.message : String(err) }, 'Could not load the ingest keys of a profile');
+      }
+    }
+  }
+
   // ---- MediaServer ------------------------------------------------------
 
   const server: MediaServer = {
@@ -240,7 +428,7 @@ export function createMediaServer(
       restartAttempt = 0;
       pollAbort = new AbortController();
       try {
-        await ensureKeys();
+        await loadAllProfiles();
         auth ??= await startAuthServer({ authorize: (req) => server.authorize(req), log });
         await fs.mkdir(workDir, { recursive: true });
         await fs.writeFile(
@@ -283,45 +471,70 @@ export function createMediaServer(
       markAllOffline();
     },
 
-    feeds() {
-      return FEEDS.map((f) => server.feed(f));
+    feeds(profileId) {
+      return FEEDS.map((f) => feedState(profileId, f));
     },
 
-    feed(feed) {
-      const state = trackers.get(feed)?.current() ?? offlineFeedState(feed);
-      return { ...state };
+    feed(profileId, feed) {
+      return feedState(profileId, feed);
     },
 
-    readUrl(feed) {
-      if (!keys) throw new Error('Media server not started');
-      const pass = encodeURIComponent(keys.internalReader);
-      return `rtmp://127.0.0.1:${config.rtmpPort}/${feedPath(feed)}?user=${INTERNAL_READER_USER}&pass=${pass}`;
+    readUrl(profileId, feed) {
+      if (!readerPassword) throw new Error('Media server not started');
+      const entry = requireProfile(profileId);
+      const pass = encodeURIComponent(readerPassword);
+      return `rtmp://127.0.0.1:${config.rtmpPort}/${feedPath(feed, entry.slug)}?user=${INTERNAL_READER_USER}&pass=${pass}`;
     },
 
     authorize(req: MediaMtxAuthRequest) {
-      return authorizeMediaRequest(req, keys);
+      return authorizeMediaRequest(req, authState);
     },
 
-    async ingestKeys() {
-      const k = await ensureKeys();
+    async ingestKeys(profileId) {
+      const k = await ensureKeys(requireProfile(profileId));
       return { landscape: k.landscape, vertical: k.vertical };
     },
 
-    async rotateIngestKey(feed) {
-      const current = await ensureKeys();
+    async rotateIngestKey(profileId, feed) {
+      const entry = requireProfile(profileId);
+      const current = await ensureKeys(entry);
       const next = generateKey();
-      await secrets.set(feed, next);
-      keys = { ...current, [feed]: next };
-      log.info({ feed }, 'Ingest key rotated');
-      if (proc) {
-        // The old key stops working immediately; also drop a publisher that is still connected with it.
-        try {
-          if (await api.kickPublisher(feedPath(feed))) log.info({ feed }, 'Disconnected the publisher using the old key');
-        } catch (err) {
-          log.warn({ feed, err: err instanceof Error ? err.message : String(err) }, 'Could not disconnect the current publisher');
-        }
-      }
+      await repos.secrets.scoped(profileSecretScope(profileId, 'ingest')).set(feed, next);
+      entry.keys = { ...current, [feed]: next };
+      log.info({ profileId, feed }, 'Ingest key rotated');
+      // The old key stops working immediately; also drop a publisher that is still connected with it.
+      await kick(feedPath(feed, entry.slug), { profileId, feed }, 'Disconnected the publisher using the old key');
       return next;
+    },
+
+    async streamKeyField(profileId, feed) {
+      const entry = requireProfile(profileId);
+      const k = await ensureKeys(entry);
+      return `${streamKeyPath(feed, entry.slug)}?key=${k[feed]}`;
+    },
+
+    async profileAdded(profile) {
+      removed.delete(profile.id);
+      const entry = register(profile.id, profile.slug);
+      await ensureKeys(entry);
+      log.info({ profileId: profile.id, slug: entry.slug }, 'Profile ingest ready');
+    },
+
+    async profileRemoved(profileId) {
+      if (profileId === DEFAULT_PROFILE_ID) throw new DefaultProfileMediaError();
+      removed.add(profileId);
+      const entry = profiles.get(profileId);
+      const slug = entry?.slug ?? repos.profiles.get(profileId)?.slug ?? null;
+      // Stop accepting its paths first (MediaMTX asks us on every publish), then drop its keys.
+      profiles.delete(profileId);
+      if (slug && bySlug.get(slug) === profileId) bySlug.delete(slug);
+      repos.secrets.deleteScope(profileSecretScope(profileId, 'ingest'));
+      // A connected OBS was authorized earlier: disconnect it.
+      if (slug) {
+        for (const feed of FEEDS) await kick(feedPath(feed, slug), { profileId, feed }, 'Disconnected the publisher of a deleted profile');
+      }
+      if (entry) markOffline(entry);
+      log.info({ profileId }, 'Profile ingest removed');
     },
   };
 

@@ -26,11 +26,13 @@ export const DOCK_HTML = `<!doctype html>
     <li>Copy the dock URL (it ends with <code>/dock#token=ctd_pat_…</code>).</li>
     <li>In OBS: <b>Docks → Custom Browser Docks</b>, paste it as the URL.</li>
   </ol>
+  <p class="hint">Each profile has its own dock link. A token for every profile shows the default profile unless the link ends with <code>&amp;profile=&lt;profile id&gt;</code>.</p>
 </div>
 <main id="app" class="app" hidden>
   <section id="status-panel" class="status-panel" hidden>
     <header class="session">
       <span id="session-pill" class="pill">OFFLINE</span>
+      <span id="profile-chip" class="profile-chip" hidden><span id="profile-dot" class="profile-dot"></span><span id="profile-name" class="profile-name"></span></span>
       <span id="session-timer" class="timer"></span>
       <span id="test-badge" class="pill test" hidden>TEST MODE</span>
       <span class="spacer"></span>
@@ -75,7 +77,11 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .setup p { color: var(--amber); margin: 0 0 8px; }
 .setup ol { padding-left: 18px; margin: 0; }
 .setup li { margin-bottom: 4px; }
-.setup code { background: var(--panel-2); padding: 0 3px; border-radius: 3px; }
+.setup code { background: var(--panel-2); padding: 0 3px; border-radius: 3px; overflow-wrap: anywhere; }
+.setup .hint { color: var(--muted); margin-top: 8px; }
+.profile-chip { display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 0 1 auto; font-weight: 600; }
+.profile-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.profile-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .app { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .status-panel { flex: 0 0 auto; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--panel); max-height: 60vh; overflow: auto; }
 .app.status-only .status-panel { max-height: none; flex: 1; border-bottom: 0; }
@@ -146,8 +152,11 @@ export const DOCK_JS = `(function () {
 
   function $(id) { return document.getElementById(id); }
 
-  var token = readToken();
+  var fragment = readFragment();
+  var token = fragment.token;
   var scopes = [];
+  // The token's own profile, else #…&profile=<id>, else the default profile (set by start()).
+  var profile = null;
   var session = null;
   var feeds = {};
   var destinations = [];
@@ -158,12 +167,17 @@ export const DOCK_JS = `(function () {
   var toastTimer = null;
   var audio = null;
 
-  function readToken() {
+  function readFragment() {
     try {
-      return new URLSearchParams(location.hash.replace(/^#/, '')).get('token') || '';
+      var p = new URLSearchParams(location.hash.replace(/^#/, ''));
+      return { token: p.get('token') || '', profile: p.get('profile') || '' };
     } catch (e) {
-      return '';
+      return { token: '', profile: '' };
     }
+  }
+
+  function withProfile(path) {
+    return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'profile=' + encodeURIComponent(profile);
   }
 
   function el(tag, className, text) {
@@ -272,6 +286,16 @@ export const DOCK_JS = `(function () {
     title.textContent = session && session.title ? session.title : '';
     title.title = title.textContent;
     renderTimer();
+  }
+
+  function renderProfile(p) {
+    if (!p || p.id !== profile) return;
+    var chip = $('profile-chip');
+    var name = $('profile-name');
+    name.textContent = p.name || '';
+    chip.title = 'Profile: ' + (p.name || '');
+    $('profile-dot').style.backgroundColor = typeof p.color === 'string' && HEX_COLOR.test(p.color) ? p.color : '';
+    chip.hidden = !p.name;
   }
 
   function renderFeeds() {
@@ -432,11 +456,15 @@ export const DOCK_JS = `(function () {
   // ---- loading ----
 
   function loadStatus() {
-    return api('/status').then(applyStatus);
+    return api(withProfile('/status')).then(applyStatus);
+  }
+
+  function loadProfile() {
+    return api('/profiles/' + encodeURIComponent(profile)).then(renderProfile);
   }
 
   function loadChat() {
-    return api('/chat?limit=100').then(function (res) {
+    return api(withProfile('/chat?limit=100')).then(function (res) {
       $('chat').textContent = '';
       shownChat = new Map();
       (res.items || []).forEach(function (env) { addChat(env.data); });
@@ -461,6 +489,8 @@ export const DOCK_JS = `(function () {
       case 'destination.status': if (d && d.id) upsertDestination(d); break;
       case 'destination.down': if (d) flash(d.destinationId); break;
       case 'system.notice': if (d && d.message) toast(d.level, d.message); break;
+      case 'profile.status': renderProfile(d); break;
+      case 'profiles.changed': if (has('status:read')) loadProfile().catch(function () {}); break;
       case 'chat.message': addChat(d); break;
       case 'chat.message.deleted':
       case 'chat.user.cleared':
@@ -508,8 +538,9 @@ export const DOCK_JS = `(function () {
     var init = { headers: headers, cache: 'no-store' };
     if (controller) init.signal = controller.signal;
     feedWatchdog();
-    fetch(API + '/events', init).then(function (res) {
+    fetch(API + withProfile('/events'), init).then(function (res) {
       if (res.status === 401) { stopWatchdog(); showSetup('This token is invalid or was revoked. Create a new one.'); return null; }
+      if (res.status === 404) { stopWatchdog(); showSetup('This profile no longer exists. Copy the dock link again in Settings → API.'); return null; }
       if (!res.ok || !res.body) throw new HttpError(res.status, Number(res.headers.get('retry-after')) || 0);
       setConn('Connected');
       healthy = true;
@@ -552,6 +583,8 @@ export const DOCK_JS = `(function () {
     setConn('Connecting…');
     api('/').then(function (me) {
       scopes = me && me.token && Array.isArray(me.token.scopes) ? me.token.scopes : [];
+      var own = me && me.token && typeof me.token.profileId === 'string' ? me.token.profileId : '';
+      profile = own || fragment.profile || 'default';
       var showStatus = has('status:read');
       var showChat = has('chat:read');
       if (!showStatus && !showChat) { showSetup('This token has no scopes the dock can use.'); return null; }
@@ -561,13 +594,17 @@ export const DOCK_JS = `(function () {
       $('chat-panel').hidden = !showChat;
       if (!showChat) $('app').className = 'app status-only';
       // Take the cursor first, then load: the stream replays whatever happens in between.
-      return api('/events/poll').then(function (p) {
+      return api(withProfile('/events/poll')).then(function (p) {
         cursor = p && p.next ? p.next : null;
-        return refetch();
-      }).then(connect);
+        return showStatus ? loadProfile() : null;
+      }).then(refetch).then(connect);
     }).catch(function (err) {
       if (err instanceof HttpError && err.status === 401) {
         showSetup('This token is invalid or was revoked. Create a new one.');
+        return;
+      }
+      if (err instanceof HttpError && (err.status === 403 || err.status === 404) && profile) {
+        showSetup('This dock link names a profile this token can’t show (deleted, or another profile’s token). Copy the dock link again in Settings → API.');
         return;
       }
       setConn('Cannot reach CTD Multi-Stream; retrying…', true);

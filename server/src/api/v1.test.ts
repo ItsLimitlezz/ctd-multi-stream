@@ -1,7 +1,7 @@
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SESSION_COOKIE } from '../../../shared/api.js';
-import type { ChatMessage } from '../../../shared/types.js';
+import { DEFAULT_PROFILE_ID, type ChatMessage } from '../../../shared/types.js';
 import { PROBLEM_TYPE } from './http.js';
 import { createTestApi, dstate, session, type TestApi } from './test-helpers.js';
 import { RATE_LIMIT_PER_MINUTE } from './v1.js';
@@ -44,7 +44,7 @@ describe('auth', () => {
   it('GET / identifies the token', async () => {
     const res = await get('/api/v1/', both);
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ name: 'ctd-multi-stream', version: '9.9.9', apiVersion: 1, token: { name: 'test', scopes: ['chat:read', 'status:read'] } });
+    expect(res.json()).toEqual({ name: 'ctd-multi-stream', version: '9.9.9', apiVersion: 1, token: { name: 'test', scopes: ['chat:read', 'status:read'], profileId: null } });
     expect((await get('/api/v1', both)).statusCode).toBe(200);
   });
 
@@ -136,7 +136,24 @@ describe('GET /openapi.json', () => {
     expect(res.statusCode).toBe(200);
     const doc = res.json();
     expect(doc.openapi).toBe('3.1.0');
-    expect(Object.keys(doc.paths)).toEqual(['/', '/openapi.json', '/status', '/chat', '/events', '/events/poll']);
+    expect(Object.keys(doc.paths)).toEqual([
+      '/',
+      '/openapi.json',
+      '/status',
+      '/chat',
+      '/events',
+      '/events/poll',
+      '/profiles',
+      '/profiles/{id}',
+      '/profiles/{id}/ingest',
+      '/profiles/{id}/overlays',
+      '/apps',
+      '/apps/{appId}',
+      '/apps/{appId}/heartbeat',
+      '/messages',
+      '/pairing',
+      '/pairing/{pairingId}/token',
+    ]);
     expect(doc.components.securitySchemes.bearer).toMatchObject({ type: 'http', scheme: 'bearer' });
     // Every $ref resolves.
     const refs = JSON.stringify(doc).match(/#\/components\/schemas\/\w+/g) ?? [];
@@ -146,7 +163,7 @@ describe('GET /openapi.json', () => {
 
 describe('GET /status', () => {
   it('returns the documented status object', async () => {
-    const d = t.repos.destinations.create({ platform: 'twitch', accountId: null, name: 'Twitch', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    const d = t.repos.destinations.create({ profileId: DEFAULT_PROFILE_ID, platform: 'twitch', accountId: null, name: 'Twitch', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
     t.state.current = session({ destinations: [dstate(d.id, 'error', { message: 'Stream key rejected' })] });
     const res = await get('/api/v1/status', both);
     expect(res.statusCode).toBe(200);
@@ -300,15 +317,15 @@ describe('alert.*', () => {
     const doc = (await get('/api/v1/openapi.json')).json();
     expect(doc.components.schemas.Envelope.properties.type.enum).toEqual(expect.arrayContaining(['alert.superchat', 'alert.subscription', 'alert.tip']));
     expect(doc.components.schemas.Alert.properties.kind.enum).toHaveLength(9);
-    expect(doc.info.version).toMatch(/^1\.1 /);
+    expect(doc.info.version).toMatch(/^1\.2 /);
   });
 });
 
 describe('GET /status (test mode, viewers)', () => {
   it('reports session.testMode, per-destination viewers and the per-platform sum of known counts', async () => {
-    const a = t.repos.destinations.create({ platform: 'twitch', accountId: null, name: 'Twitch A', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
-    const b = t.repos.destinations.create({ platform: 'twitch', accountId: null, name: 'Twitch B', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
-    const k = t.repos.destinations.create({ platform: 'kick', accountId: null, name: 'Kick', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    const a = t.repos.destinations.create({ profileId: DEFAULT_PROFILE_ID, platform: 'twitch', accountId: null, name: 'Twitch A', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    const b = t.repos.destinations.create({ profileId: DEFAULT_PROFILE_ID, platform: 'twitch', accountId: null, name: 'Twitch B', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
+    const k = t.repos.destinations.create({ profileId: DEFAULT_PROFILE_ID, platform: 'kick', accountId: null, name: 'Kick', feed: 'landscape', enabled: true, options: {}, ingestUrl: null });
     t.state.current = session({
       testMode: true,
       destinations: [

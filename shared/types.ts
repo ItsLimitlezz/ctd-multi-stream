@@ -110,8 +110,43 @@ export interface PlatformInfo {
 export type AccountStatus = 'pending' | 'connected' | 'needs-login' | 'error';
 
 /** A connected platform account (OAuth tokens / browser session live in encrypted storage). */
+// ---------------------------------------------------------------------------
+// Profiles: independent streaming set-ups (accounts, destinations, title, OBS keys, session)
+// that can be live at the same time. Developer apps, users, HTTPS and API tokens are shared.
+// ---------------------------------------------------------------------------
+
+/** The profile every pre-profiles install was migrated into. Keeps the legacy OBS paths/keys. */
+export const DEFAULT_PROFILE_ID = 'default';
+
+export interface Profile {
+  id: string;
+  name: string;
+  /**
+   * URL-safe, unique, fixed at creation (renaming keeps it, so OBS settings never break).
+   * OBS stream key prefix for non-default profiles: `<slug>/landscape?key=…`.
+   */
+  slug: string;
+  /** Optional accent colour (#RRGGBB) to tell profiles apart in the UI. */
+  color: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A profile plus its live situation, for switchers and overviews. */
+export interface ProfileSummary extends Profile {
+  status: SessionStatus;
+  startedAt: string | null;
+  testMode: boolean;
+  /** Enabled destinations / currently live / currently down. */
+  destinations: number;
+  live: number;
+  down: number;
+}
+
 export interface Account {
   id: string;
+  /** Owning profile. Always set by the server (optional only for older test fixtures). */
+  profileId?: string;
   platform: PlatformId;
   label: string;
   status: AccountStatus;
@@ -125,6 +160,8 @@ export interface Account {
 /** One output: a platform account + which feed goes there. */
 export interface Destination {
   id: string;
+  /** Owning profile. Always set by the server (optional only for older test fixtures). */
+  profileId?: string;
   platform: PlatformId;
   accountId: string | null;
   name: string;
@@ -145,6 +182,8 @@ export interface Destination {
 // ---------------------------------------------------------------------------
 
 export interface FeedState {
+  /** Profile whose OBS sends this feed. Always set by the server. */
+  profileId?: string;
   feed: Feed;
   online: boolean;
   since: string | null;
@@ -175,6 +214,8 @@ export interface PushStats {
 
 export interface DestinationState {
   destinationId: string;
+  /** Always set by the server. */
+  profileId?: string;
   phase: DestinationPhase;
   message: string | null;
   stats: PushStats | null;
@@ -192,6 +233,8 @@ export interface DestinationState {
 export type SessionStatus = 'offline' | 'starting' | 'live' | 'stopping';
 
 export interface SessionState {
+  /** The profile this session belongs to. Always set by the server. */
+  profileId?: string;
   status: SessionStatus;
   sessionId: string | null;
   startedAt: string | null;
@@ -223,6 +266,8 @@ export interface ChatMessage {
   id: string;
   platform: PlatformId;
   destinationId: string;
+  /** Profile of the destination. Always set by the ChatHub. */
+  profileId?: string;
   author: {
     name: string;
     color?: string;
@@ -277,10 +322,14 @@ export interface ChatFragment {
 }
 
 /** Moderation that removes chat (so overlays can remove it too). */
-export type ChatModeration =
+export type ChatModeration = (
   | { kind: 'message-deleted'; platform: PlatformId; destinationId: string; ts: string; messageId: string | null; platformMessageId: string }
   | { kind: 'user-cleared'; platform: PlatformId; destinationId: string; ts: string; userId: string | null; userName: string | null }
-  | { kind: 'cleared'; platform: PlatformId; destinationId: string; ts: string };
+  | { kind: 'cleared'; platform: PlatformId; destinationId: string; ts: string }
+) & {
+  /** Profile of the destination. Always set by the ChatHub. */
+  profileId?: string;
+};
 
 // ---------------------------------------------------------------------------
 // Users, audit, TLS
@@ -309,14 +358,83 @@ export interface AuditEntry {
 // External API tokens (other apps, e.g. CTD Overlay, reading chat/status)
 // ---------------------------------------------------------------------------
 
-/** chat:read = chat history + live chat events; status:read = stream/destination status. */
-export type ApiScope = 'chat:read' | 'status:read';
-export const API_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read'];
+/**
+ * chat:read   = chat history + live chat/moderation/alert events
+ * status:read = stream/destination status and the profiles list
+ * ingest:read = a profile's OBS server URL + stream keys (lets the OBS plugin configure OBS)
+ * apps:read   = connected apps, their resources (e.g. overlays per profile) and app messages
+ * apps:write  = register this app + its resources, send messages to other apps
+ */
+export type ApiScope = 'chat:read' | 'status:read' | 'ingest:read' | 'apps:read' | 'apps:write';
+export const API_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read', 'ingest:read', 'apps:read', 'apps:write'];
+
+// ---------------------------------------------------------------------------
+// Connected apps (the hub): other apps register themselves and what they offer, so apps can
+// find each other through CTD Multi-Stream (e.g. the OBS plugin lists CTD Overlay's overlays
+// assigned to a profile and adds them as browser sources).
+// ---------------------------------------------------------------------------
+
+/** Something an app offers. Overlays are the first resource type; others are free-form. */
+export interface AppResource {
+  /** 'overlay' (a browser-source URL) or an app-defined type ([a-z0-9-]). */
+  type: string;
+  /** Unique within the app. */
+  id: string;
+  name: string;
+  /** Profile this resource is assigned to, or null = not assigned / every profile. */
+  profileId: string | null;
+  /** For overlays: the URL to load in an OBS browser source. */
+  url?: string;
+  width?: number;
+  height?: number;
+  /** Free-form extra data (≤ 4 KB JSON). */
+  meta?: Record<string, unknown>;
+}
+
+export interface ConnectedApp {
+  /** Chosen by the app ([a-z0-9-], ≤ 40), e.g. 'ctd-overlay', 'ctd-obs-plugin-studio-pc'. */
+  id: string;
+  name: string;
+  /** 'ctd-overlay' | 'ctd-obs-plugin' | 'custom' | … (free-form, [a-z0-9-]). */
+  kind: string;
+  version: string | null;
+  /** Where the app itself can be reached, if it has a UI/API (shown as a link). */
+  baseUrl: string | null;
+  capabilities: string[];
+  resources: AppResource[];
+  /** Token that registered the app (only that token may update/remove it). */
+  tokenId: string;
+  /** Profile of that token (null = every profile). */
+  profileId: string | null;
+  registeredAt: string;
+  lastSeenAt: string;
+  /** Seen within the last 90 s (apps re-register or heartbeat every ≤ 60 s). */
+  online: boolean;
+}
+
+/** A pending "connect this app" request (pairing), approved by an admin in Settings → API. */
+export interface PairingRequest {
+  id: string;
+  appName: string;
+  kind: string;
+  /** Short code the app shows; the admin checks it matches before approving. */
+  code: string;
+  requestedScopes: ApiScope[];
+  requestedProfileId: string | null;
+  ip: string | null;
+  createdAt: string;
+  expiresAt: string;
+}
 
 export interface ApiTokenInfo {
   id: string;
   name: string;
   scopes: ApiScope[];
+  /**
+   * Profile the token is limited to, or null = every profile (tokens created before profiles
+   * existed are null and keep their old behaviour: they read the default profile unless asked).
+   */
+  profileId: string | null;
   /** First characters of the secret, to recognise it (e.g. "ctd_pat_3fK9"). */
   prefix: string;
   createdAt: string;

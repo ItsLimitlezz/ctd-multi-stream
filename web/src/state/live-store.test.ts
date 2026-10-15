@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WsServerMessage } from '@shared/api';
-import type { Account, ChatMessage, DestinationState, FeedState, SessionState } from '@shared/types';
+import type { Account, ChatMessage, ConnectedApp, DestinationState, FeedState, PairingRequest, SessionState } from '@shared/types';
 import type { ChatModeration } from '@shared/types';
 import {
   applyModeration,
@@ -118,14 +118,14 @@ describe('mergeChat', () => {
 
 describe('reduceLive', () => {
   it('hello sets session and chat; only reconnects bump versions', () => {
-    const hello: WsServerMessage = { type: 'hello', session: session(), chat: [chat('a')] };
+    const hello: WsServerMessage = { type: 'hello', session: session(), chat: [chat('a')], profiles: [] };
     const s1 = reduceLive(initialLiveState, hello);
     expect(s1.session?.title).toBe('Hello');
     expect(s1.chat).toHaveLength(1);
     expect(s1.connections).toBe(1);
     expect(s1.destinationsVersion).toBe(0);
     expect(s1.accountsVersion).toBe(0);
-    const s2 = reduceLive(s1, { type: 'hello', session: session({ title: 'Again' }), chat: [chat('a'), chat('b')] });
+    const s2 = reduceLive(s1, { type: 'hello', session: session({ title: 'Again' }), chat: [chat('a'), chat('b')], profiles: [] });
     expect(s2.connections).toBe(2);
     expect(s2.destinationsVersion).toBe(1);
     expect(s2.accountsVersion).toBe(1);
@@ -163,6 +163,128 @@ describe('reduceLive', () => {
     const s = reduceLive(initialLiveState, { type: 'chat', message: chat('x') });
     expect(s.chat.map((m) => m.id)).toEqual(['x']);
     expect(reduceLive(s, { type: 'chat', message: chat('x') })).toBe(s);
+  });
+});
+
+describe('profiles in the live store', () => {
+  const pairing = (id: string): PairingRequest => ({
+    id,
+    appName: 'CTD OBS plugin',
+    kind: 'ctd-obs-plugin',
+    code: 'KQ7-2MX',
+    requestedScopes: ['status:read'],
+    requestedProfileId: null,
+    ip: null,
+    createdAt: '2026-10-15T18:00:00Z',
+    expiresAt: '2026-10-15T18:10:00Z',
+  });
+  const app = (id: string): ConnectedApp => ({
+    id,
+    name: id,
+    kind: 'ctd-overlay',
+    version: null,
+    baseUrl: null,
+    capabilities: [],
+    resources: [],
+    tokenId: 't',
+    profileId: null,
+    registeredAt: '2026-10-15T18:00:00Z',
+    lastSeenAt: '2026-10-15T18:00:00Z',
+    online: true,
+  });
+  const forProfile = (profileId: string): LiveState => ({ ...initialLiveState, profileId, session: session({ profileId }) });
+
+  it('parses profiles, pairings and apps messages; hello may omit profiles (older server)', () => {
+    expect(parseServerMessage(JSON.stringify({ type: 'profiles', profiles: [] }))?.type).toBe('profiles');
+    expect(parseServerMessage(JSON.stringify({ type: 'profiles' }))).toBeNull();
+    expect(parseServerMessage(JSON.stringify({ type: 'pairings', pairings: [pairing('p')] }))?.type).toBe('pairings');
+    expect(parseServerMessage(JSON.stringify({ type: 'pairings', pairings: 'x' }))).toBeNull();
+    expect(parseServerMessage(JSON.stringify({ type: 'apps', apps: [app('a')] }))?.type).toBe('apps');
+    expect(parseServerMessage(JSON.stringify({ type: 'apps' }))).toBeNull();
+    expect(parseServerMessage(JSON.stringify({ type: 'hello', session: session(), chat: [] }))?.type).toBe('hello');
+    expect(parseServerMessage(JSON.stringify({ type: 'hello', session: session(), chat: [], profiles: {} }))).toBeNull();
+  });
+
+  it('ignores session, feed, destination and chat of another profile', () => {
+    const s = forProfile('club');
+    expect(reduceLive(s, { type: 'session', session: session({ profileId: 'main', status: 'live' }) })).toBe(s);
+    expect(reduceLive(s, { type: 'feed', feed: { ...feed('landscape', true), profileId: 'main' } })).toBe(s);
+    expect(reduceLive(s, { type: 'destination', state: { ...destState('d1', 'live'), profileId: 'main' } })).toBe(s);
+    expect(reduceLive(s, { type: 'chat', message: { ...chat('m'), profileId: 'main' } })).toBe(s);
+    expect(
+      reduceLive(s, { type: 'chat-moderation', moderation: { kind: 'cleared', platform: 'twitch', destinationId: 'd1', ts: 'x', profileId: 'main' } }),
+    ).toBe(s);
+    // Its own (or unstamped, from an older server) are applied.
+    expect(reduceLive(s, { type: 'feed', feed: { ...feed('landscape', true), profileId: 'club' } }).session?.feeds[0]?.online).toBe(true);
+    expect(reduceLive(s, { type: 'chat', message: chat('n') }).chat).toHaveLength(1);
+    expect(reduceLive(s, { type: 'session', session: session({ profileId: 'club', status: 'live' }) }).session?.status).toBe('live');
+  });
+
+  it('keeps pushed pairings and apps lists', () => {
+    let s = reduceLive(initialLiveState, { type: 'pairings', pairings: [pairing('p1')] });
+    expect(s.pairings?.map((p) => p.id)).toEqual(['p1']);
+    expect(s.pairingsSeq).toBe(1);
+    s = reduceLive(s, { type: 'apps', apps: [app('a1')] });
+    expect(s.apps?.map((a) => a.id)).toEqual(['a1']);
+    expect(s.appsSeq).toBe(1);
+    expect(reduceLive(s, { type: 'profiles', profiles: [] })).toBe(s);
+  });
+
+  it('switching profile starts clean but keeps pairings and apps (shared by every profile)', () => {
+    const store = new LiveStore();
+    store.startProfile('main');
+    store.dispatch({ type: 'hello', session: session({ profileId: 'main' }), chat: [chat('a')], profiles: [] });
+    store.dispatch({ type: 'pairings', pairings: [pairing('p1')] });
+    store.dispatch({ type: 'apps', apps: [app('a1')] });
+    store.setConnected(true);
+    store.startProfile('club');
+    const s = store.getState();
+    expect(s.profileId).toBe('club');
+    expect(s.session).toBeNull();
+    expect(s.chat).toEqual([]);
+    expect(s.connected).toBe(false);
+    expect(s.connections).toBe(0);
+    expect(s.pairings?.map((p) => p.id)).toEqual(['p1']);
+    expect(s.apps?.map((a) => a.id)).toEqual(['a1']);
+    store.reset();
+    expect(store.getState().pairings).toBeNull();
+  });
+
+  it('drops REST answers meant for the profile shown before a switch', () => {
+    const store = new LiveStore();
+    store.startProfile('club');
+    store.seedSession(session({ profileId: 'main', title: 'Old' }), 'main');
+    expect(store.getState().session).toBeNull();
+    store.seedSession(session({ profileId: 'club', title: 'Club' }), 'club');
+    expect(store.getState().session?.title).toBe('Club');
+    store.applySession(session({ profileId: 'main', status: 'live' }), 'main');
+    store.patchSession({ title: 'Wrong' }, 'main');
+    expect(store.getState().session).toMatchObject({ title: 'Club', status: 'offline' });
+    store.patchSession({ title: 'Right' }, 'club');
+    expect(store.getState().session?.title).toBe('Right');
+    store.mergeChat([chat('x')], 'main');
+    expect(store.getState().chat).toEqual([]);
+    store.mergeChat([{ ...chat('y'), profileId: 'main' }, { ...chat('z'), profileId: 'club' }], 'club');
+    expect(store.getState().chat.map((m) => m.id)).toEqual(['z']);
+    // Callers without a profile (older code paths) still work.
+    store.applySession(session({ title: 'Plain' }));
+    expect(store.getState().session?.title).toBe('Plain');
+  });
+
+  it('a REST list never replaces a newer pushed one', async () => {
+    const store = new LiveStore();
+    let resolve: (v: PairingRequest[]) => void = () => undefined;
+    const pending = store.loadPairings(() => new Promise((r) => (resolve = r)));
+    store.dispatch({ type: 'pairings', pairings: [pairing('pushed')] });
+    resolve([pairing('stale')]);
+    await pending;
+    expect(store.getState().pairings?.map((p) => p.id)).toEqual(['pushed']);
+    await store.loadPairings(async () => [pairing('fresh')]);
+    expect(store.getState().pairings?.map((p) => p.id)).toEqual(['fresh']);
+    await store.loadApps(async () => [app('a2')]);
+    expect(store.getState().apps?.map((a) => a.id)).toEqual(['a2']);
+    await expect(store.loadApps(() => Promise.reject(new Error('boom')))).rejects.toThrow('boom');
+    expect(store.getState().apps?.map((a) => a.id)).toEqual(['a2']);
   });
 });
 
@@ -247,7 +369,7 @@ describe('chat moderation', () => {
     s = moderate(s, { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', ts: TS, messageId: 'twitch:a', platformMessageId: 'a' });
     // A deletion for a message not received yet is remembered too.
     s = moderate(s, { kind: 'message-deleted', platform: 'twitch', destinationId: 'd1', ts: TS, messageId: null, platformMessageId: 'z' });
-    s = reduceLive(s, { type: 'hello', session: session(), chat: [line('twitch:a'), line('twitch:b'), line('twitch:z'), line('twitch:new')] });
+    s = reduceLive(s, { type: 'hello', session: session(), chat: [line('twitch:a'), line('twitch:b'), line('twitch:z'), line('twitch:new')], profiles: [] });
     expect(ids(s)).toEqual(['twitch:b', 'twitch:new']);
     s = reduceLive(s, { type: 'chat', message: line('twitch:a') });
     expect(ids(s)).toEqual(['twitch:b', 'twitch:new']);
@@ -263,7 +385,7 @@ describe('chat moderation', () => {
     const BASE = Date.UTC(2026, 9, 11, 10, 0, 0);
     const at = (id: string, destinationId: string, sec: number): ChatMessage =>
       line(id, { destinationId, ts: new Date(BASE + sec * 1000).toISOString() });
-    const hello = (s: LiveState, chat: ChatMessage[]) => reduceLive(s, { type: 'hello', session: session(), chat });
+    const hello = (s: LiveState, chat: ChatMessage[]) => reduceLive(s, { type: 'hello', session: session(), chat, profiles: [] });
 
     it('drops messages missing from a snapshot that is the whole buffer (moderated while away)', () => {
       let s = hello(initialLiveState, [at('A', 'd1', 1), at('B', 'd1', 2), at('C', 'd1', 3)]);

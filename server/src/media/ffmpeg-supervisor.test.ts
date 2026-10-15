@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Destination } from '../../../shared/types.js';
 import type { AppConfig } from '../config.js';
 import { EventBus, type PushEvent } from '../events.js';
 import type { PushPlan } from '../platforms/types.js';
@@ -16,10 +17,22 @@ import { captureLogger, fakeSpawn, flush, type FakeChild } from './test-helpers.
 const SECRET = 'sk_live_SECRET123456';
 const READER_PASS = 'readerpass123456';
 const config = { ffmpegBin: '/opt/tools/ffmpeg' } as AppConfig;
+const SLUGS: Record<string, string | null> = { default: null, club: 'dprtmnt' };
 const media = {
-  readUrl: (feed: string) => `rtmp://127.0.0.1:1935/live/${feed}?user=internal&pass=${READER_PASS}`,
+  readUrl: (profileId: string, feed: string) => {
+    const slug = SLUGS[profileId];
+    if (slug === undefined) throw new Error('Profile not found');
+    return `rtmp://127.0.0.1:1935/live/${slug ? `${slug}/` : ''}${feed}?user=internal&pass=${READER_PASS}`;
+  },
 } as unknown as MediaServer;
 const plan: PushPlan = { url: `rtmp://live.example.com/app/${SECRET}`, mode: 'copy', feeds: ['landscape'] };
+/** Push ids are destination ids; d1 belongs to the default profile, club1 to another one. */
+const destinations: Record<string, Partial<Destination>> = {
+  d1: { id: 'd1', profileId: 'default' },
+  club1: { id: 'club1', profileId: 'club' },
+  legacy: { id: 'legacy' }, // an old fixture without profileId
+};
+const repos = { destinations: { get: (id: string) => (destinations[id] as Destination | undefined) ?? null } };
 
 function setup(deps: PushSupervisorDeps = {}) {
   const bus = new EventBus();
@@ -28,7 +41,7 @@ function setup(deps: PushSupervisorDeps = {}) {
   const sp = fakeSpawn();
   const cap = captureLogger();
   const sup = createPushSupervisor(
-    { config, bus, log: cap.log, media },
+    { config, bus, log: cap.log, media, repos },
     { spawn: sp.spawn, now: () => Date.now(), probeCapabilities: async () => ({ multitrack: true }), ...deps },
   );
   const child = (): FakeChild => {
@@ -113,7 +126,7 @@ describe('PushSupervisor', () => {
     expect(sp.calls).toHaveLength(1);
     const call = sp.calls[0]!;
     expect(call.command).toBe('/opt/tools/ffmpeg');
-    expect(call.args).toContain(media.readUrl('landscape'));
+    expect(call.args).toContain(media.readUrl('default', 'landscape'));
     expect(call.args.at(-1)).toBe(plan.url);
     expect(events).toEqual([{ id: 'd1', status: 'starting', message: null, stats: null, attempt: 0 }]);
     expect(sup.isRunning('d1')).toBe(true);
@@ -303,8 +316,42 @@ describe('PushSupervisor', () => {
     const { sup, sp } = setup();
     sup.start('d1', { ...plan, mode: 'multitrack', feeds: ['landscape', 'vertical'] });
     await flush();
-    expect(sp.calls[0]?.args).toEqual(expect.arrayContaining([media.readUrl('landscape'), media.readUrl('vertical'), '1:v:0']));
+    expect(sp.calls[0]?.args).toEqual(
+      expect.arrayContaining([media.readUrl('default', 'landscape'), media.readUrl('default', 'vertical'), '1:v:0']),
+    );
     await sup.stop('d1');
+  });
+
+  it("reads the feed of the destination's own profile, so two profiles stream at once", async () => {
+    const { sup, sp } = setup();
+    sup.start('d1', plan);
+    sup.start('club1', { ...plan, url: 'rtmp://club.example.com/app/clubkey123', feeds: ['vertical'] });
+    await flush();
+    expect(sp.calls).toHaveLength(2);
+    const byTarget = new Map(sp.calls.map((c) => [c.args.at(-1), c.args]));
+    expect(byTarget.get(plan.url)).toContain('rtmp://127.0.0.1:1935/live/landscape?user=internal&pass=readerpass123456');
+    expect(byTarget.get('rtmp://club.example.com/app/clubkey123')).toContain(
+      'rtmp://127.0.0.1:1935/live/dprtmnt/vertical?user=internal&pass=readerpass123456',
+    );
+    expect(sup.isRunning('d1') && sup.isRunning('club1')).toBe(true);
+    await sup.stopAll();
+  });
+
+  it('treats a destination without a profile as the default profile', async () => {
+    const { sup, sp } = setup();
+    sup.start('legacy', plan);
+    await flush();
+    expect(sp.calls[0]?.args).toContain(media.readUrl('default', 'landscape'));
+    await sup.stop('legacy');
+  });
+
+  it('fails (never guessing a profile) for an unknown destination', async () => {
+    const { sup, sp, last } = setup();
+    sup.start('ghost', plan);
+    await flush();
+    expect(sp.calls).toHaveLength(0);
+    expect(last()).toMatchObject({ id: 'ghost', status: 'failed', message: expect.stringMatching(/Unknown destination/) });
+    expect(sup.isRunning('ghost')).toBe(false);
   });
 
   it('kills and retries a stalled FFmpeg', async () => {

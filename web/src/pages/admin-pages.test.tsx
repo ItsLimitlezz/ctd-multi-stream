@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ApiAccessInfo, ConnectStart, SettingsResponse } from '@shared/api';
-import type { Account, ApiTokenInfo, Destination, PlatformInfo, TlsStatus } from '@shared/types';
+import type { Account, ApiTokenInfo, ConnectedApp, Destination, PairingRequest, PlatformInfo, ProfileSummary, TlsStatus } from '@shared/types';
 import { AuthProvider } from '../state/auth';
 import { LiveProvider } from '../state/live';
 import { AccountForm } from './accounts/AddAccountModal';
@@ -10,7 +10,16 @@ import { ConnectModal, Instructions, type ConnectState } from './accounts/Connec
 import { DestinationForm } from './destinations/DestinationForm';
 import { PlatformPicker } from './destinations/PlatformPicker';
 import { AboutTab } from './settings/AboutTab';
-import { AccessCard, DockCard, NewTokenForm, TokenSecret, TokensCard } from './settings/ApiTab';
+import {
+  AccessCard,
+  ApprovePairingForm,
+  ConnectedAppsCard,
+  DockCard,
+  NewTokenForm,
+  PairingsCard,
+  TokenSecret,
+  TokensCard,
+} from './settings/ApiTab';
 import { GeneralTab } from './settings/GeneralTab';
 import { HttpsTab } from './settings/HttpsTab';
 
@@ -280,6 +289,7 @@ describe('Settings → API (static render)', () => {
     id: 't1',
     name: 'CTD Overlay',
     scopes: ['status:read', 'chat:read'],
+    profileId: null,
     prefix: 'ctd_pat_3fK9',
     createdAt: '2026-10-01T10:00:00Z',
     createdBy: 'admin',
@@ -293,6 +303,32 @@ describe('Settings → API (static render)', () => {
   };
   const secret = 'ctd_pat_3fK9wQ1vSECRETSECRETSECRETSECRETSECRETxx';
   const asyncNoop = async () => undefined;
+  const profile = (id: string, name: string, color: string | null): ProfileSummary => ({
+    id,
+    name,
+    slug: name.toLowerCase(),
+    color,
+    createdAt: '2026-10-01T10:00:00Z',
+    updatedAt: '2026-10-01T10:00:00Z',
+    status: 'offline',
+    startedAt: null,
+    testMode: false,
+    destinations: 0,
+    live: 0,
+    down: 0,
+  });
+  const profiles = [profile('default', 'Miami or Bust', '#3B82F6'), profile('club', 'DPRTMNT', '#E11D48')];
+  const pairing: PairingRequest = {
+    id: 'pr1',
+    appName: 'CTD OBS plugin (Studio PC)',
+    kind: 'ctd-obs-plugin',
+    code: 'KQ7-2MX',
+    requestedScopes: ['status:read', 'chat:read', 'ingest:read'],
+    requestedProfileId: null,
+    ip: '192.168.1.30',
+    createdAt: '2026-10-14T11:59:00Z',
+    expiresAt: '2026-10-14T12:10:00Z',
+  };
 
   it('lists tokens with scopes, prefix, dates and a two-step revoke', () => {
     const out = html(<TokensCard tokens={[token]} now={NOW} onNew={noop} onRevoke={asyncNoop} />);
@@ -307,14 +343,158 @@ describe('Settings → API (static render)', () => {
     expect(html(<TokensCard tokens={[]} now={NOW} onNew={noop} onRevoke={asyncNoop} />)).toContain('No tokens yet');
   });
 
-  it('new token form: name and a checkbox per scope', () => {
+  it('new token form: name, profile and a checkbox per scope (read-only basics checked)', () => {
     const out = html(<NewTokenForm onCreated={noop} onCancel={noop} />);
-    expect(out).toContain('type="checkbox"');
-    expect(out.match(/type="checkbox"/g)).toHaveLength(2);
-    expect(out).toContain('chat:read');
-    expect(out).toContain('status:read');
+    expect(out.match(/type="checkbox"/g)).toHaveLength(5);
+    // Only chat:read and status:read start checked; stream keys and the hub are opt-in.
+    expect(out.match(/type="checkbox" checked=""/g)).toHaveLength(2);
+    for (const s of ['chat:read', 'status:read', 'ingest:read', 'apps:read', 'apps:write']) expect(out).toContain(s);
     expect(out).toContain('maxLength="60"');
     expect(out).toContain('Create token');
+    expect(out).toContain('Profile');
+    expect(out).toContain('Every profile');
+  });
+
+  it('new token form: the profile on screen is preselected, with every profile as an option', () => {
+    const out = html(<NewTokenForm profiles={profiles} defaultProfileId="club" onCreated={noop} onCancel={noop} />);
+    expect(out).toMatch(/<option value="club" selected="">DPRTMNT<\/option>/);
+    expect(out).toContain('<option value="default">Miami or Bust</option>');
+    expect(out).toContain('<option value="*">Every profile</option>');
+    // A profile that no longer exists falls back to every profile.
+    const gone = html(<NewTokenForm profiles={profiles} defaultProfileId="gone" onCreated={noop} onCancel={noop} />);
+    expect(gone).toMatch(/<option value="\*" selected="">Every profile<\/option>/);
+  });
+
+  it('token list shows which profile each token is limited to', () => {
+    const tokens: ApiTokenInfo[] = [
+      { ...token, id: 't1', name: 'Old token', profileId: null },
+      { ...token, id: 't2', name: 'Club overlay', profileId: 'club' },
+      { ...token, id: 't3', name: 'Orphan', profileId: 'gone' },
+    ];
+    const out = html(<TokensCard tokens={tokens} profiles={profiles} now={NOW} onNew={noop} onRevoke={asyncNoop} />);
+    expect(out).toContain('Every profile');
+    expect(out).toContain('Profile: DPRTMNT');
+    expect(out).toContain('Profile: Deleted profile');
+    expect(out).toContain('background:#E11D48');
+  });
+
+  it('pending pairing: app, code, requested access, and the approve form for a single request', () => {
+    const out = html(
+      <PairingsCard pending={[pairing]} loaded profiles={profiles} now={NOW} onApprove={asyncNoop} onDeny={asyncNoop} />,
+    );
+    expect(out).toContain('An app wants to connect');
+    expect(out).toContain('CTD OBS plugin (Studio PC)');
+    expect(out).toContain('ctd-obs-plugin');
+    expect(out).toContain('KQ7-2MX');
+    expect(out).toContain('Asks for every profile');
+    expect(out).toContain('From 192.168.1.30');
+    expect(out).toContain('expires in 10 min');
+    // One request: opened for review with what the app asked for.
+    expect(out).toContain('Approve');
+    expect(out).toContain('Deny');
+    expect(out).toContain('value="CTD OBS plugin (Studio PC)"');
+    expect(out).toMatch(/<option value="\*" selected="">Every profile<\/option>/);
+    expect(out.match(/type="checkbox" checked=""/g)).toHaveLength(3);
+    expect(out.match(/requested/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(out).toContain('read the OBS stream keys of every profile');
+  });
+
+  it('several pairings: a compact row each; nothing at all when none are pending', () => {
+    const second = { ...pairing, id: 'pr2', appName: 'CTD Overlay', kind: 'ctd-overlay', code: 'ZZ4-9PQ', requestedScopes: ['chat:read' as const] };
+    const out = html(<PairingsCard pending={[pairing, second]} loaded profiles={profiles} now={NOW} onApprove={asyncNoop} onDeny={asyncNoop} />);
+    expect(out).toContain('2 apps want to connect');
+    expect(out).toContain('ZZ4-9PQ');
+    expect(out.match(/>Review</g)).toHaveLength(2);
+    expect(out).not.toContain('Approve');
+    // The app's approve link opens that request.
+    const focused = html(
+      <PairingsCard pending={[pairing, second]} loaded profiles={profiles} now={NOW} focusId="pr2" onApprove={asyncNoop} onDeny={asyncNoop} />,
+    );
+    expect(focused.match(/>Review</g)).toHaveLength(1);
+    expect(focused).toContain('Approve');
+    expect(html(<PairingsCard pending={[]} loaded profiles={profiles} now={NOW} onApprove={asyncNoop} onDeny={asyncNoop} />)).toBe('');
+    const handled = html(<PairingsCard pending={[]} loaded profiles={profiles} now={NOW} focusId="old" onApprove={asyncNoop} onDeny={asyncNoop} />);
+    expect(handled).toContain('expired or was already handled');
+  });
+
+  it('approve form: a profile-limited request starts on that profile', () => {
+    const out = html(
+      <ApprovePairingForm
+        pairing={{ ...pairing, requestedProfileId: 'club', requestedScopes: ['chat:read'] }}
+        profiles={profiles}
+        onApprove={asyncNoop}
+        onDeny={asyncNoop}
+        onCancel={noop}
+      />,
+    );
+    expect(out).toMatch(/<option value="club" selected="">DPRTMNT<\/option>/);
+    expect(out.match(/type="checkbox" checked=""/g)).toHaveLength(1);
+    expect(out).not.toContain('OBS stream keys of');
+    expect(out).toContain('only ever sees this profile');
+  });
+
+  it('connected apps: presence, profile, resources grouped by profile, remove', () => {
+    const apps: ConnectedApp[] = [
+      {
+        id: 'ctd-overlay',
+        name: 'CTD Overlay',
+        kind: 'ctd-overlay',
+        version: '1.4.0',
+        baseUrl: 'http://192.168.1.50:30200',
+        capabilities: ['overlays', 'overlay.create'],
+        resources: [
+          { type: 'overlay', id: 'ovl_h', name: 'DPRTMNT takeover — landscape', profileId: 'club', url: 'http://h/o/1' },
+          { type: 'overlay', id: 'ovl_v', name: 'DPRTMNT takeover — vertical', profileId: 'club', url: 'http://h/o/2' },
+          { type: 'overlay', id: 'ovl_m', name: 'Chat box', profileId: 'default', url: 'http://h/o/3' },
+        ],
+        tokenId: 't1',
+        profileId: null,
+        registeredAt: '2026-10-14T10:00:00Z',
+        lastSeenAt: '2026-10-14T11:59:30Z',
+        online: true,
+      },
+      {
+        id: 'ctd-obs-plugin-studio',
+        name: 'CTD OBS plugin',
+        kind: 'ctd-obs-plugin',
+        version: null,
+        baseUrl: 'javascript:alert(1)',
+        capabilities: [],
+        resources: [],
+        tokenId: 't2',
+        profileId: 'club',
+        registeredAt: '2026-10-14T10:00:00Z',
+        lastSeenAt: '2026-10-14T11:50:00Z',
+        online: false,
+      },
+    ];
+    const out = html(<ConnectedAppsCard apps={apps} profiles={profiles} now={NOW} onRemove={asyncNoop} />);
+    expect(out).toContain('CTD Overlay');
+    expect(out).toContain('v1.4.0');
+    expect(out).toContain('Online');
+    expect(out).toContain('Offline · last seen 10 min ago');
+    expect(out).toContain('href="http://192.168.1.50:30200/"');
+    expect(out).not.toContain('javascript:');
+    // Default profile first, then DPRTMNT.
+    expect(out.indexOf('Miami or Bust:')).toBeLessThan(out.indexOf('DPRTMNT:'));
+    expect(out).toContain('2 overlays');
+    expect(out).toContain('DPRTMNT takeover — landscape, DPRTMNT takeover — vertical');
+    expect(out.indexOf('CTD Overlay')).toBeLessThan(out.indexOf('CTD OBS plugin')); // online first
+    expect(out.match(/>Remove</g)).toHaveLength(2);
+    expect(html(<ConnectedAppsCard apps={[]} profiles={profiles} now={NOW} onRemove={asyncNoop} />)).toContain('No apps connected yet');
+    expect(html(<ConnectedAppsCard apps={null} profiles={profiles} now={NOW} error="Nope" onRemove={asyncNoop} />)).toContain('Nope');
+  });
+
+  it('OBS dock: one link per profile when there are several', () => {
+    const out = html(
+      <DockCard access={access} profiles={profiles} profileValue="club" onProfileChange={noop} created={null} busy={false} onCreate={noop} />,
+    );
+    expect(out).toMatch(/<option value="club" selected="">DPRTMNT<\/option>/);
+    expect(out).not.toContain('Every profile');
+    expect(out).toContain('OBS dock — DPRTMNT');
+    expect(out).toContain('DPRTMNT only');
+    const single = html(<DockCard access={access} profiles={[profiles[0]!]} profileValue="default" onProfileChange={noop} created={null} busy={false} onCreate={noop} />);
+    expect(single).not.toContain('<select');
   });
 
   it('shows a new secret once, masked, with a clear warning', () => {

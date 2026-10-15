@@ -39,10 +39,36 @@ export interface AppEvents {
   'chat-moderation': [ChatModeration];
   /** Account changed (status, label...) (emitted by account routes / drivers via DriverContext). */
   account: [Account];
-  /** Destination list or config changed (emitted by destination routes). */
-  'destinations-changed': [];
-  /** User-facing notice (any component). */
-  notice: [{ level: 'info' | 'warn' | 'error'; message: string }];
+  /** Destination list or config changed (emitted by destination routes). Profile when known. */
+  'destinations-changed': [] | [{ profileId: string }];
+  /** User-facing notice (any component). `profileId` when it concerns one profile. */
+  notice: [{ level: 'info' | 'warn' | 'error'; message: string; profileId?: string }];
+  /** Profiles created/renamed/deleted (emitted by profile routes). */
+  'profiles-changed': [];
+  /** Connected apps registered/updated/removed/went online or offline (emitted by AppRegistry). */
+  'apps-changed': [];
+  /** Pending pairings changed (emitted by PairingService). */
+  'pairings-changed': [];
+  /** A message from one connected app to another (or to all), relayed by the hub. */
+  'app-message': [AppMessage];
+}
+
+/** App-to-app message relayed through the hub (external API `POST /api/v1/messages`). */
+export interface AppMessage {
+  id: string;
+  /** Sender app id (registered by the sending token) or null if the sender isn't registered. */
+  from: string | null;
+  fromTokenId: string;
+  /** Recipient app id, or null = every app that can read it. */
+  to: string | null;
+  /** App-defined, e.g. 'overlay.create' ([a-z0-9_.-], ≤ 64). */
+  type: string;
+  /** Profile it concerns (null = not profile-specific). Tokens limited to another profile don't get it. */
+  profileId: string | null;
+  /** Id of the message this replies to. */
+  replyTo: string | null;
+  data: Record<string, unknown>;
+  ts: string;
 }
 
 /** Typed wrapper around EventEmitter. */

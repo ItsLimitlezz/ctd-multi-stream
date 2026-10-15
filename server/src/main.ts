@@ -6,7 +6,9 @@ import path from 'node:path';
 import pino, { type Logger } from 'pino';
 import type { AppSettings } from '../../shared/api.js';
 import { eventHubFor } from './api/event-hub.js';
+import { createAppRegistry } from './api/hub.js';
 import { createLanHandler } from './api/lan.js';
+import { createPairingService } from './api/pairing.js';
 import { createChatHub } from './chat/chat-hub.js';
 import { createBrowserManager } from './browser/browser-manager.js';
 import { loadConfig, type AppConfig } from './config.js';
@@ -17,7 +19,7 @@ import { buildApp } from './http/app.js';
 import { createPushSupervisor } from './media/ffmpeg-supervisor.js';
 import { createMediaServer } from './media/mediamtx.js';
 import { errorMessage, redactText } from './orchestrator/async-utils.js';
-import { createOrchestrator } from './orchestrator/orchestrator.js';
+import { createOrchestratorRegistry } from './orchestrator/registry.js';
 import { createPlatformRegistry } from './platforms/registry.js';
 import type { DriverContext } from './platforms/types.js';
 import { createSecretBox, loadMasterKey } from './security/secretbox.js';
@@ -127,11 +129,18 @@ export async function createServices(config: AppConfig): Promise<AppServices> {
   const repos = createRepos(db, secretBox);
 
   const tls = createTlsManager({ config, log: log.child({ mod: 'tls' }), settings: repos.settings });
-  const media = createMediaServer({ config, bus, log: log.child({ mod: 'mediamtx' }), secrets: repos.secrets.scoped('ingest') });
-  const pushes = createPushSupervisor({ config, bus, log: log.child({ mod: 'ffmpeg' }), media });
+  // Every profile's OBS ingest (the default profile keeps live/landscape|vertical and the 'ingest' keys).
+  const media = createMediaServer({ config, bus, log: log.child({ mod: 'mediamtx' }), repos });
+  // Push ids are destination ids; the supervisor reads the destination's profile to pick its feeds.
+  const pushes = createPushSupervisor({ config, bus, log: log.child({ mod: 'ffmpeg' }), media, repos });
   const browser = createBrowserManager({ config, log: log.child({ mod: 'browser' }), secrets: repos.secrets });
-  const chat = createChatHub({ bus, log: log.child({ mod: 'chat' }), secrets: repos.secrets.scoped('chat') });
+  // Per-profile chat + overlay tokens (the default profile keeps its 'chat' scope token, so the
+  // existing OBS overlay URL keeps working).
+  const chat = createChatHub({ bus, log: log.child({ mod: 'chat' }), secrets: repos.secrets, profiles: repos.profiles });
   const platforms = createPlatformRegistry();
+  // The hub: connected apps (presence + resources) and "connect this app" pairing requests.
+  const apps = createAppRegistry({ repos, bus, log: log.child({ mod: 'apps' }) });
+  const pairings = createPairingService({ repos, bus, log: log.child({ mod: 'pairing' }), config });
 
   const appSettings = (): AppSettings => ({ ...DEFAULT_APP_SETTINGS, ...repos.settings.get<Partial<AppSettings>>('app', {}) });
 
@@ -155,10 +164,12 @@ export async function createServices(config: AppConfig): Promise<AppServices> {
     browser,
     chat,
     platforms,
+    apps,
+    pairings,
     tls,
     appSettings,
     publicBaseUrl,
-  } as Omit<AppServices, 'orchestrator' | 'driverContext'> as AppServices;
+  } as Omit<AppServices, 'orchestrators' | 'driverContext'> as AppServices;
 
   services.driverContext = async ({ platform, accountId, destinationId, signal }): Promise<DriverContext> => {
     const app = await repos.secrets.scoped(`app:${platform}`).getJson<Record<string, string>>('values');
@@ -178,8 +189,14 @@ export async function createServices(config: AppConfig): Promise<AppServices> {
     };
   };
 
-  services.orchestrator = createOrchestrator(services);
+  // One go-live engine per profile; profiles run independently and can be live at the same time.
+  services.orchestrators = createOrchestratorRegistry(services);
   return services;
+}
+
+/** Stop the hub's background timers (presence checks, pairing expiry), when the implementation has them. */
+function closeHub(services: AppServices): void {
+  for (const part of [services.apps, services.pairings]) (part as Partial<{ close(): void }>).close?.();
 }
 
 export async function main(): Promise<void> {
@@ -192,7 +209,7 @@ export async function main(): Promise<void> {
   const apiEvents = eventHubFor(services);
 
   await services.media.start();
-  await services.orchestrator.init();
+  await services.orchestrators.init();
 
   const tlsMaterial = await services.tls.init();
   const app = await buildApp(services, tlsMaterial);
@@ -225,7 +242,8 @@ export async function main(): Promise<void> {
       // Save browser sessions up front (storage state only, contexts stay open for end()), so a
       // slow end() cannot cost the login. browser.shutdown() saves again and closes afterwards.
       const earlySave = saveBrowserSessions(services);
-      await services.orchestrator.shutdown();
+      // Every profile's session ends in parallel, within the same budget.
+      await services.orchestrators.shutdown();
       await earlySave;
       await services.pushes.stopAll();
       await services.browser.shutdown();
@@ -233,6 +251,7 @@ export async function main(): Promise<void> {
       await services.tls.stop();
       await app.close();
       apiEvents.close();
+      closeHub(services);
     } catch (err) {
       log.error({ err }, 'error during shutdown');
     }

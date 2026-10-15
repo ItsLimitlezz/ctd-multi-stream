@@ -6,10 +6,16 @@
 // session queue but is chained per destination, so a restarted runner never races the old one.
 // Test mode ('session.testMode', see test-mode.ts) is fixed for a session: it can only change
 // while offline, and each runner skips (or prepares privately) its destination accordingly.
+//
+// Profiles: one orchestrator per profile (see registry.ts), all running independently and at the
+// same time. Each only sees its own profile's OBS feeds (FeedState.profileId) and destinations,
+// keeps its settings under profileSettingKey() (the default profile keeps the pre-profiles keys),
+// and stamps its profileId on every SessionState, DestinationState, chat attach and notice.
 
 import { createHash, randomUUID } from 'node:crypto';
 import type { Logger } from 'pino';
 import {
+  DEFAULT_PROFILE_ID,
   FEEDS,
   type Destination,
   type DestinationPhase,
@@ -17,11 +23,15 @@ import {
   type Feed,
   type FeedState,
   type FieldSpec,
+  type PlatformInfo,
+  type Profile,
+  type ProfileSummary,
   type SessionState,
   type SessionStatus,
   type TitleResult,
 } from '../../../shared/types.js';
-import type { AppServices, Orchestrator } from '../services.js';
+import { isDown } from '../api/status.js';
+import { profileSettingKey, type AppServices, type Orchestrator } from '../services.js';
 import { awaitBounded, errorMessage, SerialQueue, stableStringify, textLength } from './async-utils.js';
 import {
   DEFAULT_TIMINGS,
@@ -39,7 +49,19 @@ const DEFAULT_GRACE_SEC = 15;
 
 export interface OrchestratorOptions {
   timings?: Partial<OrchestratorTimings>;
+  /** Profile this orchestrator runs (default: the default profile). */
+  profileId?: string;
 }
+
+/** Settings keys of one profile's session (the default profile keeps 'session.*'). */
+export const SESSION_SETTINGS = {
+  title: 'session.title',
+  autoGoLive: 'session.autoGoLive',
+  testMode: TEST_MODE_SETTING,
+} as const;
+
+/** Separator between the profile name and a notice, e.g. "DPRTMNT · Instagram ended the live…". */
+export const PROFILE_NOTICE_SEPARATOR = ' · ';
 
 /** Error carrying an HTTP status, mapped by the app error handler. */
 function httpError(statusCode: number, message: string): Error & { statusCode: number } {
@@ -91,16 +113,23 @@ function stopNotice(reason: string, graceSec: number): string {
       return `Session ended: no feed from OBS for ${graceSec} s`;
     case 'shutdown':
       return 'Session stopped: server shutting down';
+    case 'profile-deleted':
+      return 'Session stopped: profile deleted';
     default:
       return `Session stopped (${reason})`;
   }
 }
 
-export function createOrchestrator(services: AppServices, opts: OrchestratorOptions = {}): Orchestrator {
-  return new SessionOrchestrator(services, { ...DEFAULT_TIMINGS, ...opts.timings });
+export function createOrchestrator(services: AppServices, opts: OrchestratorOptions = {}): SessionOrchestrator {
+  return new SessionOrchestrator(services, { ...DEFAULT_TIMINGS, ...opts.timings }, opts.profileId ?? DEFAULT_PROFILE_ID);
 }
 
-class SessionOrchestrator implements Orchestrator {
+/** Profile of a feed/destination/... event; events without one belong to the default profile. */
+export function profileOf(item: { profileId?: string | null } | null | undefined): string {
+  return item?.profileId || DEFAULT_PROFILE_ID;
+}
+
+export class SessionOrchestrator implements Orchestrator {
   private readonly lock = new SerialQueue();
   private readonly lifetime = new AbortController();
   private readonly host: RunnerHost;
@@ -132,13 +161,15 @@ class SessionOrchestrator implements Orchestrator {
   constructor(
     private readonly services: AppServices,
     private readonly timings: OrchestratorTimings,
+    readonly profileId: string = DEFAULT_PROFILE_ID,
   ) {
-    // services.orchestrator is assigned after construction: only read services lazily.
-    this.log = services.log.child({ mod: 'orchestrator' });
+    // services.orchestrators is assigned after construction: only read services lazily.
+    this.log = services.log.child({ mod: 'orchestrator', profileId });
     this.host = {
       services,
       timings,
       log: this.log,
+      profileId,
       title: () => this.title,
       testMode: () => this.testMode,
       feedOnline: (feed) => this.feeds.get(feed)?.online === true,
@@ -146,7 +177,7 @@ class SessionOrchestrator implements Orchestrator {
       endTimeoutMs: () => (this.shuttingDown ? timings.shutdownEndTimeoutMs : timings.endTimeoutMs),
       state: (id) => this.states.get(id) ?? null,
       update: (id, patch) => this.update(id, patch),
-      notice: (level, message) => this.services.bus.emit('notice', { level, message }),
+      notice: (level, message) => this.notice(level, message),
     };
   }
 
@@ -155,7 +186,7 @@ class SessionOrchestrator implements Orchestrator {
   // ---------------------------------------------------------------------------
 
   async init(): Promise<void> {
-    if (this.unsubscribers.length > 0) return;
+    if (this.unsubscribers.length > 0 || this.shuttingDown) return;
     this.ensureLoaded();
     for (const f of this.mediaFeeds()) this.feeds.set(f.feed, f);
     const { bus } = this.services;
@@ -167,6 +198,38 @@ class SessionOrchestrator implements Orchestrator {
   }
 
   state(): SessionState {
+    return this.snapshot().state;
+  }
+
+  /**
+   * The profile with its live situation (ProfileSummary): enabled destinations, how many are
+   * live, and how many are down by the external API's definition (session running, enabled, not
+   * skipped by test mode, phase error/retrying/recovering/waiting-for-feed).
+   */
+  summary(profile: Profile): ProfileSummary {
+    const { state, list } = this.snapshot();
+    const phases = new Map(state.destinations.map((d) => [d.destinationId, d.phase]));
+    let destinations = 0;
+    let live = 0;
+    let down = 0;
+    for (const d of list) {
+      const phase = phases.get(d.id) ?? offlinePhase(d);
+      if (d.enabled) destinations += 1;
+      if (phase === 'live') live += 1;
+      if (isDown(state, d, phase, this.platformInfo(d))) down += 1;
+    }
+    return {
+      ...profile,
+      status: state.status,
+      startedAt: state.startedAt,
+      testMode: state.testMode === true,
+      destinations,
+      live,
+      down,
+    };
+  }
+
+  private snapshot(): { state: SessionState; list: Destination[] } {
     this.ensureLoaded();
     const list = this.reconcile();
     const listed = new Set(list.map((d) => d.id));
@@ -176,16 +239,26 @@ class SessionOrchestrator implements Orchestrator {
       if (st) destinations.push(st);
     }
     for (const [id, st] of this.states) if (!listed.has(id)) destinations.push(st);
-    return {
+    const state: SessionState = {
+      profileId: this.profileId,
       status: this.status,
       sessionId: this.sessionId,
       startedAt: this.startedAt,
       title: this.title,
       autoGoLive: this.autoGoLive,
       testMode: this.testMode,
-      feeds: FEEDS.map((f) => this.feeds.get(f) ?? offlineFeed(f)),
+      feeds: FEEDS.map((f) => this.feeds.get(f) ?? offlineFeed(f, this.profileId)),
       destinations,
     };
+    return { state, list };
+  }
+
+  private platformInfo(dest: Destination): PlatformInfo | null {
+    try {
+      return this.services.platforms.get(dest.platform).info;
+    } catch {
+      return null;
+    }
   }
 
   start(trigger: 'auto' | 'manual'): Promise<void> {
@@ -234,7 +307,7 @@ class SessionOrchestrator implements Orchestrator {
       this.startedAt = null;
       for (const dest of this.reconcile()) this.update(dest.id, { ...RESET, phase: offlinePhase(dest) });
       this.emitSession();
-      this.services.bus.emit('notice', { level: 'info', message: stopNotice(reason, this.graceSec()) });
+      this.notice('info', stopNotice(reason, this.graceSec()));
 
       // OBS (re)started streaming during the teardown: that offline->online transition was ignored
       // while 'stopping', and no other one will come, so honour auto go-live now. This applies to a
@@ -252,7 +325,7 @@ class SessionOrchestrator implements Orchestrator {
     if (textLength(next) > MAX_TITLE_LENGTH) {
       throw httpError(400, `Title must be at most ${MAX_TITLE_LENGTH} characters`);
     }
-    this.services.repos.settings.set('session.title', next);
+    this.services.repos.settings.set(this.settingKey('title'), next);
     this.title = next;
     this.emitSession();
 
@@ -271,7 +344,7 @@ class SessionOrchestrator implements Orchestrator {
 
   setAutoGoLive(value: boolean): void {
     this.ensureLoaded();
-    this.services.repos.settings.set('session.autoGoLive', value);
+    this.services.repos.settings.set(this.settingKey('autoGoLive'), value);
     this.autoGoLive = value;
     this.emitSession();
     if (value) this.maybeAutoStart();
@@ -286,7 +359,7 @@ class SessionOrchestrator implements Orchestrator {
     this.ensureLoaded();
     if (this.status !== 'offline') throw testModeLockedError();
     const next = value === true;
-    this.services.repos.settings.set(TEST_MODE_SETTING, next);
+    this.services.repos.settings.set(this.settingKey('testMode'), next);
     if (next === this.testMode) return;
     this.testMode = next;
     this.log.info({ testMode: next }, 'test mode changed');
@@ -305,7 +378,7 @@ class SessionOrchestrator implements Orchestrator {
       this.removed.delete(id);
 
       const isNew = !this.states.has(id);
-      if (isNew) this.states.set(id, blankState(id, offlinePhase(dest)));
+      if (isNew) this.states.set(id, blankState(id, offlinePhase(dest), this.profileId));
 
       if (this.status !== 'live') {
         this.update(id, { phase: offlinePhase(dest) });
@@ -364,7 +437,10 @@ class SessionOrchestrator implements Orchestrator {
   // Feeds
   // ---------------------------------------------------------------------------
 
-  private onFeed(feed: FeedState): void {
+  private onFeed(event: FeedState): void {
+    // Another profile's OBS: none of our business (auto go-live is per profile).
+    if (profileOf(event) !== this.profileId) return;
+    const feed: FeedState = { ...event, profileId: this.profileId };
     const prev = this.feeds.get(feed.feed);
     this.feeds.set(feed.feed, feed);
     if (prev?.online === feed.online) return; // stats-only update; the UI gets 'feed' events directly
@@ -409,9 +485,13 @@ class SessionOrchestrator implements Orchestrator {
     return false;
   }
 
+  /** This profile's feeds as the media server reports them right now. */
   private mediaFeeds(): FeedState[] {
     try {
-      return this.services.media.feeds();
+      return this.services.media
+        .feeds(this.profileId)
+        .filter((f) => !f.profileId || f.profileId === this.profileId)
+        .map((f) => ({ ...f, profileId: this.profileId }));
     } catch (err) {
       this.log.warn({ error: errorMessage(err) }, 'reading feed state failed');
       return [];
@@ -429,7 +509,7 @@ class SessionOrchestrator implements Orchestrator {
 
   private launchRunner(dest: Destination): void {
     const after = this.cleanups.get(dest.id) ?? Promise.resolve();
-    if (!this.states.has(dest.id)) this.states.set(dest.id, blankState(dest.id, 'idle'));
+    if (!this.states.has(dest.id)) this.states.set(dest.id, blankState(dest.id, 'idle', this.profileId));
     const runner = new DestinationRunner(this.host, dest, this.fingerprint(dest), after);
     this.runners.set(dest.id, runner);
     runner.start();
@@ -545,16 +625,22 @@ class SessionOrchestrator implements Orchestrator {
     if (this.loaded) return;
     this.loaded = true;
     const { settings } = this.services.repos;
-    const title = settings.get<unknown>('session.title', '');
+    const title = settings.get<unknown>(this.settingKey('title'), '');
     this.title = typeof title === 'string' ? title : '';
-    this.autoGoLive = settings.get<unknown>('session.autoGoLive', true) !== false;
-    this.testMode = settings.get<unknown>(TEST_MODE_SETTING, false) === true;
+    this.autoGoLive = settings.get<unknown>(this.settingKey('autoGoLive'), true) !== false;
+    this.testMode = settings.get<unknown>(this.settingKey('testMode'), false) === true;
     for (const f of this.mediaFeeds()) this.feeds.set(f.feed, f);
   }
 
+  /** Settings key of this profile's session setting (default profile: the pre-profiles 'session.*'). */
+  private settingKey(name: keyof typeof SESSION_SETTINGS): string {
+    return profileSettingKey(this.profileId, SESSION_SETTINGS[name]);
+  }
+
+  /** This profile's destinations (ids are global; another profile's destination is never ours). */
   private listDestinations(): Destination[] {
     try {
-      return this.services.repos.destinations.list();
+      return this.services.repos.destinations.list(this.profileId).filter((d) => profileOf(d) === this.profileId);
     } catch (err) {
       this.log.error({ error: errorMessage(err) }, 'listing destinations failed');
       return [];
@@ -563,10 +649,31 @@ class SessionOrchestrator implements Orchestrator {
 
   private getDestination(id: string): Destination | null {
     try {
-      return this.services.repos.destinations.get(id);
+      const dest = this.services.repos.destinations.get(id);
+      return dest && profileOf(dest) === this.profileId ? dest : null;
     } catch (err) {
       this.log.error({ destinationId: id, error: errorMessage(err) }, 'reading destination failed');
       return null;
+    }
+  }
+
+  /**
+   * User-facing notice for this profile. With several profiles the message names the profile
+   * ("DPRTMNT · Instagram ended the live…"), since profiles can be live at the same time.
+   */
+  private notice(level: 'info' | 'warn' | 'error', message: string): void {
+    this.services.bus.emit('notice', { level, message: this.withProfileName(message), profileId: this.profileId });
+  }
+
+  private withProfileName(message: string): string {
+    try {
+      const profiles = this.services.repos.profiles;
+      if (!profiles || profiles.list().length < 2) return message;
+      const name = profiles.get(this.profileId)?.name;
+      return name ? `${name}${PROFILE_NOTICE_SEPARATOR}${message}` : message;
+    } catch (err) {
+      this.log.debug({ error: errorMessage(err) }, 'reading the profile name failed');
+      return message;
     }
   }
 
@@ -583,7 +690,7 @@ class SessionOrchestrator implements Orchestrator {
     for (const d of list) {
       const st = this.states.get(d.id);
       if (!st) {
-        this.states.set(d.id, blankState(d.id, resting ? offlinePhase(d) : d.enabled ? 'idle' : 'disabled'));
+        this.states.set(d.id, blankState(d.id, resting ? offlinePhase(d) : d.enabled ? 'idle' : 'disabled', this.profileId));
       } else if (resting && !this.runners.has(d.id) && (st.phase === 'idle' || st.phase === 'disabled')) {
         const phase = offlinePhase(d);
         if (st.phase !== phase) this.states.set(d.id, { ...st, phase, since: nowIso() });
@@ -599,7 +706,7 @@ class SessionOrchestrator implements Orchestrator {
   private update(id: string, patch: StatePatch): void {
     const cur = this.states.get(id);
     if (!cur) return;
-    const next: DestinationState = { ...cur, ...patch };
+    const next: DestinationState = { ...cur, ...patch, profileId: this.profileId };
     if (patch.phase && patch.phase !== cur.phase) next.since = nowIso();
     if (
       next.phase === cur.phase &&
@@ -622,9 +729,10 @@ class SessionOrchestrator implements Orchestrator {
   }
 }
 
-function blankState(id: string, phase: DestinationPhase): DestinationState {
+function blankState(id: string, phase: DestinationPhase, profileId: string): DestinationState {
   return {
     destinationId: id,
+    profileId,
     phase,
     message: null,
     stats: null,
@@ -641,6 +749,6 @@ function skipped(destinationId: string, reason: string): TitleResult {
   return { destinationId, ok: true, skipped: true, error: reason };
 }
 
-function offlineFeed(feed: Feed): FeedState {
-  return { feed, online: false, since: null, video: null, audio: null, bitrateKbps: null };
+function offlineFeed(feed: Feed, profileId: string): FeedState {
+  return { profileId, feed, online: false, since: null, video: null, audio: null, bitrateKbps: null };
 }

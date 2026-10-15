@@ -25,6 +25,7 @@ import {
 import { BroadcastIcon, ExternalIcon, EyeIcon, FlaskIcon, LandscapeIcon, RetryIcon, ShieldIcon, VerticalIcon } from '../components/icons';
 import { PhaseBadge } from '../components/PhaseBadge';
 import { PlatformBadge, platformName } from '../components/PlatformBadge';
+import { ProfileTag } from '../components/ProfileBadge';
 import { Spinner } from '../components/Spinner';
 import { StatusDot } from '../components/StatusDot';
 import { TextInput } from '../components/TextInput';
@@ -36,6 +37,7 @@ import { useAuth } from '../state/auth';
 import { errorMessage } from '../state/errors';
 import { useApi, useDestinations, useNow } from '../state/hooks';
 import { useAccountsVersion, useChat, useLiveActions, useSession, type LiveActions } from '../state/live';
+import { useProfileId } from '../state/profile';
 import {
   destinationViewers,
   formatViewers,
@@ -66,18 +68,20 @@ export default function DashboardPage() {
   const session = useSession();
   const { seedSession } = useLiveActions();
   const { isAdmin } = useAuth();
+  const profileId = useProfileId();
   const dests = useDestinations();
 
-  // REST fallback while the WebSocket hasn't delivered the first snapshot (mount only;
-  // seedSession ignores it if the socket got there first).
+  // REST fallback while the WebSocket hasn't delivered the first snapshot (on mount and after a
+  // profile switch, when seedSession changes; useSession hides the previous profile's session, and
+  // seedSession ignores the answer if the socket got there first).
   const hasSession = session !== null;
   useEffect(() => {
-    if (!hasSession) api.session().then(seedSession, () => undefined);
+    if (!hasSession) api.session(profileId).then(seedSession, () => undefined);
   }, [seedSession]);
 
   const testMode = session?.testMode === true;
   const running = session !== null && session.status !== 'offline';
-  const info = useTestModeInfo(testMode, isAdmin);
+  const info = useTestModeInfo(testMode, isAdmin, profileId);
   const states = session?.destinations;
   const plan = useMemo(() => {
     if (!testMode || !dests.data) return null;
@@ -88,6 +92,9 @@ export default function DashboardPage() {
   return (
     <div className="dash">
       <div className="dash-main">
+        <div className="dash-profile">
+          <ProfileTag />
+        </div>
         {testMode && <TestModeBanner plan={plan} running={running} loadError={dests.data ? null : dests.error} />}
         <StatusCard session={session} />
         <FeedsRow feeds={session?.feeds ?? null} />
@@ -114,10 +121,13 @@ export default function DashboardPage() {
  * Platform info (test-mode support) and, for admins, accounts (Facebook Page vs profile), loaded only
  * while test mode is on.
  */
-function useTestModeInfo(enabled: boolean, isAdmin: boolean): Pick<TestModeContext, 'platforms' | 'accounts'> {
+function useTestModeInfo(enabled: boolean, isAdmin: boolean, profileId: string): Pick<TestModeContext, 'platforms' | 'accounts'> {
   const accountsVersion = useAccountsVersion();
   const platforms = useApi(() => (enabled ? api.platforms() : Promise.resolve(null)), [enabled]);
-  const accounts = useApi(() => (enabled && isAdmin ? api.accounts() : Promise.resolve(null)), [enabled, isAdmin, accountsVersion]);
+  const accounts = useApi(
+    () => (enabled && isAdmin ? api.accounts(profileId) : Promise.resolve(null)),
+    [enabled, isAdmin, accountsVersion, profileId],
+  );
   const byId = useMemo(() => {
     if (!accounts.data) return undefined;
     const map: Record<string, Account> = {};
@@ -232,6 +242,7 @@ export function applySessionResult(
 
 export function StatusCard({ session }: { session: SessionState | null }) {
   const actions = useLiveActions();
+  const profileId = useProfileId();
   const [busy, setBusy] = useState<SessionAction | null>(null);
   const live = session?.status === 'live';
   const now = useNow(live ? 1000 : null);
@@ -290,7 +301,7 @@ export function StatusCard({ session }: { session: SessionState | null }) {
               checked={testMode}
               busy={busy === 'test'}
               disabled={running}
-              onChange={(v) => void run('test', () => api.setTestMode(v))}
+              onChange={(v) => void run('test', () => api.setTestMode(v, profileId))}
               aria-label="Test mode"
               aria-describedby={`${testId}-help`}
               label={
@@ -309,7 +320,7 @@ export function StatusCard({ session }: { session: SessionState | null }) {
               size="lg"
               icon={<BroadcastIcon width={18} height={18} />}
               loading={busy === 'start'}
-              onClick={() => void run('start', api.startSession)}
+              onClick={() => void run('start', () => api.startSession(profileId))}
             >
               Go live
             </Button>
@@ -320,7 +331,7 @@ export function StatusCard({ session }: { session: SessionState | null }) {
               confirmLabel="Tap again to end"
               disabled={session.status === 'stopping'}
               loading={busy === 'stop'}
-              onConfirm={() => run('stop', api.stopSession)}
+              onConfirm={() => run('stop', () => api.stopSession(profileId))}
             >
               {session.status === 'starting' ? 'Cancel' : 'End stream'}
             </ConfirmButton>
@@ -332,7 +343,7 @@ export function StatusCard({ session }: { session: SessionState | null }) {
           <Toggle
             checked={session.autoGoLive}
             busy={busy === 'auto'}
-            onChange={(v) => void run('auto', () => api.setAutoGoLive(v))}
+            onChange={(v) => void run('auto', () => api.setAutoGoLive(v, profileId))}
           />
         </Field>
         <AlertToggle help="Sound + notification in this browser when a platform ends the live" />
@@ -411,6 +422,7 @@ function FeedCard({ feed, state, loading }: { feed: Feed; state: FeedState | nul
 
 function TitleCard({ session, destinations }: { session: SessionState | null; destinations: Destination[] }) {
   const { patchSession } = useLiveActions();
+  const profileId = useProfileId();
   const serverTitle = session?.title ?? '';
   const [draft, setDraft] = useState(serverTitle);
   const [dirty, setDirty] = useState(false);
@@ -428,7 +440,7 @@ function TitleCard({ session, destinations }: { session: SessionState | null; de
     if (!trimmed || saving) return;
     setSaving(true);
     try {
-      const res = await api.setTitle(trimmed);
+      const res = await api.setTitle(trimmed, profileId);
       patchSession({ title: res.title });
       setDraft(res.title);
       setDirty(false);

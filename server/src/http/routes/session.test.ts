@@ -4,12 +4,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TitleResponse } from '../../../../shared/api.js';
 import type { SessionState, TitleResult, User } from '../../../../shared/types.js';
 import { EventBus } from '../../events.js';
+import { unknownProfileError } from '../../orchestrator/registry.js';
 import { testModeLockedError } from '../../orchestrator/test-mode.js';
 import type { AppServices, Orchestrator } from '../../services.js';
 import sessionRoutes from './session.js';
 
-function fakeOrchestrator() {
+function fakeOrchestrator(profileId = 'default') {
   const state: SessionState = {
+    profileId,
     status: 'offline',
     sessionId: null,
     startedAt: null,
@@ -20,6 +22,7 @@ function fakeOrchestrator() {
   };
   const results: TitleResult[] = [{ destinationId: 'd1', ok: true }];
   const orch = {
+    profileId,
     init: vi.fn(async () => {}),
     state: vi.fn(() => ({ ...state })),
     start: vi.fn(async () => {
@@ -60,12 +63,26 @@ let app: FastifyInstance | null = null;
 
 async function build() {
   const orchestrator = fakeOrchestrator();
+  const club = fakeOrchestrator('club');
+  const byId = new Map<string, Orchestrator>([
+    ['default', orchestrator],
+    ['club', club],
+  ]);
   const audits: { action: string; detail?: string | null; userId: string | null }[] = [];
   const services = {
     log: pino({ level: 'silent' }),
     bus: new EventBus(),
-    orchestrator,
-    repos: { audit: { log: (e: (typeof audits)[number]) => void audits.push(e) } },
+    orchestrators: {
+      get: (id: string) => {
+        const o = byId.get(id);
+        if (!o) throw unknownProfileError();
+        return o;
+      },
+    },
+    repos: {
+      audit: { log: (e: (typeof audits)[number]) => void audits.push(e) },
+      profiles: { get: (id: string) => (id === 'club' ? { id, name: 'DPRTMNT' } : null) },
+    },
   } as unknown as AppServices;
 
   const instance = Fastify();
@@ -78,7 +95,7 @@ async function build() {
   await instance.register(sessionRoutes, { services });
   await instance.ready();
   app = instance;
-  return { app: instance, orchestrator, audits };
+  return { app: instance, orchestrator, club, audits };
 }
 
 afterEach(async () => {
@@ -184,6 +201,65 @@ describe('session routes', () => {
     expect(res.statusCode).toBe(409);
     expect(res.json()).toEqual({ error: expect.stringContaining('End the stream first'), code: 'session_live' });
     expect(audits).toHaveLength(before);
+  });
+
+  it('every route acts on the ?profile= orchestrator (default profile when omitted)', async () => {
+    const { app, orchestrator, club, audits } = await build();
+    const started = await app.inject({ method: 'POST', url: '/api/session/start?profile=club', headers: auth });
+    expect(started.statusCode).toBe(200);
+    expect(started.json<SessionState>()).toMatchObject({ profileId: 'club', status: 'live' });
+    expect(club.start).toHaveBeenCalledWith('manual');
+    expect(orchestrator.start).not.toHaveBeenCalled();
+    expect(audits.at(-1)).toMatchObject({ action: 'session.start', detail: 'profile: DPRTMNT' });
+
+    const got = await app.inject({ method: 'GET', url: '/api/session?profile=club', headers: auth });
+    expect(got.json<SessionState>()).toMatchObject({ profileId: 'club', status: 'live' });
+    const main = await app.inject({ method: 'GET', url: '/api/session', headers: auth });
+    expect(main.json<SessionState>()).toMatchObject({ profileId: 'default', status: 'offline' });
+    const explicit = await app.inject({ method: 'GET', url: '/api/session?profile=default', headers: auth });
+    expect(explicit.json<SessionState>().profileId).toBe('default');
+
+    const title = await app.inject({ method: 'PUT', url: '/api/session/title?profile=club', headers: auth, payload: { title: 'Club night' } });
+    expect(title.json<TitleResponse>().title).toBe('Club night');
+    expect(club.setTitle).toHaveBeenCalledWith('Club night');
+    expect(orchestrator.setTitle).not.toHaveBeenCalled();
+    expect(audits.at(-1)).toMatchObject({ action: 'session.title', detail: 'profile: DPRTMNT; Club night' });
+
+    await app.inject({ method: 'PUT', url: '/api/session/auto?profile=club', headers: auth, payload: { autoGoLive: false } });
+    expect(club.setAutoGoLive).toHaveBeenCalledWith(false);
+    // Club is live: test mode is locked there, but the default profile is offline and can switch.
+    const locked = await app.inject({ method: 'PUT', url: '/api/session/test-mode?profile=club', headers: auth, payload: { testMode: true } });
+    expect(locked.statusCode).toBe(409);
+    const ok = await app.inject({ method: 'PUT', url: '/api/session/test-mode', headers: auth, payload: { testMode: true } });
+    expect(ok.statusCode).toBe(200);
+    expect(orchestrator.setTestMode).toHaveBeenCalledWith(true);
+
+    const stopped = await app.inject({ method: 'POST', url: '/api/session/stop?profile=club', headers: auth });
+    expect(stopped.json<SessionState>().status).toBe('offline');
+    expect(club.stop).toHaveBeenCalledWith('manual');
+    expect(orchestrator.stop).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 unknown_profile / 400 invalid for a bad ?profile= on every route', async () => {
+    const { app, orchestrator, audits } = await build();
+    for (const [method, url, payload] of [
+      ['GET', '/api/session', undefined],
+      ['POST', '/api/session/start', undefined],
+      ['POST', '/api/session/stop', undefined],
+      ['PUT', '/api/session/title', { title: 'x' }],
+      ['PUT', '/api/session/auto', { autoGoLive: true }],
+      ['PUT', '/api/session/test-mode', { testMode: true }],
+    ] as const) {
+      const unknown = await app.inject({ method, url: `${url}?profile=nope`, headers: auth, ...(payload ? { payload } : {}) });
+      expect(unknown.statusCode, `${method} ${url}`).toBe(404);
+      expect(unknown.json()).toEqual({ error: 'Unknown profile', code: 'unknown_profile' });
+      const repeated = await app.inject({ method, url: `${url}?profile=a&profile=b`, headers: auth, ...(payload ? { payload } : {}) });
+      expect(repeated.statusCode, `${method} ${url}`).toBe(400);
+      expect(repeated.json<{ code: string }>().code).toBe('invalid');
+    }
+    expect(orchestrator.start).not.toHaveBeenCalled();
+    expect(orchestrator.setTitle).not.toHaveBeenCalled();
+    expect(audits).toEqual([]);
   });
 
   it('PUT /api/session/test-mode passes other orchestrator failures to the error handler', async () => {

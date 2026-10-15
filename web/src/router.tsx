@@ -8,6 +8,7 @@ export type RouteName =
   | 'destinations'
   | 'accounts'
   | 'settings'
+  | 'profiles'
   | 'profile'
   | 'login'
   | 'setup';
@@ -27,6 +28,8 @@ export const ROUTES: readonly RouteDef[] = [
   { name: 'destinations', path: '/destinations', label: 'Destinations', adminOnly: true, nav: true },
   { name: 'accounts', path: '/accounts', label: 'Accounts', adminOnly: true, nav: true },
   { name: 'settings', path: '/settings', label: 'Settings', adminOnly: true, nav: true },
+  // Streaming profiles (reached from the profile switcher and Settings, not the main nav).
+  { name: 'profiles', path: '/profiles', label: 'Profiles', adminOnly: true, nav: false },
   { name: 'profile', path: '/profile', label: 'Profile', adminOnly: false, nav: true },
   { name: 'login', path: '/login', label: 'Sign in', adminOnly: false, nav: false },
   { name: 'setup', path: '/setup', label: 'Setup', adminOnly: false, nav: false },
@@ -59,6 +62,36 @@ export function safeReturnPath(raw: string | null | undefined): string | null {
   if (/[\u0000-\u001f]/.test(raw)) return null;
   const name = matchRoute(raw.split(/[?#]/)[0] ?? '/').name;
   return name === 'login' || name === 'setup' ? null : raw;
+}
+
+/**
+ * Query parameters that follow the user around the app: an in-app link or navigate() without them
+ * keeps the current value (the current streaming profile, `?profile=`).
+ */
+export const STICKY_PARAMS: readonly string[] = ['profile'];
+
+/**
+ * `to` with the sticky parameters of `currentSearch` added when `to` doesn't set them itself.
+ * Only for same-app paths ("/chat", "/settings?tab=api#x"); anything else is returned unchanged.
+ */
+export function withStickyParams(to: string, currentSearch: string): string {
+  if (!to.startsWith('/') || to.startsWith('//') || to.includes('\\')) return to;
+  const current = new URLSearchParams(currentSearch);
+  const carried = STICKY_PARAMS.filter((k) => current.get(k));
+  if (carried.length === 0) return to;
+  const hashAt = to.indexOf('#');
+  const hash = hashAt === -1 ? '' : to.slice(hashAt);
+  const beforeHash = hashAt === -1 ? to : to.slice(0, hashAt);
+  const qAt = beforeHash.indexOf('?');
+  const pathname = qAt === -1 ? beforeHash : beforeHash.slice(0, qAt);
+  const sp = new URLSearchParams(qAt === -1 ? '' : beforeHash.slice(qAt + 1));
+  let changed = false;
+  for (const k of carried) {
+    if (sp.has(k)) continue;
+    sp.set(k, current.get(k) as string);
+    changed = true;
+  }
+  return changed ? `${pathname}?${sp.toString()}${hash}` : to;
 }
 
 /** Build "?a=1&b=2" from a record (null/undefined/'' values are dropped). */
@@ -96,12 +129,17 @@ function currentHref(): string {
 
 export interface NavigateOptions {
   replace?: boolean;
+  /** Keep the current sticky parameters when `to` doesn't set them (default true). */
+  sticky?: boolean;
 }
 
-/** Navigate within the app. External URLs fall back to a full page load. */
+/**
+ * Navigate within the app. External URLs fall back to a full page load. Sticky query parameters
+ * (the current profile) are kept unless `to` sets them.
+ */
 export function navigate(to: string, opts: NavigateOptions = {}): void {
   if (!hasWindow) return;
-  const url = new URL(to, location.href);
+  const url = new URL(opts.sticky === false ? to : withStickyParams(to, location.search), location.href);
   if (url.origin !== location.origin) {
     location.assign(url.href);
     return;
@@ -124,7 +162,8 @@ export function setQuery(params: Record<string, string | null>, opts: NavigateOp
     else sp.set(k, v);
   }
   const s = sp.toString();
-  navigate(location.pathname + (s ? `?${s}` : ''), opts);
+  // Built from the current query, so sticky parameters stay unless removed here on purpose.
+  navigate(location.pathname + (s ? `?${s}` : '') + location.hash, { ...opts, sticky: false });
 }
 
 export interface Route extends RouteDef {
@@ -165,6 +204,9 @@ function isModifiedClick(e: MouseEvent): boolean {
 }
 
 export function Link({ to, replace, onClick, target, children, ...rest }: LinkProps) {
+  // The href carries the sticky parameters too, so "open in new tab" keeps the profile.
+  const { search } = useRoute();
+  const href = withStickyParams(to, search);
   const handleClick = (e: MouseEvent<HTMLAnchorElement>) => {
     onClick?.(e);
     if (e.defaultPrevented || isModifiedClick(e) || (target && target !== '_self')) return;
@@ -172,7 +214,7 @@ export function Link({ to, replace, onClick, target, children, ...rest }: LinkPr
     navigate(to, { replace });
   };
   return (
-    <a href={to} target={target} onClick={handleClick} {...rest}>
+    <a href={href} target={target} onClick={handleClick} {...rest}>
       {children}
     </a>
   );

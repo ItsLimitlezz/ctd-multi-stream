@@ -3,7 +3,7 @@
 // `ready`/`readyTime`/`bytesReceived` are deprecated in favour of `online`/`onlineTime`/`inboundBytes`;
 // both are read so a version bump doesn't silently break feed detection.
 
-import type { Feed, FeedState } from '../../../shared/types.js';
+import { DEFAULT_PROFILE_ID, type Feed, type FeedState } from '../../../shared/types.js';
 
 export interface MtxTrack {
   codec?: string;
@@ -55,8 +55,8 @@ const AUDIO_CODECS: Record<string, string> = {
 const BITRATE_WINDOW_MS = 2_500;
 const BITRATE_EMIT_INTERVAL_MS = 2_000;
 
-export function offlineFeedState(feed: Feed): FeedState {
-  return { feed, online: false, since: null, video: null, audio: null, bitrateKbps: null };
+export function offlineFeedState(feed: Feed, profileId: string = DEFAULT_PROFILE_ID): FeedState {
+  return { profileId, feed, online: false, since: null, video: null, audio: null, bitrateKbps: null };
 }
 
 function num(v: unknown): number | undefined {
@@ -89,13 +89,16 @@ export function describeTracks(tracks: MtxTrack[] | undefined): Pick<FeedState, 
   return { video, audio };
 }
 
-/** Tracks one feed across polls; computes bitrate from inbound byte deltas over a short window. */
+/** Tracks one feed of one profile across polls; computes bitrate from inbound byte deltas over a short window. */
 export class FeedTracker {
   private samples: { t: number; bytes: number }[] = [];
   private state: FeedState;
 
-  constructor(readonly feed: Feed) {
-    this.state = offlineFeedState(feed);
+  constructor(
+    readonly feed: Feed,
+    readonly profileId: string = DEFAULT_PROFILE_ID,
+  ) {
+    this.state = offlineFeedState(feed, profileId);
   }
 
   current(): FeedState {
@@ -107,7 +110,7 @@ export class FeedTracker {
     const online = item ? (item.online ?? item.ready ?? false) : false;
     if (!item || !online) {
       this.samples = [];
-      this.state = offlineFeedState(this.feed);
+      this.state = offlineFeedState(this.feed, this.profileId);
       return this.state;
     }
 
@@ -122,7 +125,7 @@ export class FeedTracker {
 
     const reported = toIso(item.onlineTime ?? item.readyTime);
     const since = reported ?? (this.state.online ? this.state.since : new Date(nowMs).toISOString());
-    this.state = { feed: this.feed, online: true, since, ...describeTracks(item.tracks2), bitrateKbps };
+    this.state = { profileId: this.profileId, feed: this.feed, online: true, since, ...describeTracks(item.tracks2), bitrateKbps };
     return this.state;
   }
 

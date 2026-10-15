@@ -1,9 +1,13 @@
 // Typed client for the server API (see shared/api.ts for the contract).
+//
+// Profile-scoped calls take an optional `profileId` and send it as `?profile=` (the server's
+// default profile when omitted); creates carry it in the body (`profileId`).
 
 import type {
   ApiError,
   ApiTokensResponse,
   AppSettings,
+  ApprovePairingRequest,
   AuditResponse,
   ChangePasswordRequest,
   ConnectCompleteRequest,
@@ -13,12 +17,15 @@ import type {
   CreateApiTokenRequest,
   CreateApiTokenResponse,
   CreateDestinationRequest,
+  CreateProfileRequest,
   CreateUserRequest,
   IngestInfo,
   LoginRequest,
   MeResponse,
   OverlayInfo,
   PlatformAppStatus,
+  ProfilesResponse,
+  RotateIngestKeyRequest,
   SettingsResponse,
   SetupRequest,
   SetupStatusResponse,
@@ -26,19 +33,24 @@ import type {
   TotpSetupResponse,
   UpdateAccountRequest,
   UpdateDestinationRequest,
+  UpdateProfileRequest,
   UpdateUserRequest,
 } from '@shared/api';
 import { CSRF_HEADER } from '@shared/api';
 import type {
   Account,
   ChatMessage,
+  ConnectedApp,
   Destination,
   Feed,
+  PairingRequest,
   PlatformId,
   PlatformInfo,
+  Profile,
   SessionState,
   User,
 } from '@shared/types';
+import { withProfileQuery } from './state/profiles';
 
 export class ApiRequestError extends Error {
   constructor(
@@ -142,8 +154,15 @@ export const api = {
   putPlatformApp: (platform: PlatformId, values: Record<string, string>) =>
     put<PlatformAppStatus>(`/api/platform-apps/${platform}`, { values }),
 
-  // accounts
-  accounts: () => get<Account[]>('/api/accounts'),
+  // profiles
+  profiles: () => get<ProfilesResponse>('/api/profiles'),
+  createProfile: (body: CreateProfileRequest) => post<Profile>('/api/profiles', body),
+  updateProfile: (id: string, body: UpdateProfileRequest) => patch<Profile>(`/api/profiles/${encodeURIComponent(id)}`, body),
+  /** 400 'default_profile' for the default profile, 409 'session_live' while its session runs. */
+  deleteProfile: (id: string) => del<object>(`/api/profiles/${encodeURIComponent(id)}`),
+
+  // accounts (list per profile; create carries body.profileId)
+  accounts: (profileId?: string) => get<Account[]>(withProfileQuery('/api/accounts', profileId)),
   createAccount: (body: CreateAccountRequest) => post<Account>('/api/accounts', body),
   updateAccount: (id: string, body: UpdateAccountRequest) => patch<Account>(`/api/accounts/${encodeURIComponent(id)}`, body),
   deleteAccount: (id: string) => del<object>(`/api/accounts/${encodeURIComponent(id)}`),
@@ -153,8 +172,8 @@ export const api = {
     post<ConnectPoll>(`/api/accounts/${encodeURIComponent(id)}/connect/complete`, body),
   checkAccount: (id: string) => post<Account>(`/api/accounts/${encodeURIComponent(id)}/check`),
 
-  // destinations
-  destinations: () => get<Destination[]>('/api/destinations'),
+  // destinations (list per profile; create carries body.profileId)
+  destinations: (profileId?: string) => get<Destination[]>(withProfileQuery('/api/destinations', profileId)),
   createDestination: (body: CreateDestinationRequest) => post<Destination>('/api/destinations', body),
   updateDestination: (id: string, body: UpdateDestinationRequest) =>
     patch<Destination>(`/api/destinations/${encodeURIComponent(id)}`, body),
@@ -163,23 +182,29 @@ export const api = {
     put<Destination>(`/api/destinations/${encodeURIComponent(id)}/enabled`, { enabled }),
   retryDestination: (id: string) => post<object>(`/api/destinations/${encodeURIComponent(id)}/retry`),
 
-  // session
-  session: () => get<SessionState>('/api/session'),
-  startSession: () => post<SessionState>('/api/session/start'),
-  stopSession: () => post<SessionState>('/api/session/stop'),
-  setTitle: (title: string) => put<TitleResponse>('/api/session/title', { title }),
-  setAutoGoLive: (autoGoLive: boolean) => put<SessionState>('/api/session/auto', { autoGoLive }),
+  // session (per profile)
+  session: (profileId?: string) => get<SessionState>(withProfileQuery('/api/session', profileId)),
+  startSession: (profileId?: string) => post<SessionState>(withProfileQuery('/api/session/start', profileId)),
+  stopSession: (profileId?: string) => post<SessionState>(withProfileQuery('/api/session/stop', profileId)),
+  setTitle: (title: string, profileId?: string) => put<TitleResponse>(withProfileQuery('/api/session/title', profileId), { title }),
+  setAutoGoLive: (autoGoLive: boolean, profileId?: string) =>
+    put<SessionState>(withProfileQuery('/api/session/auto', profileId), { autoGoLive }),
   /** 409 code 'session_live' while a session runs (test mode only changes while offline). */
-  setTestMode: (testMode: boolean) => put<SessionState>('/api/session/test-mode', { testMode }),
+  setTestMode: (testMode: boolean, profileId?: string) =>
+    put<SessionState>(withProfileQuery('/api/session/test-mode', profileId), { testMode }),
 
-  // ingest
-  ingest: () => get<IngestInfo>('/api/ingest'),
-  rotateIngestKey: (feed: Feed) => post<IngestInfo>('/api/ingest/rotate', { feed }),
+  // ingest (per profile: each profile has its own OBS stream keys)
+  ingest: (profileId?: string) => get<IngestInfo>(withProfileQuery('/api/ingest', profileId)),
+  rotateIngestKey: (feed: Feed, profileId?: string) => {
+    // The profile goes in the query (shared convention) and the body (accepted by the route).
+    const body: RotateIngestKeyRequest & { profileId?: string } = profileId ? { feed, profileId } : { feed };
+    return post<IngestInfo>(withProfileQuery('/api/ingest/rotate', profileId), body);
+  },
 
-  // chat
-  recentChat: (limit = 200) => get<ChatMessage[]>(`/api/chat/recent?limit=${limit}`),
-  overlay: () => get<OverlayInfo>('/api/chat/overlay'),
-  rotateOverlay: () => post<OverlayInfo>('/api/chat/overlay/rotate'),
+  // chat (per profile)
+  recentChat: (limit = 200, profileId?: string) => get<ChatMessage[]>(withProfileQuery(`/api/chat/recent?limit=${limit}`, profileId)),
+  overlay: (profileId?: string) => get<OverlayInfo>(withProfileQuery('/api/chat/overlay', profileId)),
+  rotateOverlay: (profileId?: string) => post<OverlayInfo>(withProfileQuery('/api/chat/overlay/rotate', profileId)),
 
   // settings + audit
   settings: () => get<SettingsResponse>('/api/settings'),
@@ -191,7 +216,18 @@ export const api = {
   apiTokens: () => get<ApiTokensResponse>('/api/tokens'),
   /** The response carries the secret: show it once, never store or log it. */
   createApiToken: (body: CreateApiTokenRequest) => post<CreateApiTokenResponse>('/api/tokens', body),
+  /** Also removes the apps that token registered. */
   deleteApiToken: (id: string) => del<object>(`/api/tokens/${encodeURIComponent(id)}`),
+
+  // app pairing + connected apps (Settings → API)
+  /** Pending "connect this app" requests, newest first. */
+  pairings: () => get<PairingRequest[]>('/api/pairings'),
+  /** Creates the app's token; the app picks it up itself (the secret is not in the response for the UI to show). */
+  approvePairing: (id: string, body: ApprovePairingRequest) =>
+    post<CreateApiTokenResponse>(`/api/pairings/${encodeURIComponent(id)}/approve`, body),
+  denyPairing: (id: string) => post<object>(`/api/pairings/${encodeURIComponent(id)}/deny`),
+  apps: () => get<ConnectedApp[]>('/api/apps'),
+  removeApp: (id: string) => del<object>(`/api/apps/${encodeURIComponent(id)}`),
 
   // browser login viewer
   browserOpen: (accountId: string, url?: string) =>

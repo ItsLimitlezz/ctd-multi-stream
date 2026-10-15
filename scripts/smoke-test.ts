@@ -1,40 +1,37 @@
 // End-to-end media relay smoke test with the real binaries in ./tools (npm run smoke).
 //
-//   OBS stand-in (FFmpeg test pattern) -> MediaMTX (auth via our loopback server)
-//     -> PushSupervisor (FFmpeg -c copy) -> fake platform (FFmpeg -listen 1)
+//   OBS stand-ins (FFmpeg test patterns) -> MediaMTX (auth via our loopback server)
+//     -> PushSupervisor (FFmpeg -c copy) -> fake platforms (FFmpeg -listen 1)
 //
-// Uses a temp DATA_DIR and free non-default ports. Prints PASS/FAIL, exit code 0/1.
+// Two profiles stream at the same time: the default profile on the pre-profiles paths/keys
+// (`live/landscape?key=…`) and a second profile, added while MediaMTX runs, on
+// `live/<slug>/landscape?key=…` (published the way OBS does it: server `…/live`, key `<slug>/landscape?key=…`).
+//
+// Uses a temp DATA_DIR, an in-memory database and free non-default ports. Prints PASS/FAIL, exit code 0/1.
 // Options: --no-multitrack (skip the experimental E-RTMP multitrack check), SMOKE_LOG=debug.
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import crypto from 'node:crypto';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
-import type { FeedState } from '../shared/types.js';
+import { DEFAULT_PROFILE_ID, type Feed, type FeedState } from '../shared/types.js';
 import { loadConfig } from '../server/src/config.js';
+import { openDatabase } from '../server/src/db/database.js';
+import { createRepos } from '../server/src/db/repos.js';
 import { EventBus, type PushEvent } from '../server/src/events.js';
 import { createPushSupervisor } from '../server/src/media/ffmpeg-supervisor.js';
 import { createMediaServer } from '../server/src/media/mediamtx.js';
-import type { ScopedSecrets } from '../server/src/services.js';
+import { createSecretBox } from '../server/src/security/secretbox.js';
 
-const OVERALL_TIMEOUT_MS = 150_000;
+const OVERALL_TIMEOUT_MS = 180_000;
 const withMultitrack = !process.argv.includes('--no-multitrack');
 
+type Proc = ChildProcess & { tail: string[]; videos: string[] };
 const children = new Set<ChildProcess>();
-
-function memorySecrets(): ScopedSecrets {
-  const data = new Map<string, string>();
-  return {
-    get: async (k) => data.get(k) ?? null,
-    set: async (k, v) => void data.set(k, v),
-    delete: async (k) => void data.delete(k),
-    getJson: async <T>(k: string) => (data.has(k) ? (JSON.parse(data.get(k)!) as T) : null),
-    setJson: async (k, v) => void data.set(k, JSON.stringify(v)),
-  };
-}
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -47,16 +44,17 @@ async function freePort(): Promise<number> {
   });
 }
 
-/** Spawn FFmpeg, keeping the last stderr lines for diagnostics. */
-function ffmpeg(bin: string, args: string[]): ChildProcess & { tail: string[] } {
-  const child = spawn(bin, ['-hide_banner', '-nostdin', ...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true }) as ChildProcess & {
-    tail: string[];
-  };
+/** Spawn FFmpeg, keeping the last stderr lines (and every input video stream line) for diagnostics. */
+function ffmpeg(bin: string, args: string[]): Proc {
+  const child = spawn(bin, ['-hide_banner', '-nostdin', ...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true }) as Proc;
   child.tail = [];
+  child.videos = [];
   child.stderr?.setEncoding('utf8');
   child.stderr?.on('data', (d: string) => {
-    child.tail.push(...d.split(/\r?\n/).filter(Boolean));
+    const lines = d.split(/\r?\n/).filter(Boolean);
+    child.tail.push(...lines);
     child.tail.splice(0, Math.max(0, child.tail.length - 40));
+    child.videos.push(...lines.filter((l) => /Stream #0:\d+.*Video:/.test(l)));
   });
   children.add(child);
   child.on('exit', () => children.delete(child));
@@ -91,6 +89,14 @@ function waitFor<T>(bus: EventBus, event: 'feed' | 'push', match: (v: T) => bool
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+async function until(check: () => boolean, timeoutMs: number, what: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs / 1000} s waiting for ${what}`);
+    await sleep(100);
+  }
+}
+
 async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   const t0 = Date.now();
   process.stdout.write(`- ${name} ... `);
@@ -104,18 +110,26 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-function testPattern(size: string, freq: number, url: string): string[] {
+function testPattern(size: string, freq: number, url: string, extra: string[] = []): string[] {
   return [
     '-loglevel', 'error', '-re',
     '-f', 'lavfi', '-i', `testsrc2=size=${size}:rate=30`,
     '-f', 'lavfi', '-i', `sine=frequency=${freq}`,
     '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-g', '60', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-f', 'flv', url,
+    '-c:a', 'aac', ...extra, '-f', 'flv', url,
   ];
 }
 
+/**
+ * Publish like OBS: server URL `rtmp://host:port/live` + stream key `<key field>` (RTMP app `live`,
+ * stream name = the whole key field, e.g. `dprtmnt/landscape?key=…`).
+ */
+function obsPublish(bin: string, rtmp: string, keyField: string, size: string, freq: number, extra: string[] = []): Proc {
+  return ffmpeg(bin, [...extra, ...testPattern(size, freq, `${rtmp}/live`, ['-rtmp_app', 'live', '-rtmp_playpath', keyField])]);
+}
+
 async function run(): Promise<void> {
-  const [rtmpPort, apiPort, platformPort, platformPort2] = await Promise.all([freePort(), freePort(), freePort(), freePort()]);
+  const [rtmpPort, apiPort, platformPort, platformPort2, platformPort3] = await Promise.all([freePort(), freePort(), freePort(), freePort(), freePort()]);
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ctd-smoke-'));
   const config = loadConfig({
     DATA_DIR: dataDir,
@@ -131,98 +145,186 @@ async function run(): Promise<void> {
 
   const log = pino({ level: process.env.SMOKE_LOG ?? 'warn' });
   const bus = new EventBus();
-  const media = createMediaServer({ config, bus, log: log.child({ mod: 'mediamtx' }), secrets: memorySecrets() });
-  const pushes = createPushSupervisor({ config, bus, log: log.child({ mod: 'ffmpeg' }), media });
+  const db = openDatabase(':memory:');
+  const repos = createRepos(db, createSecretBox(crypto.randomBytes(32)));
+  const media = createMediaServer({ config, bus, log: log.child({ mod: 'mediamtx' }), repos });
+  const pushes = createPushSupervisor({ config, bus, log: log.child({ mod: 'ffmpeg' }), media, repos });
   const rtmp = `rtmp://127.0.0.1:${rtmpPort}`;
+  const ff = config.ffmpegBin;
+  const isOnline = (profileId: string, feed: Feed) => (f: FeedState) => f.profileId === profileId && f.feed === feed && f.online && !!f.video;
+
+  /** A push id is a destination id: the destination's profile decides which feed is read. */
+  const destination = (profileId: string, name: string, feed: Feed) =>
+    repos.destinations.create({ profileId, platform: 'custom', accountId: null, name, feed, enabled: true, options: {}, ingestUrl: null }).id;
+  const mainDest = destination(DEFAULT_PROFILE_ID, 'Main relay', 'landscape');
+  const dualDest = destination(DEFAULT_PROFILE_ID, 'Main multitrack', 'landscape');
+
+  async function waitRunning(id: string, what: string): Promise<PushEvent> {
+    return Promise.race([
+      waitFor<PushEvent>(bus, 'push', (e) => e.id === id && e.status === 'running' && (e.stats?.bitrateKbps ?? 0) > 0, 30_000, `${what} running`),
+      waitFor<PushEvent>(bus, 'push', (e) => e.id === id && e.status === 'failed', 30_000, `${what} failure`).then((e) => {
+        throw new Error(`${what} failed: ${e.message}`);
+      }),
+    ]);
+  }
 
   try {
     console.log(`MediaMTX ${config.mediamtxBin}\nFFmpeg   ${config.ffmpegBin}\nRTMP :${rtmpPort}, API :${apiPort}, data ${dataDir}\n`);
     await step('start MediaServer', () => media.start());
-    const keys = await media.ingestKeys();
+    const keys = await media.ingestKeys(DEFAULT_PROFILE_ID);
+    if ((await media.streamKeyField(DEFAULT_PROFILE_ID, 'landscape')) !== `landscape?key=${keys.landscape}`) {
+      throw new Error('the default profile stream key field changed');
+    }
 
-    const feed = await step('publish landscape test pattern, wait for the feed (h264)', async () => {
-      const online = waitFor<FeedState>(bus, 'feed', (f) => f.feed === 'landscape' && f.online && f.video?.codec === 'h264', 30_000, 'landscape online');
-      const publisher = ffmpeg(config.ffmpegBin, testPattern('1280x720', 1000, `${rtmp}/live/landscape?key=${keys.landscape}`));
-      const state = await Promise.race([
+    const feed = await step('default profile: publish landscape on live/landscape, wait for the feed (h264)', async () => {
+      const online = waitFor<FeedState>(bus, 'feed', isOnline(DEFAULT_PROFILE_ID, 'landscape'), 30_000, 'landscape online');
+      const publisher = ffmpeg(ff, testPattern('1280x720', 1000, `${rtmp}/live/landscape?key=${keys.landscape}`));
+      return Promise.race([
         online,
         exitCode(publisher, 30_000).then((c) => {
           throw new Error(`publisher exited (${c}): ${publisher.tail.slice(-3).join(' | ')}`);
         }),
       ]);
-      return state;
     });
     console.log(`  feed: ${feed.video?.codec} ${feed.video?.width}x${feed.video?.height}, audio ${feed.audio?.codec ?? 'none'}`);
 
     await step('reject a publish with a wrong key', async () => {
-      const bad = ffmpeg(config.ffmpegBin, ['-t', '3', ...testPattern('320x240', 500, `${rtmp}/live/landscape?key=wrongkey`)]);
+      const bad = ffmpeg(ff, ['-t', '3', ...testPattern('320x240', 500, `${rtmp}/live/landscape?key=wrongkey`)]);
       const code = await exitCode(bad, 20_000);
       if (code === 0) throw new Error('publish with a wrong key was accepted');
-      if (!media.feed('landscape').online) throw new Error('the real publisher was kicked out');
+      if (!media.feed(DEFAULT_PROFILE_ID, 'landscape').online) throw new Error('the real publisher was kicked out');
     });
 
     await step('reject a publish to an unknown path', async () => {
-      const bad = ffmpeg(config.ffmpegBin, ['-t', '3', ...testPattern('320x240', 500, `${rtmp}/live/other?key=${keys.landscape}`)]);
+      const bad = ffmpeg(ff, ['-t', '3', ...testPattern('320x240', 500, `${rtmp}/live/other?key=${keys.landscape}`)]);
       if ((await exitCode(bad, 20_000)) === 0) throw new Error('publish to live/other was accepted');
     });
 
     await step('reject a read without internal credentials', async () => {
-      const reader = ffmpeg(config.ffmpegBin, ['-loglevel', 'error', '-rw_timeout', '5000000', '-i', `${rtmp}/live/landscape`, '-t', '2', '-f', 'null', '-']);
+      const reader = ffmpeg(ff, ['-loglevel', 'error', '-rw_timeout', '5000000', '-i', `${rtmp}/live/landscape`, '-t', '2', '-f', 'null', '-']);
       if ((await exitCode(reader, 20_000)) === 0) throw new Error('unauthenticated read was accepted');
     });
 
-    const platformUrl = `rtmp://127.0.0.1:${platformPort}/app/testkey`;
-    const platform = ffmpeg(config.ffmpegBin, ['-loglevel', 'error', '-listen', '1', '-i', platformUrl, '-f', 'null', '-']);
-    await sleep(1500); // no readiness signal; a probe connection would consume the single accept
+    // ---- a second profile, added while MediaMTX runs ------------------------------------
+    const club = repos.profiles.create({ name: 'DPRTMNT', color: '#E11D48' });
+    const clubDest = destination(club.id, 'Club relay', 'landscape');
+    const clubKeyField = await step(`add profile "${club.name}" without restarting MediaMTX`, async () => {
+      await media.profileAdded(club);
+      const field = await media.streamKeyField(club.id, 'landscape');
+      if (!field.startsWith(`${club.slug}/landscape?key=`)) throw new Error(`unexpected stream key field ${field.split('?')[0]}`);
+      return field;
+    });
+    const clubKeys = await media.ingestKeys(club.id);
+    /** The second profile's OBS stand-in; deleting the profile must really disconnect it. */
+    let clubPublisher: Proc | null = null;
 
-    const running = await step('relay to a fake platform (copy), wait for running with bitrate > 0', async () => {
-      const ev = waitFor<PushEvent>(bus, 'push', (e) => e.id === 'smoke' && e.status === 'running' && (e.stats?.bitrateKbps ?? 0) > 0, 30_000, 'push running');
-      pushes.start('smoke', { url: platformUrl, mode: 'copy', feeds: ['landscape'] });
-      return Promise.race([
-        ev,
-        waitFor<PushEvent>(bus, 'push', (e) => e.id === 'smoke' && e.status === 'failed', 30_000, 'push failure').then((e) => {
-          throw new Error(`push failed: ${e.message}`);
+    await step(`second profile: publish like OBS (server …/live, key ${club.slug}/landscape?key=…) while the default profile streams`, async () => {
+      const online = waitFor<FeedState>(bus, 'feed', isOnline(club.id, 'landscape'), 30_000, 'club landscape online');
+      const publisher = obsPublish(ff, rtmp, clubKeyField, '854x480', 700);
+      clubPublisher = publisher;
+      const state = await Promise.race([
+        online,
+        exitCode(publisher, 30_000).then((c) => {
+          throw new Error(`club publisher exited (${c}): ${publisher.tail.slice(-3).join(' | ')}`);
         }),
       ]);
+      if (state.video?.width !== 854) throw new Error(`club feed has the wrong video (${state.video?.width}x${state.video?.height})`);
+      if (!media.feed(DEFAULT_PROFILE_ID, 'landscape').online) throw new Error('the default profile feed went offline');
     });
-    console.log(`  push: ${running.stats?.bitrateKbps} kbit/s, ${running.stats?.fps} fps, speed ${running.stats?.speed}x`);
+
+    await step("reject each profile's key on the other profile's path", async () => {
+      const wrong1 = obsPublish(ff, rtmp, `${club.slug}/landscape?key=${keys.landscape}`, '320x240', 500, ['-t', '3']);
+      const wrong2 = ffmpeg(ff, ['-t', '3', ...testPattern('320x240', 500, `${rtmp}/live/landscape?key=${clubKeys.landscape}`)]);
+      const wrong3 = obsPublish(ff, rtmp, `${club.slug}/landscape?key=${clubKeys.vertical}`, '320x240', 500, ['-t', '3']);
+      const codes = await Promise.all([exitCode(wrong1, 20_000), exitCode(wrong2, 20_000), exitCode(wrong3, 20_000)]);
+      if (codes.some((c) => c === 0)) throw new Error(`a cross-profile key was accepted (exit codes ${codes.join(', ')})`);
+      if (!media.feed(DEFAULT_PROFILE_ID, 'landscape').online || !media.feed(club.id, 'landscape').online) {
+        throw new Error('a real publisher was kicked out');
+      }
+    });
+
+    // ---- both profiles relay at once ---------------------------------------------------
+    const platformUrl = `rtmp://127.0.0.1:${platformPort}/app/testkey`;
+    const platform = ffmpeg(ff, ['-loglevel', 'info', '-nostats', '-listen', '1', '-i', platformUrl, '-f', 'null', '-']);
+    const clubPlatformUrl = `rtmp://127.0.0.1:${platformPort3}/app/clubkey`;
+    const clubPlatform = ffmpeg(ff, ['-loglevel', 'info', '-nostats', '-listen', '1', '-i', clubPlatformUrl, '-f', 'null', '-']);
+    await sleep(1500); // no readiness signal; a probe connection would consume the single accept
+
+    const [running, clubRunning] = await step('relay both profiles at the same time (copy), each to its own platform', async () => {
+      const both = Promise.all([waitRunning(mainDest, 'default relay'), waitRunning(clubDest, 'club relay')]);
+      pushes.start(mainDest, { url: platformUrl, mode: 'copy', feeds: ['landscape'] });
+      pushes.start(clubDest, { url: clubPlatformUrl, mode: 'copy', feeds: ['landscape'] });
+      const result = await both;
+      if (!pushes.isRunning(mainDest) || !pushes.isRunning(clubDest)) throw new Error('both relays should be running');
+      // Each platform got its own profile's OBS (1280x720 vs 854x480).
+      await until(() => platform.videos.length > 0 && clubPlatform.videos.length > 0, 15_000, 'the platforms to report their input');
+      if (!platform.videos.some((l) => l.includes('1280x720'))) throw new Error(`default platform got: ${platform.videos.join(' | ')}`);
+      if (!clubPlatform.videos.some((l) => l.includes('854x480'))) throw new Error(`club platform got: ${clubPlatform.videos.join(' | ')}`);
+      return result;
+    });
+    console.log(`  default push: ${running.stats?.bitrateKbps} kbit/s, ${running.stats?.fps} fps, speed ${running.stats?.speed}x`);
+    console.log(`  club push:    ${clubRunning.stats?.bitrateKbps} kbit/s, ${clubRunning.stats?.fps} fps, speed ${clubRunning.stats?.speed}x`);
     if (platform.exitCode !== null) throw new Error(`fake platform exited: ${platform.tail.slice(-3).join(' | ')}`);
+    if (clubPlatform.exitCode !== null) throw new Error(`club fake platform exited: ${clubPlatform.tail.slice(-3).join(' | ')}`);
 
     if (withMultitrack) {
       await step('EXPERIMENTAL multitrack: landscape + vertical in one E-RTMP connection', async () => {
-        const vOnline = waitFor<FeedState>(bus, 'feed', (f) => f.feed === 'vertical' && f.online && !!f.video, 30_000, 'vertical online');
-        ffmpeg(config.ffmpegBin, testPattern('720x1280', 600, `${rtmp}/live/vertical?key=${keys.vertical}`));
+        const vOnline = waitFor<FeedState>(bus, 'feed', isOnline(DEFAULT_PROFILE_ID, 'vertical'), 30_000, 'vertical online');
+        ffmpeg(ff, testPattern('720x1280', 600, `${rtmp}/live/vertical?key=${keys.vertical}`));
         await vOnline;
 
         const url2 = `rtmp://127.0.0.1:${platformPort2}/app/dualkey`;
-        const receiver = ffmpeg(config.ffmpegBin, ['-loglevel', 'info', '-listen', '1', '-i', url2, '-map', '0', '-c', 'copy', '-t', '6', '-f', 'null', '-']);
+        const receiver = ffmpeg(ff, ['-loglevel', 'info', '-listen', '1', '-i', url2, '-map', '0', '-c', 'copy', '-t', '6', '-f', 'null', '-']);
         await sleep(1500);
-        const ev = waitFor<PushEvent>(bus, 'push', (e) => e.id === 'dual' && e.status === 'running', 30_000, 'multitrack push running');
-        pushes.start('dual', { url: url2, mode: 'multitrack', feeds: ['landscape', 'vertical'] });
+        const ev = waitFor<PushEvent>(bus, 'push', (e) => e.id === dualDest && e.status === 'running', 30_000, 'multitrack push running');
+        pushes.start(dualDest, { url: url2, mode: 'multitrack', feeds: ['landscape', 'vertical'] });
         await ev;
         await exitCode(receiver, 30_000);
-        const videos = receiver.tail.filter((l) => /Stream #0:\d+.*Video:/.test(l));
-        if (videos.length < 2) throw new Error(`receiver saw ${videos.length} video track(s): ${receiver.tail.slice(-5).join(' | ')}`);
-        await pushes.stop('dual');
+        if (receiver.videos.length < 2) throw new Error(`receiver saw ${receiver.videos.length} video track(s): ${receiver.tail.slice(-5).join(' | ')}`);
+        await pushes.stop(dualDest);
       });
     }
 
-    await step('stop everything', async () => {
-      const stopped = waitFor<PushEvent>(bus, 'push', (e) => e.id === 'smoke' && e.status === 'stopped', 15_000, 'push stopped');
+    await step('stop every relay', async () => {
+      const stopped = Promise.all(
+        [mainDest, clubDest].map((id) => waitFor<PushEvent>(bus, 'push', (e) => e.id === id && e.status === 'stopped', 15_000, `${id} stopped`)),
+      );
       await pushes.stopAll();
       await stopped;
-      if (pushes.isRunning('smoke')) throw new Error('push still marked running');
+      if (pushes.isRunning(mainDest) || pushes.isRunning(clubDest)) throw new Error('push still marked running');
     });
 
-    await step('rotate the landscape key: the publisher using the old key is disconnected', async () => {
-      const offline = waitFor<FeedState>(bus, 'feed', (f) => f.feed === 'landscape' && !f.online, 15_000, 'landscape offline');
-      const next = await media.rotateIngestKey('landscape');
+    await step('rotate the default landscape key: the publisher using the old key is disconnected', async () => {
+      const offline = waitFor<FeedState>(bus, 'feed', (f) => f.profileId === DEFAULT_PROFILE_ID && f.feed === 'landscape' && !f.online, 15_000, 'landscape offline');
+      const next = await media.rotateIngestKey(DEFAULT_PROFILE_ID, 'landscape');
       if (next === keys.landscape) throw new Error('key did not change');
       await offline;
+      if (!media.feed(club.id, 'landscape').online) throw new Error("the other profile's OBS was disconnected too");
+    });
+
+    await step('delete the second profile: its OBS is disconnected and its key stops working', async () => {
+      // Check the real connection, not just the event: profileRemoved reports the feed offline even
+      // when the kick fails, so wait for the publisher process itself to be dropped by MediaMTX.
+      const publisher = clubPublisher as Proc | null;
+      if (!publisher || publisher.exitCode !== null || publisher.signalCode !== null) {
+        throw new Error('the second profile publisher was not running before the delete');
+      }
+      const offline = waitFor<FeedState>(bus, 'feed', (f) => f.profileId === club.id && f.feed === 'landscape' && !f.online, 15_000, 'club offline');
+      await media.profileRemoved(club.id);
+      await offline;
+      try {
+        await exitCode(publisher, 15_000);
+      } catch {
+        throw new Error("the deleted profile's OBS stayed connected (its publisher was not kicked)");
+      }      repos.profiles.delete(club.id);
+      const again = obsPublish(ff, rtmp, clubKeyField, '320x240', 500, ['-t', '3']);
+      if ((await exitCode(again, 20_000)) === 0) throw new Error("a deleted profile's key was accepted");
     });
   } finally {
     await pushes.stopAll().catch(() => {});
     for (const c of children) c.kill();
     await media.stop().catch(() => {});
+    db.close();
     await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {});
   }
 }

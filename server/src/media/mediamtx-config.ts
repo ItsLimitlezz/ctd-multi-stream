@@ -3,7 +3,7 @@
 // MediaMTX rejects unknown keys, so only emit fields that exist in the pinned version.
 
 import { FEEDS } from '../../../shared/types.js';
-import { feedPath } from './paths.js';
+import { feedPath, PROFILE_PATHS_REGEX } from './paths.js';
 
 export interface MediaMtxConfigOptions {
   /** RTMP ingest port (all interfaces; OBS is on the LAN). */
@@ -67,9 +67,13 @@ export function buildMediaMtxConfig(opts: MediaMtxConfigOptions): string {
     '  overridePublisher: true',
     '  record: false',
     '',
-    '# Only the two feeds exist; any other path is rejected by MediaMTX.',
+    '# The default profile keeps live/landscape + live/vertical; every other profile publishes to',
+    '# live/<slug>/landscape + live/<slug>/vertical (one regex, so new profiles need no restart; the',
+    '# auth hook only accepts slugs of existing profiles). Any other path is rejected by MediaMTX.',
     'paths:',
     ...FEEDS.flatMap((feed) => [`  ${feedPath(feed)}:`, '    source: publisher']),
+    `  ${q(PROFILE_PATHS_REGEX)}:`,
+    '    source: publisher',
     '',
   ];
   return lines.join('\n');

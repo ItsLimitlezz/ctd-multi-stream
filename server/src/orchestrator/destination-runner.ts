@@ -116,6 +116,8 @@ export interface RunnerHost {
   services: AppServices;
   log: Logger;
   timings: OrchestratorTimings;
+  /** Profile of the orchestrator (stamped on the destination's chat). */
+  profileId: string;
   title(): string;
   /** Session test mode (constant while a session runs). */
   testMode(): boolean;
@@ -650,7 +652,7 @@ export class DestinationRunner {
       const chatCtl = new AbortController();
       this.chatCtl = chatCtl;
       try {
-        this.host.services.chat.attach(this.id, this.dest.platform, (s) => prepared.chat!(s), chatCtl.signal);
+        this.host.services.chat.attach(this.id, this.dest.platform, (s) => prepared.chat!(s), chatCtl.signal, this.host.profileId);
       } catch (err) {
         this.host.log.warn({ destinationId: this.id, error: errorMessage(err) }, 'chat attach failed');
       }

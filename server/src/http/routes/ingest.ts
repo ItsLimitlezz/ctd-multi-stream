@@ -1,13 +1,17 @@
-// OBS setup info: RTMP server URL + per-feed stream keys [admin].
+// OBS setup info: RTMP server URL + per-feed stream keys of one profile [admin].
+// `?profile=<id>` (default: the default profile, whose keys are the pre-profiles ones).
 
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { IngestInfo } from '../../../../shared/api.js';
-import { FEEDS } from '../../../../shared/types.js';
+import { DEFAULT_PROFILE_ID, FEEDS } from '../../../../shared/types.js';
 import type { AppServices } from '../../services.js';
 import { audit, requireAdmin, type RouteOptions } from '../guards.js';
+import { HttpError, installErrorHandler } from '../validation.js';
 
-const RotateSchema = z.object({ feed: z.enum(['landscape', 'vertical']) });
+const profileIdSchema = z.string().min(1).max(128);
+const RotateSchema = z.object({ feed: z.enum(FEEDS), profileId: profileIdSchema.optional() });
+const QuerySchema = z.object({ profile: profileIdSchema.optional() });
 
 /** Host for the OBS server URL: the ingestHost setting, else the host the browser used. */
 export function ingestHost(setting: string, requestHostname: string): string {
@@ -28,31 +32,52 @@ export function ingestHost(setting: string, requestHostname: string): string {
   return host || 'localhost';
 }
 
-export async function buildIngestInfo(services: AppServices, req: FastifyRequest): Promise<IngestInfo> {
+/** 404 `unknown_profile` unless the profile exists. */
+export function requireProfileId(services: AppServices, profileId: string): string {
+  if (!services.repos.profiles.get(profileId)) throw new HttpError(404, 'Profile not found', 'unknown_profile');
+  return profileId;
+}
+
+/**
+ * What OBS needs to stream into a profile: server URL (`rtmp://<host>:<rtmpPort>/live`) and, per
+ * feed, the "Stream Key" field (`landscape?key=…` for the default profile, `<slug>/landscape?key=…`
+ * for the others). `host` is the ingestHost setting or the given request host.
+ */
+export async function ingestInfoFor(services: AppServices, profileId: string, requestHostname: string): Promise<IngestInfo> {
   const { media, config } = services;
-  const keys = await media.ingestKeys();
-  const serverUrl = `rtmp://${ingestHost(services.appSettings().ingestHost, req.hostname)}:${config.rtmpPort}/${media.appName}`;
-  return {
-    serverUrl,
-    feeds: FEEDS.map((feed) => {
-      const streamKey = `${feed}?key=${keys[feed]}`;
+  const serverUrl = `rtmp://${ingestHost(services.appSettings().ingestHost, requestHostname)}:${config.rtmpPort}/${media.appName}`;
+  const feeds = await Promise.all(
+    FEEDS.map(async (feed) => {
+      const streamKey = await media.streamKeyField(profileId, feed);
       return { feed, streamKey, fullUrl: `${serverUrl}/${streamKey}` };
     }),
-  };
+  );
+  return { profileId, serverUrl, feeds };
+}
+
+/** IngestInfo for a request (`?profile=`, default: the default profile). */
+export async function buildIngestInfo(services: AppServices, req: FastifyRequest, profileId?: string): Promise<IngestInfo> {
+  const id = requireProfileId(services, profileId ?? QuerySchema.parse(req.query ?? {}).profile ?? DEFAULT_PROFILE_ID);
+  return ingestInfoFor(services, id, req.hostname);
 }
 
 const ingestRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) => {
+  installErrorHandler(app);
+
   app.get('/api/ingest', { preHandler: requireAdmin }, async (req, reply) => {
+    const info = await buildIngestInfo(services, req);
     reply.header('cache-control', 'no-store');
-    return buildIngestInfo(services, req);
+    return info;
   });
 
   app.post('/api/ingest/rotate', { preHandler: requireAdmin }, async (req, reply) => {
-    const { feed } = RotateSchema.parse(req.body ?? {});
-    await services.media.rotateIngestKey(feed);
-    audit(services, req, 'ingest.rotate', feed);
+    const body = RotateSchema.parse(req.body ?? {});
+    const query = QuerySchema.parse(req.query ?? {});
+    const profileId = requireProfileId(services, body.profileId ?? query.profile ?? DEFAULT_PROFILE_ID);
+    await services.media.rotateIngestKey(profileId, body.feed);
+    audit(services, req, 'ingest.rotate', profileId === DEFAULT_PROFILE_ID ? body.feed : `${body.feed} profile=${profileId}`);
     reply.header('cache-control', 'no-store');
-    return buildIngestInfo(services, req);
+    return buildIngestInfo(services, req, profileId);
   });
 };
 

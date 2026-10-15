@@ -12,6 +12,7 @@ import { Spinner } from '../../components/Spinner';
 import { TextInput } from '../../components/TextInput';
 import { Link } from '../../router';
 import { errorMessage, isApiError } from '../../state/errors';
+import { useProfileId } from '../../state/profile';
 import { hasErrors } from '../settings/settings-helpers';
 import {
   accountOptions,
@@ -32,7 +33,7 @@ import {
 
 export interface DestinationFormProps {
   info: PlatformInfo;
-  /** Accounts of every platform (undefined while loading). */
+  /** The profile's accounts, every platform (undefined while loading). */
   accounts: readonly Account[] | undefined;
   /** The destination being edited, or null to create one. */
   existing: Destination | null;
@@ -49,6 +50,8 @@ export function DestinationForm({ info, accounts, existing, onSaved, onCancel, o
   const [errors, setErrors] = useState<FormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // New destinations belong to the profile on screen (an existing one keeps its own).
+  const profileId = useProfileId();
 
   // Accounts can arrive after the form opened: preselect one for a new destination.
   useEffect(() => {
@@ -74,7 +77,7 @@ export function DestinationForm({ info, accounts, existing, onSaved, onCancel, o
     try {
       const saved = existing
         ? await api.updateDestination(existing.id, buildUpdateRequest(info, draft))
-        : await api.createDestination(buildCreateRequest(info, draft));
+        : await api.createDestination({ ...buildCreateRequest(info, draft), profileId });
       setBusy(false);
       onSaved(saved);
     } catch (err) {
@@ -208,8 +211,8 @@ function AccountField({ info, accounts, value, error, disabled, onChange }: Acco
   if (options.length === 0) {
     return (
       <div className="alert alert-warn">
-        No {info.name} account is connected yet. {connectLink} on the Accounts page. You can save this destination now and link
-        the account later.
+        No {info.name} account is connected to this profile yet. {connectLink} on the Accounts page. You can save this
+        destination now and link the account later.
       </div>
     );
   }
@@ -220,7 +223,7 @@ function AccountField({ info, accounts, value, error, disabled, onChange }: Acco
     ) : !value ? (
       <span className="item-warn">Without an account the app can't manage this {info.name} channel.</span>
     ) : (
-      `The ${info.name} account this destination streams to.`
+      `The ${info.name} account (of this profile) this destination streams to.`
     );
   return (
     <Field label="Account" error={error} help={help}>

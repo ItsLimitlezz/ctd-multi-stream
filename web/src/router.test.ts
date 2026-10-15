@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSearch, matchRoute, normalizePath, ROUTES, safeReturnPath } from './router';
+import { buildSearch, matchRoute, normalizePath, ROUTES, safeReturnPath, withStickyParams } from './router';
 
 describe('router helpers', () => {
   it('matches known routes and falls back to the dashboard', () => {
@@ -14,7 +14,28 @@ describe('router helpers', () => {
 
   it('marks admin routes', () => {
     const admin = ROUTES.filter((r) => r.adminOnly).map((r) => r.name);
-    expect(admin).toEqual(['destinations', 'accounts', 'settings']);
+    expect(admin).toEqual(['destinations', 'accounts', 'settings', 'profiles']);
+  });
+
+  it('has a profiles page outside the main nav (reached from the switcher and Settings)', () => {
+    expect(matchRoute('/profiles').name).toBe('profiles');
+    expect(matchRoute('/profile').name).toBe('profile'); // the user's own page is unchanged
+    expect(ROUTES.find((r) => r.name === 'profiles')?.nav).toBe(false);
+  });
+
+  it('keeps the current profile on in-app links', () => {
+    const here = '?profile=p2&tab=api';
+    expect(withStickyParams('/chat', here)).toBe('/chat?profile=p2');
+    expect(withStickyParams('/settings?tab=obs', here)).toBe('/settings?tab=obs&profile=p2');
+    expect(withStickyParams('/settings?tab=obs#x', here)).toBe('/settings?tab=obs&profile=p2#x');
+    // An explicit profile wins (switching through a link).
+    expect(withStickyParams('/accounts?profile=other', here)).toBe('/accounts?profile=other');
+    // Nothing to carry, or not an app path.
+    expect(withStickyParams('/chat', '?tab=api')).toBe('/chat');
+    expect(withStickyParams('/chat', '')).toBe('/chat');
+    expect(withStickyParams('https://example.com/x', here)).toBe('https://example.com/x');
+    expect(withStickyParams('//evil.example', here)).toBe('//evil.example');
+    expect(withStickyParams('?tab=x', here)).toBe('?tab=x');
   });
 
   it('normalizes paths', () => {

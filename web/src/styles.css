@@ -1260,7 +1260,18 @@ img {
   text-align: center;
 }
 
-@media (max-width: 900px) {
+/* The top bar also holds the profile switcher: give the full nav a bit more room. */
+@media (max-width: 1360px) {
+  .brand-text,
+  .user-name {
+    display: none;
+  }
+  .brand {
+    margin-right: 0;
+  }
+}
+
+@media (max-width: 1100px) {
   .nav-toggle {
     display: inline-flex;
     margin-left: -6px;
@@ -1305,9 +1316,217 @@ img {
   }
 }
 
-@media (max-width: 480px) {
-  .brand-text {
+/* ---------------------------------------------------------------- profiles (switcher, tags) */
+
+.profile-dot {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--neutral);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.18);
+}
+.profile-dot.is-empty {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--text-faint);
+}
+.profile-dot.is-inline {
+  margin-right: 6px;
+  vertical-align: 0;
+}
+.profile-dot.is-lg {
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+}
+
+/* The current profile's colour underlines the top bar. */
+.app.has-profile-color .topbar {
+  box-shadow: inset 0 -2px 0 var(--profile-color);
+}
+
+.profile-switcher {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.profile-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  min-width: 0;
+  height: 34px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-size: 0.88rem;
+  font-weight: 620;
+  cursor: pointer;
+}
+.profile-button:hover,
+.profile-button[aria-expanded='true'] {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.profile-button-name {
+  min-width: 0;
+}
+.profile-button .dot.profile-button-live {
+  width: 7px;
+  height: 7px;
+}
+.profile-button-chevron {
+  flex: none;
+  color: var(--text-muted);
+}
+.profile-menu {
+  left: 0;
+  right: auto;
+  min-width: 260px;
+  max-width: min(340px, calc(100vw - 2 * var(--gutter)));
+  max-height: calc(100dvh - var(--topbar-h) - 16px);
+  overflow-y: auto;
+}
+.profile-menu-live {
+  margin-top: 4px;
+  color: var(--live);
+  font-size: 0.85rem;
+  font-weight: 650;
+}
+.profile-menu-item {
+  gap: 10px;
+  min-height: 42px;
+}
+.profile-menu-item.is-current {
+  background: var(--accent-soft);
+}
+.profile-menu-name {
+  flex: 1;
+  font-weight: 560;
+}
+.profile-menu-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--tone);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.profile-menu-status .dot {
+  width: 7px;
+  height: 7px;
+}
+.profile-menu-test {
+  display: inline-flex;
+  flex: none;
+  color: var(--test);
+}
+.profile-menu-check {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  color: var(--accent);
+}
+.profile-menu-manage {
+  gap: 10px;
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  color: var(--text-muted);
+}
+.menu-note {
+  padding: 8px 10px;
+}
+
+.live-summary {
+  max-width: 360px;
+  min-width: 0;
+}
+.live-summary-long {
+  display: none;
+}
+@media (min-width: 1440px) {
+  .live-summary-short {
     display: none;
+  }
+  .live-summary-long {
+    display: inline;
+  }
+}
+/* Phones: a compact "● 2" pill (the full list is in its title / aria-label) so a profile live in the
+   background stays visible. */
+@media (max-width: 560px) {
+  .live-pill.live-summary {
+    gap: 5px;
+    padding: 0 8px;
+  }
+  .live-summary-word {
+    display: none;
+  }
+}
+
+.profile-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  font-size: 0.82rem;
+  vertical-align: middle;
+}
+.profile-tag-label {
+  color: var(--text-muted);
+}
+.page-profile {
+  margin-top: 8px;
+}
+.dash-profile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pairing-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border));
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 0.92rem;
+}
+.pairing-banner > svg {
+  flex: none;
+  color: var(--accent);
+}
+.pairing-banner-text {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 480px) {
+  .brand {
+    display: none;
+  }
+  .profile-button {
+    max-width: 100%;
+    padding: 0 6px 0 9px;
   }
   .test-pill-long {
     display: none;

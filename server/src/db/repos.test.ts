@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_PROFILE_ID } from '../../../shared/types.js';
 import { createSecretBox } from '../security/secretbox.js';
 import type { Repos } from '../services.js';
 import { MIGRATIONS, migrate, openDatabase, schemaVersion, type Db } from './database.js';
@@ -225,8 +226,8 @@ describe('auth sessions repo', () => {
 
 describe('accounts and destinations repos', () => {
   it('CRUDs accounts', () => {
-    const acc = repos.accounts.create({ platform: 'twitch', label: 'Main', options: { mode: 'page' } });
-    expect(acc).toMatchObject({ platform: 'twitch', label: 'Main', status: 'pending', statusMessage: null, options: { mode: 'page' } });
+    const acc = repos.accounts.create({ profileId: DEFAULT_PROFILE_ID, platform: 'twitch', label: 'Main', options: { mode: 'page' } });
+    expect(acc).toMatchObject({ profileId: 'default', platform: 'twitch', label: 'Main', status: 'pending', statusMessage: null, options: { mode: 'page' } });
     const upd = repos.accounts.update(acc.id, { status: 'connected', statusMessage: 'ok', label: 'Renamed' });
     expect(upd).toMatchObject({ status: 'connected', statusMessage: 'ok', label: 'Renamed', options: { mode: 'page' } });
     expect(repos.accounts.update(acc.id, { statusMessage: null }).statusMessage).toBeNull();
@@ -237,8 +238,9 @@ describe('accounts and destinations repos', () => {
   });
 
   it('CRUDs destinations and detaches accounts', () => {
-    const acc = repos.accounts.create({ platform: 'kick', label: 'K', options: {} });
+    const acc = repos.accounts.create({ profileId: DEFAULT_PROFILE_ID, platform: 'kick', label: 'K', options: {} });
     const d1 = repos.destinations.create({
+      profileId: DEFAULT_PROFILE_ID,
       platform: 'kick',
       accountId: acc.id,
       name: 'Kick main',
@@ -247,8 +249,9 @@ describe('accounts and destinations repos', () => {
       options: { a: 1 },
       ingestUrl: 'rtmps://example.invalid/app',
     });
-    expect(d1).toMatchObject({ accountId: acc.id, feed: 'landscape', enabled: true, hasStreamKey: false, options: { a: 1 } });
+    expect(d1).toMatchObject({ profileId: 'default', accountId: acc.id, feed: 'landscape', enabled: true, hasStreamKey: false, options: { a: 1 } });
     const d2 = repos.destinations.create({
+      profileId: DEFAULT_PROFILE_ID,
       platform: 'custom',
       accountId: null,
       name: 'Custom',
@@ -268,6 +271,32 @@ describe('accounts and destinations repos', () => {
     expect(() => repos.destinations.update('missing', { name: 'x' })).toThrow(NotFoundError);
     repos.destinations.delete(d2.id);
     expect(repos.destinations.list()).toHaveLength(1);
+  });
+
+  it('scopes accounts and destinations to their profile', () => {
+    const club = repos.profiles.create({ name: 'DPRTMNT', color: null });
+    const mine = repos.accounts.create({ profileId: DEFAULT_PROFILE_ID, platform: 'twitch', label: 'Miami', options: {} });
+    const theirs = repos.accounts.create({ profileId: club.id, platform: 'twitch', label: 'Club', options: {} });
+    expect(theirs.profileId).toBe(club.id);
+    expect(repos.accounts.list().map((a) => a.id)).toEqual([mine.id, theirs.id]);
+    expect(repos.accounts.list(DEFAULT_PROFILE_ID).map((a) => a.id)).toEqual([mine.id]);
+    expect(repos.accounts.list(club.id).map((a) => a.id)).toEqual([theirs.id]);
+    expect(repos.accounts.list('nope')).toEqual([]);
+    // Updates never move an account to another profile.
+    expect(repos.accounts.update(theirs.id, { label: 'Club 2' }).profileId).toBe(club.id);
+
+    const base = { platform: 'custom' as const, accountId: null, feed: 'landscape' as const, enabled: true, options: {}, ingestUrl: null };
+    const d1 = repos.destinations.create({ ...base, profileId: DEFAULT_PROFILE_ID, name: 'A' });
+    const d2 = repos.destinations.create({ ...base, profileId: club.id, name: 'B' });
+    expect(repos.destinations.get(d2.id)?.profileId).toBe(club.id);
+    expect(repos.destinations.list(club.id).map((d) => d.id)).toEqual([d2.id]);
+    expect(repos.destinations.list(DEFAULT_PROFILE_ID).map((d) => d.id)).toEqual([d1.id]);
+    expect(repos.destinations.list().map((d) => d.id)).toEqual([d1.id, d2.id]);
+    expect(repos.destinations.update(d2.id, { name: 'B2', enabled: false }).profileId).toBe(club.id);
+
+    // A caller that forgets the profile (older code) lands in the default profile.
+    const legacy = repos.destinations.create({ ...base, name: 'C' } as Parameters<Repos['destinations']['create']>[0]);
+    expect(legacy.profileId).toBe(DEFAULT_PROFILE_ID);
   });
 });
 

@@ -1,11 +1,24 @@
 // HTTP plumbing for /api/v1: RFC 9457 problem details, bearer tokens, per-token limits.
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import { canonicalIp } from '../tls/public-ip.js';
 
 export const PROBLEM_TYPE = 'https://github.com/ItsLimitlezz/ctd-multi-stream/blob/main/docs/API.md#errors';
 export const PROBLEM_CONTENT_TYPE = 'application/problem+json';
 
-export type ProblemCode = 'unauthenticated' | 'missing_scope' | 'invalid' | 'rate_limited' | 'not_found' | 'internal';
+export type ProblemCode =
+  | 'unauthenticated'
+  | 'missing_scope'
+  | 'invalid'
+  | 'rate_limited'
+  | 'not_found'
+  | 'unknown_profile'
+  | 'profile_forbidden'
+  | 'app_owned'
+  | 'limit'
+  | 'denied'
+  | 'expired'
+  | 'internal';
 
 const TITLES: Record<ProblemCode, string> = {
   unauthenticated: 'Unauthenticated',
@@ -13,8 +26,37 @@ const TITLES: Record<ProblemCode, string> = {
   invalid: 'Invalid request',
   rate_limited: 'Rate limited',
   not_found: 'Not found',
+  unknown_profile: 'Unknown profile',
+  profile_forbidden: 'Other profile',
+  app_owned: 'App registered by another token',
+  limit: 'Limit reached',
+  denied: 'Pairing denied',
+  expired: 'Pairing expired',
   internal: 'Internal error',
 };
+
+export const PROBLEM_CODES = Object.keys(TITLES) as ProblemCode[];
+
+export function isProblemCode(value: unknown): value is ProblemCode {
+  return typeof value === 'string' && Object.hasOwn(TITLES, value);
+}
+
+/**
+ * An error the /api/v1 error handler turns into a problem response (status + code + message),
+ * thrown by the hub services (AppRegistry, PairingService) and route helpers.
+ */
+export class ApiProblem extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly code: ProblemCode,
+    message: string,
+    /** Sent as Retry-After (seconds) when set. */
+    readonly retryAfterSec?: number,
+  ) {
+    super(message);
+    this.name = 'ApiProblem';
+  }
+}
 
 export interface Problem {
   type: string;
@@ -31,6 +73,18 @@ export function problem(status: number, code: ProblemCode, detail: string): Prob
 export function sendProblem(reply: FastifyReply, status: number, code: ProblemCode, detail: string): FastifyReply {
   if (status === 401) reply.header('WWW-Authenticate', 'Bearer realm="ctd-multi-stream"');
   return reply.code(status).type(PROBLEM_CONTENT_TYPE).send(problem(status, code, detail));
+}
+
+/** The parsed query string as a plain record. */
+export function query(req: FastifyRequest): Record<string, unknown> {
+  const q = req.query;
+  return q && typeof q === 'object' ? (q as Record<string, unknown>) : {};
+}
+
+/** Route parameters as a plain record. */
+export function params(req: FastifyRequest): Record<string, unknown> {
+  const p = req.params;
+  return p && typeof p === 'object' ? (p as Record<string, unknown>) : {};
 }
 
 /** Longest secret we bother hashing (real ones are 51 characters). */
@@ -52,6 +106,25 @@ export function presentedToken(req: FastifyRequest, allowQuery: boolean): string
     if (q !== undefined) return '';
   }
   return null;
+}
+
+/**
+ * The key per-address limits count a client under: an IPv4 address as is (IPv4-mapped IPv6
+ * unwrapped), an IPv6 address by its /64 (one host usually holds a whole /64, so per-address
+ * limits on full IPv6 addresses would be trivial to dodge). 'unknown' when there is no usable address.
+ */
+export function addressBucket(ip: string | null | undefined): string {
+  const c = ip ? canonicalIp(ip.replace(/%.*$/, '')) : null;
+  if (!c) return 'unknown';
+  if (c.type === 'ipv4') return c.ip;
+  // Canonical IPv6 is compressed lower-case hex without a dotted tail: expand the "::".
+  const halves = c.ip.split('::');
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  const groups = [...head, ...Array.from({ length: Math.max(0, fill) }, () => '0'), ...tail];
+  if (groups.length !== 8) return c.ip;
+  return `${groups.slice(0, 4).join(':')}::/64`;
 }
 
 /** In-memory sliding-window limiter: at most `limit` hits per `windowMs` per key. */

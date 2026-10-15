@@ -36,6 +36,7 @@ describe('api tokens repo', () => {
       id: expect.stringMatching(/^[0-9a-f-]{36}$/),
       name: 'CTD Overlay',
       scopes: ['chat:read', 'status:read'], // canonical order
+      profileId: null, // every profile
       prefix: secret.slice(0, 12),
       createdAt: '2026-10-13T12:00:00.000Z',
       createdBy: 'admin',
@@ -101,6 +102,22 @@ describe('api tokens repo', () => {
     expect(repo.list()[0]?.scopes).toEqual([]);
     db.prepare('UPDATE api_tokens SET scopes = ? WHERE id = ?').run('["status:read","nope"]', token.id);
     expect(repo.list()[0]?.scopes).toEqual(['status:read']);
+  });
+
+  it('stores the profile a token is limited to (null = every profile)', () => {
+    const limited = repo.create({ name: 'Club overlay', scopes: ['chat:read', 'apps:read', 'apps:write'], createdBy: null, profileId: 'club-id' });
+    const every = repo.create({ name: 'OBS', scopes: ['ingest:read'], createdBy: null, profileId: null });
+    const omitted = repo.create({ name: 'Old client', scopes: ['status:read'], createdBy: null });
+    expect(limited.token).toMatchObject({ profileId: 'club-id', scopes: ['chat:read', 'apps:read', 'apps:write'] });
+    expect(every.token.profileId).toBeNull();
+    expect(omitted.token.profileId).toBeNull();
+    expect(repo.verify(limited.secret)?.profileId).toBe('club-id');
+    expect(repo.verify(every.secret)?.profileId).toBeNull();
+    expect(repo.list().map((t) => [t.name, t.profileId])).toEqual([
+      ['Club overlay', 'club-id'],
+      ['OBS', null],
+      ['Old client', null],
+    ]);
   });
 
   it('generates distinct secrets', () => {

@@ -1,17 +1,22 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FeedState } from '../../../shared/types.js';
 import type { AppConfig } from '../config.js';
+import { openDatabase, type Db } from '../db/database.js';
+import { createRepos } from '../db/repos.js';
 import { EventBus } from '../events.js';
-import type { MediaServer } from '../services.js';
+import { createSecretBox } from '../security/secretbox.js';
+import type { MediaMtxAuthRequest, MediaServer, Repos } from '../services.js';
 import type { MtxPath } from './feed-state.js';
 import { createMediaServer, type MediaServerDeps } from './mediamtx.js';
-import { captureLogger, fakeSpawn, flush, memorySecrets, type FakeChild } from './test-helpers.js';
+import { captureLogger, fakeSpawn, flush, type FakeChild } from './test-helpers.js';
 
 let tmp: string;
 let servers: MediaServer[] = [];
+let dbs: Db[] = [];
 
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'ctd-media-'));
@@ -20,10 +25,12 @@ afterEach(async () => {
   vi.useRealTimers();
   await Promise.all(servers.map((s) => s.stop()));
   servers = [];
+  for (const db of dbs) db.close();
+  dbs = [];
   await fs.rm(tmp, { recursive: true, force: true });
 });
 
-/** A fake MediaMTX control API backed by a mutable path list. */
+/** A fake MediaMTX control API backed by a mutable path list (regex paths appear while in use). */
 function fakeApi() {
   const paths: MtxPath[] = [
     { name: 'live/landscape', online: false, tracks2: [], inboundBytes: 0, source: null },
@@ -37,11 +44,22 @@ function fakeApi() {
     if (url.includes('/kick/')) return new Response(null, { status: 200 });
     return new Response('not found', { status: 404 });
   });
-  const set = (name: string, patch: Partial<MtxPath>) => Object.assign(paths.find((p) => p.name === name)!, patch);
-  return { fetch: fetchFn as unknown as typeof fetch, requests, set };
+  const set = (name: string, patch: Partial<MtxPath>) => {
+    let p = paths.find((x) => x.name === name);
+    if (!p) {
+      p = { name, online: false, tracks2: [], inboundBytes: 0, source: null };
+      paths.push(p);
+    }
+    Object.assign(p, patch);
+  };
+  const remove = (name: string) => {
+    const i = paths.findIndex((x) => x.name === name);
+    if (i >= 0) paths.splice(i, 1);
+  };
+  return { fetch: fetchFn as unknown as typeof fetch, requests, set, remove };
 }
 
-async function setup(opts: { bin?: string; secrets?: Record<string, string>; deps?: MediaServerDeps } = {}) {
+async function setup(opts: { bin?: string; seed?: (repos: Repos) => Promise<void>; deps?: MediaServerDeps } = {}) {
   let bin = opts.bin;
   if (bin === undefined) {
     // Own folder: on Linux <tmp>/mediamtx would collide with the config dir <dataDir>/mediamtx/.
@@ -54,12 +72,15 @@ async function setup(opts: { bin?: string; secrets?: Record<string, string>; dep
   const bus = new EventBus();
   const feedEvents: FeedState[] = [];
   bus.on('feed', (s) => feedEvents.push(s));
-  const secrets = memorySecrets(opts.secrets);
+  const db = openDatabase(':memory:');
+  dbs.push(db);
+  const repos = createRepos(db, createSecretBox(crypto.randomBytes(32)));
+  await opts.seed?.(repos);
   const sp = fakeSpawn();
   const api = fakeApi();
   const cap = captureLogger();
   const server = createMediaServer(
-    { config, bus, log: cap.log, secrets },
+    { config, bus, log: cap.log, repos },
     { spawn: sp.spawn, fetch: api.fetch, readyTimeoutMs: 0, pollIntervalMs: 10, ...opts.deps },
   );
   servers.push(server);
@@ -70,7 +91,8 @@ async function setup(opts: { bin?: string; secrets?: Record<string, string>; dep
     return `http://127.0.0.1:${port}/auth`;
   };
   const child = (): FakeChild => sp.last()!.child;
-  return { server, config, bus, feedEvents, secrets, sp, api, logs: cap.text, configPath, authUrl, child };
+  const secret = (scope: string, key: string) => repos.secrets.scoped(scope).get(key);
+  return { server, config, bus, feedEvents, repos, secret, sp, api, logs: cap.text, configPath, authUrl, child };
 }
 
 async function waitFor(check: () => boolean, ms = 2000): Promise<void> {
@@ -86,46 +108,67 @@ async function postAuth(url: string, body: Record<string, unknown>): Promise<num
   return res.status;
 }
 
-describe('MediaServer', () => {
+const publishReq = (pathName: string, key: string): MediaMtxAuthRequest => ({
+  user: '',
+  password: '',
+  ip: '192.168.1.9',
+  action: 'publish',
+  path: pathName,
+  protocol: 'rtmp',
+  id: null,
+  query: `key=${key}`,
+});
+
+describe('MediaServer (default profile)', () => {
   it('generates keys, writes the config and spawns MediaMTX', async () => {
-    const { server, secrets, sp, configPath, authUrl } = await setup();
+    const { server, secret, sp, configPath, authUrl } = await setup();
     await server.start();
 
-    for (const k of ['landscape', 'vertical', 'internalReader']) expect(secrets.data.get(k)).toMatch(/^[A-Za-z0-9_-]{24}$/);
-    expect(await server.ingestKeys()).toEqual({ landscape: secrets.data.get('landscape'), vertical: secrets.data.get('vertical') });
+    for (const k of ['landscape', 'vertical', 'internalReader']) expect(await secret('ingest', k)).toMatch(/^[A-Za-z0-9_-]{24}$/);
+    const landscape = (await secret('ingest', 'landscape'))!;
+    expect(await server.ingestKeys('default')).toEqual({ landscape, vertical: await secret('ingest', 'vertical') });
+    expect(await server.streamKeyField('default', 'landscape')).toBe(`landscape?key=${landscape}`);
     expect(server.appName).toBe('live');
 
     const yml = await fs.readFile(configPath, 'utf8');
     expect(yml).toContain('rtmpAddress: ":1935"');
     expect(yml).toContain('apiAddress: "127.0.0.1:9997"');
+    expect(yml).toContain('"~^live/[a-z0-9-]{1,32}/(landscape|vertical)$":');
 
     expect(sp.calls).toHaveLength(1);
     expect(sp.calls[0]?.args).toEqual([configPath]);
     expect(sp.calls[0]?.options.cwd).toBe(path.dirname(configPath));
 
     const url = await authUrl();
-    const key = secrets.data.get('landscape');
-    expect(await postAuth(url, { action: 'publish', path: 'live/landscape', query: `key=${key}` })).toBe(200);
+    expect(await postAuth(url, { action: 'publish', path: 'live/landscape', query: `key=${landscape}` })).toBe(200);
     expect(await postAuth(url, { action: 'publish', path: 'live/landscape', query: 'key=wrong' })).toBe(401);
-    expect(await postAuth(url, { action: 'publish', path: 'live/other', query: `key=${key}` })).toBe(401);
-    const pass = secrets.data.get('internalReader');
+    expect(await postAuth(url, { action: 'publish', path: 'live/other', query: `key=${landscape}` })).toBe(401);
+    expect(await postAuth(url, { action: 'publish', path: 'live/main/landscape', query: `key=${landscape}` })).toBe(401);
+    const pass = (await secret('ingest', 'internalReader'))!;
     expect(await postAuth(url, { action: 'read', path: 'live/landscape', ip: '127.0.0.1', user: 'internal', password: pass })).toBe(200);
     expect(await postAuth(url, { action: 'read', path: 'live/landscape', ip: '192.168.1.9', user: 'internal', password: pass })).toBe(401);
 
-    expect(server.readUrl('vertical')).toBe(`rtmp://127.0.0.1:1935/live/vertical?user=internal&pass=${pass}`);
+    expect(server.readUrl('default', 'vertical')).toBe(`rtmp://127.0.0.1:1935/live/vertical?user=internal&pass=${pass}`);
   });
 
-  it('keeps stored keys across restarts', async () => {
+  it("keeps the owner's stored keys (OBS settings keep working)", async () => {
     const stored = { landscape: 'AAAAAAAAAAAAAAAAAAAAAAAA', vertical: 'BBBBBBBBBBBBBBBBBBBBBBBB', internalReader: 'CCCCCCCCCCCCCCCCCCCCCCCC' };
-    const { server, secrets } = await setup({ secrets: stored });
+    const { server, secret } = await setup({
+      seed: async (repos) => {
+        for (const [k, v] of Object.entries(stored)) await repos.secrets.scoped('ingest').set(k, v);
+      },
+    });
     await server.start();
-    expect(Object.fromEntries(secrets.data)).toEqual(stored);
+    for (const [k, v] of Object.entries(stored)) expect(await secret('ingest', k)).toBe(v);
+    expect(await server.streamKeyField('default', 'landscape')).toBe('landscape?key=AAAAAAAAAAAAAAAAAAAAAAAA');
+    expect(await server.streamKeyField('default', 'vertical')).toBe('vertical?key=BBBBBBBBBBBBBBBBBBBBBBBB');
+    expect(server.authorize(publishReq('live/landscape', stored.landscape))).toBe(true);
   });
 
   it('polls the control API and emits feed events', async () => {
     const { server, api, feedEvents } = await setup();
     await server.start();
-    expect(server.feeds().map((f) => f.online)).toEqual([false, false]);
+    expect(server.feeds('default').map((f) => f.online)).toEqual([false, false]);
 
     api.set('live/landscape', {
       online: true,
@@ -134,9 +177,15 @@ describe('MediaServer', () => {
       tracks2: [{ codec: 'H264', codecProps: { width: 1280, height: 720 } }, { codec: 'MPEG-4 Audio', codecProps: { sampleRate: 48000, channelCount: 2 } }],
     });
     await waitFor(() => feedEvents.some((e) => e.online));
-    expect(feedEvents[0]).toMatchObject({ feed: 'landscape', online: true, since: '2026-10-11T17:00:00.000Z', video: { codec: 'h264', width: 1280, height: 720 } });
-    expect(server.feed('landscape').online).toBe(true);
-    expect(server.feed('vertical').online).toBe(false);
+    expect(feedEvents[0]).toMatchObject({
+      profileId: 'default',
+      feed: 'landscape',
+      online: true,
+      since: '2026-10-11T17:00:00.000Z',
+      video: { codec: 'h264', width: 1280, height: 720 },
+    });
+    expect(server.feed('default', 'landscape').online).toBe(true);
+    expect(server.feed('default', 'vertical')).toMatchObject({ profileId: 'default', online: false });
 
     api.set('live/landscape', { online: false });
     await waitFor(() => feedEvents.at(-1)?.online === false);
@@ -172,7 +221,7 @@ describe('MediaServer', () => {
     expect(sp.calls).toHaveLength(0);
     expect(logs()).toContain('MediaMTX not found at');
     expect(logs()).toContain('npm run setup-tools');
-    expect(server.feeds().every((f) => !f.online)).toBe(true);
+    expect(server.feeds('default').every((f) => !f.online)).toBe(true);
   });
 
   it('does not restart when spawning fails with ENOENT', async () => {
@@ -186,21 +235,20 @@ describe('MediaServer', () => {
   });
 
   it('rotates a key, kicks the current publisher and only accepts the new key', async () => {
-    const { server, api, secrets } = await setup();
+    const { server, api, secret } = await setup();
     await server.start();
-    const old = secrets.data.get('landscape')!;
+    const old = (await secret('ingest', 'landscape'))!;
     api.set('live/landscape', { online: true, source: { type: 'rtmpConn', id: 'conn-1' } });
 
-    const next = await server.rotateIngestKey('landscape');
+    const next = await server.rotateIngestKey('default', 'landscape');
     expect(next).not.toBe(old);
     expect(next).toMatch(/^[A-Za-z0-9_-]{24}$/);
-    expect(secrets.data.get('landscape')).toBe(next);
-    expect((await server.ingestKeys()).landscape).toBe(next);
+    expect(await secret('ingest', 'landscape')).toBe(next);
+    expect((await server.ingestKeys('default')).landscape).toBe(next);
     expect(api.requests).toContainEqual({ method: 'POST', url: 'http://127.0.0.1:9997/v3/rtmp/conns/kick/conn-1' });
 
-    const req = { user: '', password: '', ip: '192.168.1.9', action: 'publish', path: 'live/landscape', protocol: 'rtmp', id: null } as const;
-    expect(server.authorize({ ...req, query: `key=${old}` })).toBe(false);
-    expect(server.authorize({ ...req, query: `key=${next}` })).toBe(true);
+    expect(server.authorize(publishReq('live/landscape', old))).toBe(false);
+    expect(server.authorize(publishReq('live/landscape', next))).toBe(true);
   });
 
   it('stop() terminates MediaMTX, closes the auth endpoint and marks feeds offline', async () => {
@@ -215,7 +263,7 @@ describe('MediaServer', () => {
     expect(proc.signals).toHaveLength(1);
     expect(feedEvents.at(-1)).toMatchObject({ feed: 'vertical', online: false });
     await expect(fetch(url, { method: 'POST', body: '{}' })).rejects.toThrow();
-    expect(() => server.readUrl('landscape')).not.toThrow(); // keys stay cached
+    expect(() => server.readUrl('default', 'landscape')).not.toThrow(); // keys stay cached
   });
 
   it('forwards MediaMTX log lines without secrets', async () => {
@@ -231,6 +279,151 @@ describe('MediaServer', () => {
 
   it('readUrl() before start() throws', async () => {
     const { server } = await setup();
-    expect(() => server.readUrl('landscape')).toThrow(/not started/);
+    expect(() => server.readUrl('default', 'landscape')).toThrow(/not started/);
+  });
+});
+
+describe('MediaServer (several profiles)', () => {
+  async function withClub() {
+    let clubId = '';
+    const t = await setup({
+      seed: async (repos) => {
+        clubId = repos.profiles.create({ name: 'DPRTMNT', color: null }).id;
+      },
+    });
+    return { ...t, clubId };
+  }
+
+  it('gives each profile its own keys, paths and OBS stream key field', async () => {
+    const { server, secret, clubId, logs } = await withClub();
+    await server.start();
+
+    const club = await server.ingestKeys(clubId);
+    expect(club.landscape).toMatch(/^[A-Za-z0-9_-]{24}$/);
+    expect(await secret(`ingest:${clubId}`, 'landscape')).toBe(club.landscape);
+    expect(await secret(`ingest:${clubId}`, 'vertical')).toBe(club.vertical);
+    expect(await secret(`ingest:${clubId}`, 'internalReader')).toBeNull(); // shared, stays in 'ingest'
+    const main = await server.ingestKeys('default');
+    expect(new Set([main.landscape, main.vertical, club.landscape, club.vertical]).size).toBe(4);
+
+    expect(await server.streamKeyField(clubId, 'landscape')).toBe(`dprtmnt/landscape?key=${club.landscape}`);
+    expect(await server.streamKeyField(clubId, 'vertical')).toBe(`dprtmnt/vertical?key=${club.vertical}`);
+    const pass = encodeURIComponent((await secret('ingest', 'internalReader'))!);
+    expect(server.readUrl(clubId, 'vertical')).toBe(`rtmp://127.0.0.1:1935/live/dprtmnt/vertical?user=internal&pass=${pass}`);
+
+    // Two OBS at once: each profile's key only works on its own paths.
+    expect(server.authorize(publishReq('live/landscape', main.landscape))).toBe(true);
+    expect(server.authorize(publishReq('live/dprtmnt/landscape', club.landscape))).toBe(true);
+    expect(server.authorize(publishReq('live/dprtmnt/vertical', club.vertical))).toBe(true);
+    expect(server.authorize(publishReq('live/dprtmnt/landscape', main.landscape))).toBe(false);
+    expect(server.authorize(publishReq('live/landscape', club.landscape))).toBe(false);
+    expect(server.authorize(publishReq('live/dprtmnt/vertical', club.landscape))).toBe(false);
+    expect(server.authorize(publishReq('live/other/landscape', club.landscape))).toBe(false);
+
+    expect(logs()).not.toContain(club.landscape);
+    expect(logs()).not.toContain(main.landscape);
+  });
+
+  it('accepts a profile added while MediaMTX runs, without restarting it', async () => {
+    const { server, repos, sp, configPath } = await setup();
+    await server.start();
+    const yml = await fs.readFile(configPath, 'utf8');
+
+    const club = repos.profiles.create({ name: 'Sunday Club', color: null });
+    await server.profileAdded(club);
+    const keys = await server.ingestKeys(club.id);
+    expect(server.authorize(publishReq('live/sunday-club/landscape', keys.landscape))).toBe(true);
+    expect(sp.calls).toHaveLength(1); // same MediaMTX process
+    expect(await fs.readFile(configPath, 'utf8')).toBe(yml); // config unchanged
+  });
+
+  it('learns a profile it was not told about on its first publish (OBS retries)', async () => {
+    const { server, repos, secret } = await setup();
+    await server.start();
+    const club = repos.profiles.create({ name: 'Late', color: null });
+    await repos.secrets.scoped(`ingest:${club.id}`).set('landscape', 'LateLandscapeKey_0123456');
+    await repos.secrets.scoped(`ingest:${club.id}`).set('vertical', 'LateVerticalKey_01234567');
+    expect(server.authorize(publishReq('live/late/landscape', 'LateLandscapeKey_0123456'))).toBe(false); // loading
+    await waitFor(() => server.authorize(publishReq('live/late/landscape', 'LateLandscapeKey_0123456')));
+    expect(await secret(`ingest:${club.id}`, 'landscape')).toBe('LateLandscapeKey_0123456'); // not regenerated
+  });
+
+  it('tracks each profile feed separately, with profileId on every event', async () => {
+    const { server, api, feedEvents, clubId } = await withClub();
+    await server.start();
+    api.set('live/landscape', { online: true, tracks2: [{ codec: 'H264', codecProps: { width: 1920, height: 1080 } }] });
+    api.set('live/dprtmnt/landscape', { online: true, tracks2: [{ codec: 'H264', codecProps: { width: 1280, height: 720 } }] });
+    await waitFor(() => feedEvents.filter((e) => e.online).length === 2);
+    expect(feedEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ profileId: 'default', feed: 'landscape', online: true, video: { codec: 'h264', width: 1920, height: 1080 } }),
+        expect.objectContaining({ profileId: clubId, feed: 'landscape', online: true, video: { codec: 'h264', width: 1280, height: 720 } }),
+      ]),
+    );
+    expect(server.feeds(clubId).map((f) => [f.profileId, f.feed, f.online])).toEqual([
+      [clubId, 'landscape', true],
+      [clubId, 'vertical', false],
+    ]);
+    expect(server.feed('default', 'landscape').video?.width).toBe(1920);
+
+    // The club's OBS stops (its regex path disappears); the default profile stays online.
+    api.remove('live/dprtmnt/landscape');
+    await waitFor(() => feedEvents.at(-1)?.online === false);
+    expect(feedEvents.at(-1)).toMatchObject({ profileId: clubId, feed: 'landscape', online: false });
+    expect(server.feed('default', 'landscape').online).toBe(true);
+    expect(server.feeds('unknown-profile')).toEqual([
+      expect.objectContaining({ profileId: 'unknown-profile', feed: 'landscape', online: false }),
+      expect.objectContaining({ profileId: 'unknown-profile', feed: 'vertical', online: false }),
+    ]);
+  });
+
+  it("rotates one profile's key without touching the others", async () => {
+    const { server, api, clubId, secret } = await withClub();
+    await server.start();
+    const main = await server.ingestKeys('default');
+    const before = await server.ingestKeys(clubId);
+    api.set('live/dprtmnt/vertical', { online: true, source: { type: 'rtmpConn', id: 'club-conn' } });
+    const next = await server.rotateIngestKey(clubId, 'vertical');
+    expect(await secret(`ingest:${clubId}`, 'vertical')).toBe(next);
+    expect(await server.ingestKeys(clubId)).toEqual({ landscape: before.landscape, vertical: next });
+    expect(await server.ingestKeys('default')).toEqual(main);
+    expect(api.requests).toContainEqual({ method: 'POST', url: 'http://127.0.0.1:9997/v3/rtmp/conns/kick/club-conn' });
+    expect(server.authorize(publishReq('live/dprtmnt/vertical', before.vertical))).toBe(false);
+    expect(server.authorize(publishReq('live/dprtmnt/vertical', next))).toBe(true);
+  });
+
+  it('removing a profile kicks its OBS, forgets its keys and never touches the default profile', async () => {
+    const { server, api, repos, clubId, secret, feedEvents } = await withClub();
+    await server.start();
+    const club = await server.ingestKeys(clubId);
+    api.set('live/dprtmnt/landscape', { online: true, tracks2: [{ codec: 'H264' }], source: { type: 'rtmpConn', id: 'club-conn' } });
+    await waitFor(() => server.feed(clubId, 'landscape').online);
+
+    await server.profileRemoved(clubId);
+    expect(api.requests).toContainEqual({ method: 'POST', url: 'http://127.0.0.1:9997/v3/rtmp/conns/kick/club-conn' });
+    expect(server.authorize(publishReq('live/dprtmnt/landscape', club.landscape))).toBe(false);
+    expect(await secret(`ingest:${clubId}`, 'landscape')).toBeNull();
+    expect(feedEvents.at(-1)).toMatchObject({ profileId: clubId, feed: 'landscape', online: false });
+    await expect(server.ingestKeys(clubId)).rejects.toMatchObject({ statusCode: 404, code: 'unknown_profile' });
+    expect(() => server.readUrl(clubId, 'landscape')).toThrow(/not found/);
+
+    // A late OBS reconnect (the profile row is deleted after this) must not resurrect its keys.
+    await flush();
+    expect(server.authorize(publishReq('live/dprtmnt/landscape', club.landscape))).toBe(false);
+    await flush();
+    expect(await secret(`ingest:${clubId}`, 'landscape')).toBeNull();
+    repos.profiles.delete(clubId);
+
+    await expect(server.profileRemoved('default')).rejects.toMatchObject({ code: 'default_profile' });
+    expect(await secret('ingest', 'landscape')).toMatch(/^[A-Za-z0-9_-]{24}$/);
+    expect(await secret('ingest', 'internalReader')).toMatch(/^[A-Za-z0-9_-]{24}$/);
+  });
+
+  it('rejects unknown profiles with 404 unknown_profile', async () => {
+    const { server } = await setup();
+    await server.start();
+    await expect(server.ingestKeys('nope')).rejects.toMatchObject({ statusCode: 404, code: 'unknown_profile' });
+    await expect(server.streamKeyField('nope', 'landscape')).rejects.toMatchObject({ code: 'unknown_profile' });
+    await expect(server.rotateIngestKey('nope', 'landscape')).rejects.toMatchObject({ code: 'unknown_profile' });
   });
 });

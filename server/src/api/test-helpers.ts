@@ -7,7 +7,20 @@ import rateLimit from '@fastify/rate-limit';
 import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
 import pino from 'pino';
-import type { ApiScope, Destination, DestinationPhase, DestinationState, PlatformId, PlatformInfo, SessionState } from '../../../shared/types.js';
+import {
+  DEFAULT_PROFILE_ID,
+  type ApiScope,
+  type ConnectedApp,
+  type Destination,
+  type DestinationPhase,
+  type DestinationState,
+  type Feed,
+  type PlatformId,
+  type PlatformInfo,
+  type Profile,
+  type ProfileSummary,
+  type SessionState,
+} from '../../../shared/types.js';
 import type { AppConfig } from '../config.js';
 import { openDatabase } from '../db/database.js';
 import { createRepos } from '../db/repos.js';
@@ -16,10 +29,13 @@ import authPlugin from '../http/auth-plugin.js';
 import { sendError } from '../http/guards.js';
 import tokenRoutes from '../http/routes/tokens.js';
 import { createSecretBox } from '../security/secretbox.js';
-import type { AppServices, Repos, TlsManager } from '../services.js';
+import type { AppServices, ConnectedAppsRepo, MediaServer, Orchestrator, OrchestratorRegistry, ProfilesRepo, Repos, TlsManager } from '../services.js';
 import dockRoutes from './dock.js';
-import { EventHub } from './event-hub.js';
+import { EventHub, eventHubDeps } from './event-hub.js';
+import { createAppRegistry, type AppRegistryHandle } from './hub.js';
 import { lanHttpPlugin } from './lan.js';
+import { createPairingService, type PairingServiceHandle } from './pairing.js';
+import { isDown } from './status.js';
 import v1Routes, { API_PREFIX } from './v1.js';
 
 export function dest(id: string, over: Partial<Destination> = {}): Destination {
@@ -71,11 +87,128 @@ export function session(over: Partial<SessionState> = {}): SessionState {
   };
 }
 
+export function offline(profileId?: string): SessionState {
+  return session({ status: 'offline', sessionId: null, startedAt: null, title: '', ...(profileId ? { profileId } : {}) });
+}
+
 export const silentLog = pino({ level: 'silent' });
 
 /** Platforms with/without test mode, by id. */
 export function platformInfo(platform: PlatformId): PlatformInfo {
   return { id: platform, name: platform[0]!.toUpperCase() + platform.slice(1), testMode: { supported: platform !== 'kick', description: '' } } as PlatformInfo;
+}
+
+// ---------------------------------------------------------------------------
+// In-memory repos for unit tests that don't need SQLite (the hub registry).
+// ---------------------------------------------------------------------------
+
+const iso = (ms: number) => new Date(ms).toISOString();
+
+export function memoryProfilesRepo(now: () => number = Date.now): ProfilesRepo {
+  const t0 = iso(now());
+  const rows: Profile[] = [{ id: DEFAULT_PROFILE_ID, name: 'Main', slug: 'main', color: null, createdAt: t0, updatedAt: t0 }];
+  const copy = (p: Profile | undefined) => (p ? { ...p } : null);
+  const slugFor = (name: string) => {
+    let base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 28) || 'profile';
+    if (['landscape', 'vertical', 'main', 'default'].includes(base)) base = `${base}-profile`;
+    let slug = base;
+    for (let i = 2; rows.some((r) => r.slug === slug); i++) slug = `${base}-${i}`;
+    return slug;
+  };
+  return {
+    list: () => rows.map((r) => ({ ...r })),
+    get: (id) => copy(rows.find((r) => r.id === id)),
+    getBySlug: (slug) => copy(rows.find((r) => r.slug === slug)),
+    create: ({ name, color }) => {
+      const ts = iso(now());
+      const p: Profile = { id: crypto.randomUUID(), name, slug: slugFor(name), color, createdAt: ts, updatedAt: ts };
+      rows.push(p);
+      return { ...p };
+    },
+    update: (id, patch) => {
+      const p = rows.find((r) => r.id === id);
+      if (!p) throw new Error('profile not found');
+      Object.assign(p, patch, { updatedAt: iso(now()) });
+      return { ...p };
+    },
+    delete: (id) => {
+      const i = rows.findIndex((r) => r.id === id);
+      if (i >= 0) rows.splice(i, 1);
+    },
+  };
+}
+
+export function memoryConnectedAppsRepo(now: () => number = Date.now): ConnectedAppsRepo {
+  const rows = new Map<string, ConnectedApp>();
+  const copy = (a: ConnectedApp | undefined) => (a ? (structuredClone(a) as ConnectedApp) : null);
+  return {
+    list: () => [...rows.values()].map((a) => copy(a)!),
+    get: (id) => copy(rows.get(id)),
+    upsert: (app) => {
+      const ts = iso(now());
+      const row: ConnectedApp = { ...structuredClone(app), registeredAt: app.registeredAt ?? ts, lastSeenAt: ts, online: false };
+      rows.set(app.id, row);
+      return copy(row)!;
+    },
+    touch: (id) => {
+      const a = rows.get(id);
+      if (a) a.lastSeenAt = iso(now());
+    },
+    delete: (id) => {
+      rows.delete(id);
+    },
+    deleteByToken: (tokenId) => {
+      for (const [id, a] of rows) if (a.tokenId === tokenId) rows.delete(id);
+    },
+  };
+}
+
+/** Orchestrator registry stand-in: one state per profile (`states`), summaries computed like the engine's. */
+export function fakeOrchestrators(repos: Repos, stateOf: (profileId: string) => SessionState): OrchestratorRegistry {
+  const unknown = () => Object.assign(new Error('Unknown profile'), { statusCode: 404, code: 'unknown_profile' });
+  const orchestrator = (profileId: string) => ({ profileId, state: () => stateOf(profileId) }) as unknown as Orchestrator;
+  return {
+    get(profileId) {
+      if (!repos.profiles.get(profileId)) throw unknown();
+      return orchestrator(profileId);
+    },
+    all: () => repos.profiles.list().map((p) => orchestrator(p.id)),
+    add: async () => {},
+    remove: async () => {},
+    init: async () => {},
+    shutdown: async () => {},
+    summaries(): ProfileSummary[] {
+      return repos.profiles.list().map((p) => {
+        const s = stateOf(p.id);
+        const byId = new Map(s.destinations.map((st) => [st.destinationId, st]));
+        const enabled = repos.destinations.list(p.id).filter((d) => d.enabled);
+        let live = 0;
+        let down = 0;
+        for (const d of enabled) {
+          const phase = byId.get(d.id)?.phase ?? 'idle';
+          if (phase === 'live') live++;
+          if (isDown(s, d, phase, platformInfo(d.platform))) down++;
+        }
+        return { ...p, status: s.status, startedAt: s.startedAt, testMode: s.testMode === true, destinations: enabled.length, live, down };
+      });
+    },
+  };
+}
+
+export function fakeMedia(repos: Repos): MediaServer {
+  const key = (profileId: string, feed: Feed) => `${feed === 'landscape' ? 'L' : 'V'}key${profileId.replace(/[^A-Za-z0-9]/g, '')}`;
+  return {
+    appName: 'live',
+    async ingestKeys(profileId: string) {
+      return { landscape: key(profileId, 'landscape'), vertical: key(profileId, 'vertical') };
+    },
+    async streamKeyField(profileId: string, feed: Feed) {
+      if (profileId === DEFAULT_PROFILE_ID) return `${feed}?key=${key(profileId, feed)}`;
+      const p = repos.profiles.get(profileId);
+      if (!p) throw new Error('unknown profile');
+      return `${p.slug}/${feed}?key=${key(profileId, feed)}`;
+    },
+  } as unknown as MediaServer;
 }
 
 export interface TestApi {
@@ -84,23 +217,39 @@ export interface TestApi {
   repos: Repos;
   bus: EventBus;
   hub: EventHub;
-  /** Mutable orchestrator state returned by services.orchestrator.state(). */
+  apps: AppRegistryHandle;
+  pairings: PairingServiceHandle;
+  /** Mutable orchestrator state of the default profile (services.orchestrators.get('default').state()). */
   state: { current: SessionState };
-  token(scopes?: ApiScope[], name?: string): string;
+  /** Session state of other profiles (offline when unset). */
+  states: Map<string, SessionState>;
+  /** The OBS host setting (Settings → OBS). */
+  settings: { ingestHost: string };
+  /** Every route registered under /api/v1 ("METHOD /path"). */
+  routes: string[];
+  token(scopes?: ApiScope[], name?: string, profileId?: string | null): string;
+  /** Create a profile and announce it like the profiles route does. */
+  addProfile(name: string, color?: string | null): Profile;
   close(): Promise<void>;
 }
 
 export async function createTestApi(opts: { tlsMode?: AppConfig['tlsMode']; heartbeatMs?: number; now?: () => number } = {}): Promise<TestApi> {
+  const now = opts.now ?? Date.now;
   const secretBox = createSecretBox(crypto.randomBytes(32));
   const db = openDatabase(':memory:');
   const repos = createRepos(db, secretBox);
   const bus = new EventBus();
   const state = { current: session({ status: 'offline', startedAt: null }) };
-  const config = { tlsMode: opts.tlsMode ?? 'self-signed', version: '9.9.9', webPort: 8443, httpPort: 8080 } as AppConfig;
+  const states = new Map<string, SessionState>();
+  const settings = { ingestHost: '' };
+  const stateOf = (profileId: string): SessionState => (profileId === DEFAULT_PROFILE_ID ? state.current : (states.get(profileId) ?? offline(profileId)));
+  const config = { tlsMode: opts.tlsMode ?? 'self-signed', version: '9.9.9', webPort: 8443, httpPort: 8080, rtmpPort: 1936 } as AppConfig;
   const tls = {
     mode: config.tlsMode,
     status: () => ({ fingerprint256: 'AA:BB', mode: config.tlsMode }),
   } as unknown as TlsManager;
+  const apps = createAppRegistry({ repos, bus, log: silentLog, now });
+  const pairings = createPairingService({ repos, bus, log: silentLog, config, now });
   const services = {
     config,
     log: silentLog,
@@ -108,22 +257,23 @@ export async function createTestApi(opts: { tlsMode?: AppConfig['tlsMode']; hear
     repos,
     secretBox,
     tls,
-    orchestrator: { state: () => state.current },
+    orchestrators: fakeOrchestrators(repos, stateOf),
+    apps,
+    pairings,
+    media: fakeMedia(repos),
     platforms: { get: (p: PlatformId) => ({ info: platformInfo(p) }), all: () => [] },
+    appSettings: () => ({ publicBaseUrl: '', ingestHost: settings.ingestHost, disconnectGraceSec: 15 }),
     publicBaseUrl: () => 'https://203.0.113.7',
   } as unknown as AppServices;
 
-  const hub = new EventHub({
-    bus,
-    log: silentLog,
-    state: () => state.current,
-    destinations: () => repos.destinations.list(),
-    destination: (id) => repos.destinations.get(id),
-    platformInfo,
-    ...(opts.now ? { now: opts.now } : {}),
-  });
+  const hub = new EventHub({ ...eventHubDeps(services), log: silentLog, platformInfo, ...(opts.now ? { now: opts.now } : {}) });
 
   const app = Fastify();
+  const routes: string[] = [];
+  app.addHook('onRoute', (r) => {
+    if (!r.url.startsWith(API_PREFIX)) return;
+    for (const m of Array.isArray(r.method) ? r.method : [r.method]) routes.push(`${m} ${r.url}`);
+  });
   app.setNotFoundHandler((_req, reply) => sendError(reply, 404, 'Not found', 'not_found'));
   await app.register(helmet, {
     contentSecurityPolicy: {
@@ -157,15 +307,27 @@ export async function createTestApi(opts: { tlsMode?: AppConfig['tlsMode']; hear
     repos,
     bus,
     hub,
+    apps,
+    pairings,
     state,
-    token(scopes = ['chat:read', 'status:read'], name = 'test') {
-      return repos.apiTokens.create({ name, scopes, createdBy: 'admin' }).secret;
+    states,
+    settings,
+    routes,
+    token(scopes = ['chat:read', 'status:read'], name = 'test', profileId = null) {
+      return repos.apiTokens.create({ name, scopes, createdBy: 'admin', profileId }).secret;
+    },
+    addProfile(name, color = null) {
+      const p = repos.profiles.create({ name, color });
+      bus.emit('profiles-changed');
+      return p;
     },
     async close() {
       if (closed) return;
       closed = true;
       await app.close();
       hub.close();
+      apps.close();
+      pairings.close();
       db.close();
     },
   };

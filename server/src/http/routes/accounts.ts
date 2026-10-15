@@ -1,5 +1,7 @@
 // Platform accounts: CRUD, connect flows (device code, OAuth paste-back, token paste, browser)
-// and the OAuth redirect landing page.
+// and the OAuth redirect landing page. Each account belongs to one profile (lists take
+// `?profile=`, creates take `profileId`); developer apps (/api/platform-apps) are shared, so every
+// profile logs its accounts in with the same app credentials.
 
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -19,7 +21,11 @@ import {
   notFound,
   optionsSchema,
   platformIdSchema,
+  profileFromQuery,
+  profileIdField,
+  profileOf,
   requireDriver,
+  resolveProfileId,
   findDriver,
   truncate,
 } from '../validation.js';
@@ -30,6 +36,7 @@ const CONNECT_TIMEOUT_MS = 90_000;
 const labelSchema = z.string().trim().max(MAX_NAME);
 
 const createBody = z.object({
+  profileId: profileIdField,
   platform: platformIdSchema,
   label: labelSchema.optional(),
   options: optionsSchema.nullish(),
@@ -104,17 +111,18 @@ const accountRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }
 
   // ---- CRUD ----
 
-  app.get('/api/accounts', { preHandler: requireAdmin }, async () => repos.accounts.list());
+  app.get('/api/accounts', { preHandler: requireAdmin }, async (req) => repos.accounts.list(profileFromQuery(services, req.query)));
 
   app.post('/api/accounts', { preHandler: requireAdmin }, async (req, reply) => {
     const body = createBody.parse(req.body);
+    const profileId = resolveProfileId(services, body.profileId);
     const driver = requireDriver(services, body.platform);
     if (driver.info.connectMethod === 'none') throw badRequest(`${driver.info.name} does not use accounts`);
     const options = normalizeFields(driver.info.accountFields, body.options);
-    let account = repos.accounts.create({ platform: body.platform, label: body.label || driver.info.name, options });
+    let account = repos.accounts.create({ profileId, platform: body.platform, label: body.label || driver.info.name, options });
     if (account.status !== 'pending') account = repos.accounts.update(account.id, { status: 'pending', statusMessage: null });
     bus.emit('account', account);
-    audit(services, req, 'account.create', `${account.platform} id=${account.id}`);
+    audit(services, req, 'account.create', `${account.platform} id=${account.id} profile=${profileOf(account)}`);
     return reply.code(201).send(account);
   });
 
@@ -141,17 +149,20 @@ const accountRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }
     const { id } = idParams.parse(req.params);
     const account = getAccount(id);
 
-    // 1. Detach, then let the orchestrator retire the affected runners. Their end() still has the
-    //    browser session and account tokens (it captured this account); replacements fail fast
-    //    with no account. destinationChanged resolves once the old runner's teardown is done.
+    // 1. Detach, then let each destination's profile orchestrator retire the affected runners.
+    //    Their end() still has the browser session and account tokens (it captured this account);
+    //    replacements fail fast with no account. destinationChanged resolves once the old
+    //    runner's teardown is done. (Every profile is searched: ids are global.)
     const affected = repos.destinations.list().filter((d) => d.accountId === id);
     repos.destinations.detachAccount(id);
     await Promise.all(
-      affected.map((dest) =>
-        services.orchestrator
-          .destinationChanged(dest.id)
-          .catch((err: unknown) => req.log.warn({ err, destinationId: dest.id }, 'orchestrator.destinationChanged failed')),
-      ),
+      affected.map(async (dest) => {
+        try {
+          await services.orchestrators.get(profileOf(dest)).destinationChanged(dest.id);
+        } catch (err) {
+          req.log.warn({ err, destinationId: dest.id }, 'orchestrator.destinationChanged failed');
+        }
+      }),
     );
 
     // 2. Only then drop the browser session (clear() last: an end() may just have saved it) and
@@ -169,8 +180,10 @@ const accountRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }
     repos.secrets.deleteScope(`account:${id}`);
     repos.secrets.deleteScope(`browser:${id}`);
     repos.accounts.delete(id);
-    bus.emit('destinations-changed');
-    audit(services, req, 'account.delete', `${account.platform} id=${id}`);
+    for (const profileId of new Set([profileOf(account), ...affected.map(profileOf)])) {
+      bus.emit('destinations-changed', { profileId });
+    }
+    audit(services, req, 'account.delete', `${account.platform} id=${id} profile=${profileOf(account)}`);
     return {};
   });
 
@@ -249,14 +262,18 @@ const accountRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }
       return fail('This sign-in link is invalid or expired. Start the connection again.');
     }
 
+    // From here on the account is known: land on its profile's accounts page.
+    const profile = `&profile=${encodeURIComponent(profileOf(account))}`;
+    const failFor = (message: string) => `${fail(message)}${profile}`;
+
     const oauthError = query.get('error');
     if (oauthError) {
-      return fail(`Authorization failed: ${truncate(query.get('error_description') || oauthError, 200)}`);
+      return failFor(`Authorization failed: ${truncate(query.get('error_description') || oauthError, 200)}`);
     }
 
     const driver = findDriver(services, platform.data);
     if (driver?.info.connectMethod !== 'oauth-paste' || !driver.completeConnect) {
-      return fail('This platform cannot be connected this way');
+      return failFor('This platform cannot be connected this way');
     }
 
     // Rebuild the exact URL the platform redirected to (the driver checks code + state).
@@ -265,18 +282,18 @@ const accountRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }
       const result = finishConnect(req, account, await driver.completeConnect(account, { pastedUrl }, await connectContext(account)));
       switch (result.status) {
         case 'connected':
-          return `/accounts?connected=${encodeURIComponent(account.id)}`;
+          return `/accounts?connected=${encodeURIComponent(account.id)}${profile}`;
         case 'error':
-          return fail(result.message);
+          return failFor(result.message);
         case 'expired':
-          return fail('The authorization expired. Start the connection again.');
+          return failFor('The authorization expired. Start the connection again.');
         default:
-          return fail('The connection did not complete. Try again.');
+          return failFor('The connection did not complete. Try again.');
       }
     } catch (err) {
-      if (err instanceof DriverError || err instanceof HttpError) return fail(err.message);
+      if (err instanceof DriverError || err instanceof HttpError) return failFor(err.message);
       req.log.error({ err, platform: platform.data, accountId: account.id }, 'OAuth callback failed');
-      return fail('Connecting the account failed. Check the server logs.');
+      return failFor('Connecting the account failed. Check the server logs.');
     }
   }
 

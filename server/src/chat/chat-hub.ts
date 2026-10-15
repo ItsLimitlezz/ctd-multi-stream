@@ -2,18 +2,25 @@
 // messages, keeps a ring buffer of recent ones and emits them on the EventBus. Sources may also
 // yield moderation (deleted message, banned/timed-out user, cleared chat): the affected messages
 // leave the ring buffer and a 'chat-moderation' event tells overlays/clients to remove them.
+//
+// Profiles: every destination belongs to one profile (attach's `profileId`). Messages and
+// moderation are stamped with it, and each profile has its own ring buffer, de-duplication and
+// OBS chat overlay token (secret scope profileSecretScope(id, 'chat'): the default profile keeps
+// the pre-profiles 'chat' scope, so its existing overlay URL keeps working).
 
 import type { Logger } from 'pino';
-import type { ChatMessage, ChatModeration, PlatformId } from '../../../shared/types.js';
+import { DEFAULT_PROFILE_ID, type ChatMessage, type ChatModeration, type PlatformId } from '../../../shared/types.js';
 import type { EventBus } from '../events.js';
 import { isChatModeration, type ChatMessageInput, type ChatModerationInput, type ChatSourceItem } from '../platforms/types.js';
-import type { ChatHub, ScopedSecrets } from '../services.js';
+import { profileSecretScope, type ChatHub, type ProfilesRepo, type ScopedSecrets, type SecretsRepo } from '../services.js';
 import { RecentKeys, RingBuffer } from './buffers.js';
 import { MAX_AUTHOR_LENGTH, cleanText, normalizeChatMessage } from './normalize.js';
 import { safeErrorMessage } from './redact.js';
-import { generateOverlayToken } from './token.js';
+import { generateOverlayToken, tokensEqual } from './token.js';
 
+/** Per profile. */
 export const RING_SIZE = 500;
+/** Per profile. */
 export const DEDUPE_SIZE = 2000;
 export const DEFAULT_RECENT = 200;
 export const BACKOFF_MIN_MS = 1_000;
@@ -28,8 +35,35 @@ const MAX_MODERATION_ID_LENGTH = 200;
 export interface ChatHubDeps {
   bus: EventBus;
   log: Logger;
-  /** Secrets scoped to 'chat'. */
-  secrets: ScopedSecrets;
+  /**
+   * Where overlay tokens are stored. Pass the secrets repo (`repos.secrets`): each profile then
+   * gets its own persisted token in scope profileSecretScope(id, 'chat'). A single ScopedSecrets
+   * (the legacy 'chat' scope, as before profiles) still serves the default profile; other
+   * profiles' tokens then only live in memory (they change on restart) and a warning is logged.
+   */
+  secrets: SecretsRepo | ScopedSecrets;
+  /**
+   * Profiles (`repos.profiles`): lets profileForOverlayToken() find tokens of every profile after a
+   * restart, refuses tokens for unknown profiles, and drops a deleted profile's chat + token.
+   * Without it only the default profile and profiles used since start are known.
+   */
+  profiles?: Pick<ProfilesRepo, 'list' | 'get'>;
+}
+
+/** One profile's chat: ring buffer, de-duplication and the platform-id index for moderation. */
+interface ProfileChat {
+  buffer: RingBuffer<ChatMessage>;
+  seen: RecentKeys;
+  /** destination + platform message id -> hub message id (bounded, insertion order). */
+  byPlatformId: Map<string, string>;
+}
+
+function isSecretsRepo(s: SecretsRepo | ScopedSecrets): s is SecretsRepo {
+  return typeof (s as Partial<SecretsRepo>).scoped === 'function';
+}
+
+function unknownProfileError(): Error {
+  return Object.assign(new Error('Profile not found'), { statusCode: 404, code: 'unknown_profile' });
 }
 
 type ChatSource = (signal: AbortSignal) => AsyncIterable<ChatSourceItem>;
@@ -127,20 +161,32 @@ export function messageFromUser(msg: Pick<ChatMessage, 'author'>, userId: string
   return msg.author.name.toLowerCase() === name || msg.author.login?.toLowerCase() === name;
 }
 
-export function createChatHub({ bus, log, secrets }: ChatHubDeps): ChatHub {
-  const buffer = new RingBuffer<ChatMessage>(RING_SIZE);
-  const seen = new RecentKeys(DEDUPE_SIZE);
-  const attachments = new Map<string, AbortController>();
-  /** destination + platform message id -> hub message id (bounded, insertion order). */
-  const byPlatformId = new Map<string, string>();
+/** The message with its profile, placed right after the destination it came from. */
+function withProfile(msg: ChatMessage, profileId: string): ChatMessage {
+  const { id, platform, destinationId, ...rest } = msg;
+  return { id, platform, destinationId, profileId, ...rest };
+}
 
-  function index(msg: ChatMessage): void {
+export function createChatHub({ bus, log, secrets, profiles }: ChatHubDeps): ChatHub {
+  const chats = new Map<string, ProfileChat>();
+  const attachments = new Map<string, AbortController>();
+
+  function chatOf(profileId: string): ProfileChat {
+    let chat = chats.get(profileId);
+    if (!chat) {
+      chat = { buffer: new RingBuffer<ChatMessage>(RING_SIZE), seen: new RecentKeys(DEDUPE_SIZE), byPlatformId: new Map() };
+      chats.set(profileId, chat);
+    }
+    return chat;
+  }
+
+  function index(chat: ProfileChat, msg: ChatMessage): void {
     const key = indexKey(msg.destinationId, platformIdOf(msg));
-    byPlatformId.delete(key);
-    byPlatformId.set(key, msg.id);
-    if (byPlatformId.size > DEDUPE_SIZE) {
-      const oldest = byPlatformId.keys().next();
-      if (!oldest.done) byPlatformId.delete(oldest.value);
+    chat.byPlatformId.delete(key);
+    chat.byPlatformId.set(key, msg.id);
+    if (chat.byPlatformId.size > DEDUPE_SIZE) {
+      const oldest = chat.byPlatformId.keys().next();
+      if (!oldest.done) chat.byPlatformId.delete(oldest.value);
     }
   }
 
@@ -153,49 +199,52 @@ export function createChatHub({ bus, log, secrets }: ChatHubDeps): ChatHub {
     }
   }
 
-  function push(destinationId: string, platform: PlatformId, input: ChatMessageInput): void {
-    let msg: ChatMessage | null;
+  function push(profileId: string, destinationId: string, platform: PlatformId, input: ChatMessageInput): void {
+    let normalized: ChatMessage | null;
     try {
-      msg = normalizeChatMessage(input, platform, destinationId);
+      normalized = normalizeChatMessage(input, platform, destinationId);
     } catch {
       return; // malformed input from a scraper; drop it
     }
-    if (!msg || !seen.add(msg.id)) return;
-    buffer.push(msg);
-    index(msg);
-    const message = msg;
+    if (!normalized) return;
+    const chat = chatOf(profileId);
+    if (!chat.seen.add(normalized.id)) return;
+    const message = withProfile(normalized, profileId);
+    chat.buffer.push(message);
+    index(chat, message);
     safely(() => bus.emit('chat', message));
   }
 
-  function moderate(destinationId: string, platform: PlatformId, input: ChatModerationInput): void {
+  function moderate(profileId: string, destinationId: string, platform: PlatformId, input: ChatModerationInput): void {
     const ts = new Date().toISOString();
+    const chat = chatOf(profileId);
     let moderation: ChatModeration;
     switch (input.kind) {
       case 'message-deleted': {
         const platformMessageId = cleanText(input.platformMessageId, MAX_MODERATION_ID_LENGTH);
         if (!platformMessageId) return;
         const prefixed = `${platform}:${platformMessageId}`;
-        const removed = buffer.removeWhere(
+        const removed = chat.buffer.removeWhere(
           (m) => m.destinationId === destinationId && (m.platformMessageId === platformMessageId || m.id === prefixed),
         );
         const key = indexKey(destinationId, platformMessageId);
         // Unknown message (never seen, or forgotten): the id it would have had under the hub's scheme.
-        const messageId = removed[0]?.id ?? byPlatformId.get(key) ?? prefixed;
-        byPlatformId.delete(key);
-        moderation = { kind: 'message-deleted', platform, destinationId, ts, messageId, platformMessageId };
+        const messageId = removed[0]?.id ?? chat.byPlatformId.get(key) ?? prefixed;
+        chat.byPlatformId.delete(key);
+        moderation = { kind: 'message-deleted', platform, destinationId, profileId, ts, messageId, platformMessageId };
         break;
       }
       case 'user-cleared': {
         const userId = cleanText(typeof input.userId === 'number' ? String(input.userId) : input.userId, MAX_MODERATION_ID_LENGTH) || null;
         const userName = cleanText(input.userName, MAX_AUTHOR_LENGTH) || null;
         if (!userId && !userName) return;
-        buffer.removeWhere((m) => m.destinationId === destinationId && messageFromUser(m, userId, userName));
-        moderation = { kind: 'user-cleared', platform, destinationId, ts, userId, userName };
+        chat.buffer.removeWhere((m) => m.destinationId === destinationId && messageFromUser(m, userId, userName));
+        moderation = { kind: 'user-cleared', platform, destinationId, profileId, ts, userId, userName };
         break;
       }
       case 'cleared':
-        buffer.removeWhere((m) => m.destinationId === destinationId);
-        moderation = { kind: 'cleared', platform, destinationId, ts };
+        chat.buffer.removeWhere((m) => m.destinationId === destinationId);
+        moderation = { kind: 'cleared', platform, destinationId, profileId, ts };
         break;
       default:
         return;
@@ -204,19 +253,19 @@ export function createChatHub({ bus, log, secrets }: ChatHubDeps): ChatHub {
     safely(() => bus.emit('chat-moderation', event));
   }
 
-  function onItem(destinationId: string, platform: PlatformId, item: ChatSourceItem): void {
+  function onItem(profileId: string, destinationId: string, platform: PlatformId, item: ChatSourceItem): void {
     if (!item || typeof item !== 'object') return;
-    if (isChatModeration(item)) moderate(destinationId, platform, item);
-    else push(destinationId, platform, item);
+    if (isChatModeration(item)) moderate(profileId, destinationId, platform, item);
+    else push(profileId, destinationId, platform, item);
   }
 
-  async function run(destinationId: string, platform: PlatformId, source: ChatSource, signal: AbortSignal): Promise<void> {
+  async function run(profileId: string, destinationId: string, platform: PlatformId, source: ChatSource, signal: AbortSignal): Promise<void> {
     let delay = BACKOFF_MIN_MS;
     while (!signal.aborted) {
       const startedAt = Date.now();
       let reason = 'source ended';
       try {
-        await consume(source, signal, (item) => onItem(destinationId, platform, item));
+        await consume(source, signal, (item) => onItem(profileId, destinationId, platform, item));
       } catch (err) {
         reason = safeErrorMessage(err);
       }
@@ -228,28 +277,103 @@ export function createChatHub({ bus, log, secrets }: ChatHubDeps): ChatHub {
     }
   }
 
+  // ---- overlay tokens (one per profile) ----
+
+  const secretsRepo = isSecretsRepo(secrets) ? secrets : null;
+  const legacyScope = isSecretsRepo(secrets) ? null : secrets;
+  /** profile id -> its current token (only tokens read from / written to storage, or memory-only ones). */
+  const tokens = new Map<string, string>();
+  let warnedMemoryOnly = false;
+
+  /** Persistent storage of a profile's token, or null when only the legacy 'chat' scope was given. */
+  function tokenStore(profileId: string): ScopedSecrets | null {
+    if (secretsRepo) return secretsRepo.scoped(profileSecretScope(profileId, 'chat'));
+    return profileId === DEFAULT_PROFILE_ID ? legacyScope : null;
+  }
+
+  function profileExists(profileId: string): boolean {
+    return profileId === DEFAULT_PROFILE_ID || !profiles || Boolean(profiles.get(profileId));
+  }
+
+  /** Profiles whose tokens may be presented: every profile when known, else the ones seen so far. */
+  function candidateProfiles(): string[] {
+    const ids = new Set<string>([DEFAULT_PROFILE_ID]);
+    if (profiles) for (const p of profiles.list()) ids.add(p.id);
+    else for (const id of tokens.keys()) ids.add(id);
+    return [...ids];
+  }
+
   // Token reads/writes are serialized so a rotate can't race a first-time create.
   let tokenQueue: Promise<unknown> = Promise.resolve();
-  let cachedToken: string | null = null;
   function serialize<T>(op: () => Promise<T>): Promise<T> {
     const result = tokenQueue.then(op, op);
     tokenQueue = result.catch(() => undefined);
     return result;
   }
 
+  /** A profile's stored token (cached), or null when it has none yet. Call inside serialize(). */
+  async function readToken(profileId: string): Promise<string | null> {
+    const cached = tokens.get(profileId);
+    if (cached) return cached;
+    const store = tokenStore(profileId);
+    if (!store) return null;
+    const stored = await store.get(TOKEN_KEY);
+    if (stored && stored.length >= MIN_STORED_TOKEN_LENGTH) {
+      tokens.set(profileId, stored);
+      return stored;
+    }
+    return null;
+  }
+
+  /** Store a new token for a profile. Call inside serialize(). */
+  async function writeToken(profileId: string): Promise<string> {
+    const token = generateOverlayToken();
+    const store = tokenStore(profileId);
+    if (store) {
+      await store.set(TOKEN_KEY, token);
+    } else if (!warnedMemoryOnly) {
+      warnedMemoryOnly = true;
+      log.warn('chat hub has no secrets repo: overlay tokens of non-default profiles are kept in memory only');
+    }
+    tokens.set(profileId, token);
+    return token;
+  }
+
+  function checkProfile(profileId: string): void {
+    if (!profileExists(profileId)) throw unknownProfileError();
+  }
+
+  // A deleted profile takes its chat and overlay token with it (its secret scope is deleted by the
+  // profile route); forget both so the old overlay URL stops working at once.
+  if (profiles) {
+    bus.on('profiles-changed', () => {
+      let live: Set<string>;
+      try {
+        live = new Set(profiles.list().map((p) => p.id));
+      } catch (err) {
+        log.warn({ reason: safeErrorMessage(err) }, 'could not list profiles');
+        return;
+      }
+      live.add(DEFAULT_PROFILE_ID);
+      for (const id of [...chats.keys()]) if (!live.has(id)) chats.delete(id);
+      for (const id of [...tokens.keys()]) if (!live.has(id)) tokens.delete(id);
+    });
+  }
+
   return {
-    attach(destinationId, platform, source, signal) {
+    attach(destinationId, platform, source, signal, profileId = DEFAULT_PROFILE_ID) {
       attachments.get(destinationId)?.abort();
       attachments.delete(destinationId);
       if (signal.aborted) return;
+      const profile = profileId || DEFAULT_PROFILE_ID;
 
       const controller = new AbortController();
       const onParentAbort = (): void => controller.abort();
       signal.addEventListener('abort', onParentAbort, { once: true });
       attachments.set(destinationId, controller);
-      log.debug({ destinationId, platform }, 'chat attached');
+      log.debug({ destinationId, platform, profileId: profile }, 'chat attached');
 
-      void run(destinationId, platform, source, controller.signal)
+      void run(profile, destinationId, platform, source, controller.signal)
         .catch((err: unknown) => log.error({ destinationId, platform, reason: safeErrorMessage(err) }, 'chat loop crashed'))
         .finally(() => {
           signal.removeEventListener('abort', onParentAbort);
@@ -258,35 +382,44 @@ export function createChatHub({ bus, log, secrets }: ChatHubDeps): ChatHub {
         });
     },
 
-    recent(limit = DEFAULT_RECENT) {
+    recent(limit = DEFAULT_RECENT, profileId = DEFAULT_PROFILE_ID) {
       const n = Number.isFinite(limit) ? Math.min(Math.max(Math.floor(limit), 0), RING_SIZE) : DEFAULT_RECENT;
-      return buffer.last(n);
+      return chats.get(profileId || DEFAULT_PROFILE_ID)?.buffer.last(n) ?? [];
     },
 
-    overlayToken() {
+    overlayToken(profileId = DEFAULT_PROFILE_ID) {
+      const profile = profileId || DEFAULT_PROFILE_ID;
       // Queued even when cached, so a read never returns a token that a pending rotate replaces.
       return serialize(async () => {
-        if (cachedToken) return cachedToken;
-        const stored = await secrets.get(TOKEN_KEY);
-        if (stored && stored.length >= MIN_STORED_TOKEN_LENGTH) {
-          cachedToken = stored;
-          return stored;
-        }
-        const token = generateOverlayToken();
-        await secrets.set(TOKEN_KEY, token);
-        cachedToken = token;
-        log.info('created chat overlay token');
+        checkProfile(profile);
+        const existing = await readToken(profile);
+        if (existing) return existing;
+        const token = await writeToken(profile);
+        log.info({ profileId: profile }, 'created chat overlay token');
         return token;
       });
     },
 
-    rotateOverlayToken() {
+    rotateOverlayToken(profileId = DEFAULT_PROFILE_ID) {
+      const profile = profileId || DEFAULT_PROFILE_ID;
       return serialize(async () => {
-        const token = generateOverlayToken();
-        await secrets.set(TOKEN_KEY, token);
-        cachedToken = token;
-        log.info('rotated chat overlay token');
+        checkProfile(profile);
+        const token = await writeToken(profile);
+        log.info({ profileId: profile }, 'rotated chat overlay token');
         return token;
+      });
+    },
+
+    profileForOverlayToken(token) {
+      return serialize(async () => {
+        if (typeof token !== 'string' || token.length === 0) return null;
+        let match: string | null = null;
+        // Compare against every profile (constant-time each, no early exit).
+        for (const id of candidateProfiles()) {
+          const current = await readToken(id);
+          if (current !== null && tokensEqual(token, current) && match === null) match = id;
+        }
+        return match;
       });
     },
   };

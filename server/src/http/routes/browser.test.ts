@@ -12,6 +12,7 @@ import browserRoutes, { viewerTimings } from './browser.js';
 
 const account: Account = {
   id: 'acc1',
+  profileId: 'default',
   platform: 'instagram',
   label: 'IG',
   status: 'connected',
@@ -20,6 +21,7 @@ const account: Account = {
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
 };
+const clubAccount: Account = { ...account, id: 'acc2', profileId: 'club', label: 'IG DPRTMNT' };
 
 interface Calls {
   viewerPage: { accountId: string; url?: string }[];
@@ -63,8 +65,10 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('browser routes', () => {
   let app: FastifyInstance;
   let calls: Calls;
   let failOpen = false;
-  /** Phase of destination d1 (linked to acc1) in the orchestrator state. */
+  /** Phase of destination d1 (linked to acc1) in the default profile's orchestrator state. */
   let livePhase: DestinationState['phase'] = 'idle';
+  /** Phase of destination d2 (linked to clubAccount) in the 'club' profile's orchestrator state. */
+  let clubPhase: DestinationState['phase'] = 'idle';
   /** Sessions the fake auth repo knows (token -> user id) and the user's role. */
   const sessions = new Map<string, string>();
   let userRole: Role | null = 'admin';
@@ -92,11 +96,25 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('browser routes', () => {
         return url.hostname === '192.168.1.1' ? 'This address points to a private (LAN) address' : null;
       },
     };
+    // One engine per profile: d1 (linked to acc1) runs in the default profile, d2 (clubAccount) in 'club'.
+    const defaultOrchestrator = {
+      profileId: 'default',
+      state: () => ({ profileId: 'default', destinations: [{ destinationId: 'd1', profileId: 'default', phase: livePhase }] }),
+    };
+    const clubOrchestrator = {
+      profileId: 'club',
+      state: () => ({ profileId: 'club', destinations: [{ destinationId: 'd2', profileId: 'club', phase: clubPhase }] }),
+    };
+    const accounts = new Map([account, clubAccount].map((a) => [a.id, a]));
+    const destinations = new Map([
+      ['d1', { id: 'd1', profileId: 'default', accountId: account.id }],
+      ['d2', { id: 'd2', profileId: 'club', accountId: clubAccount.id }],
+    ]);
     const services = {
       log: pino({ level: 'silent' }),
       repos: {
-        accounts: { get: (id: string) => (id === account.id ? account : null) },
-        destinations: { get: (id: string) => (id === 'd1' ? { id, accountId: account.id } : null) },
+        accounts: { get: (id: string) => accounts.get(id) ?? null },
+        destinations: { get: (id: string) => destinations.get(id) ?? null },
         authSessions: {
           peek: (token: string) => (sessions.has(token) ? { id: 'h', userId: sessions.get(token) } : null),
         },
@@ -104,8 +122,13 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('browser routes', () => {
         audit: { log: (e: { action: string; detail?: string | null }) => calls.audit.push(e) },
       },
       browser: browserManager,
-      orchestrator: {
-        state: () => ({ destinations: [{ destinationId: 'd1', phase: livePhase }] }),
+      orchestrators: {
+        get: (id: string) => {
+          if (id === 'default') return defaultOrchestrator;
+          if (id === 'club') return clubOrchestrator;
+          throw Object.assign(new Error('Profile not found'), { statusCode: 404, code: 'unknown_profile' });
+        },
+        all: () => [defaultOrchestrator, clubOrchestrator],
       },
     } as unknown as AppServices;
 
@@ -130,6 +153,7 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('browser routes', () => {
     calls = { viewerPage: [], close: [], save: [], audit: [] };
     failOpen = false;
     livePhase = 'idle';
+    clubPhase = 'idle';
     sessions.clear();
     userRole = 'admin';
   });
@@ -257,6 +281,21 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('browser routes', () => {
     expect(calls.save).toEqual(['acc1']);
 
     livePhase = 'error'; // a failed runner no longer holds the page
+    await app.inject({ method: 'POST', url: '/api/browser/acc1/close', headers: admin, payload: { save: false } });
+    expect(calls.close).toEqual([{ accountId: 'acc1', save: false }]);
+  });
+
+  it("checks the live of the account's own profile, independently of other profiles", async () => {
+    clubPhase = 'live'; // DPRTMNT is live; the default profile is not
+    const club = await app.inject({ method: 'POST', url: '/api/browser/acc2/open', headers: admin, payload: { url: 'https://www.instagram.com/' } });
+    expect(club.statusCode).toBe(409);
+    expect(club.json()).toMatchObject({ code: 'account_live' });
+    const main = await app.inject({ method: 'POST', url: '/api/browser/acc1/open', headers: admin, payload: { url: 'https://www.instagram.com/' } });
+    expect(main.statusCode).toBe(200);
+    expect(calls.viewerPage).toEqual([{ accountId: 'acc1', url: 'https://www.instagram.com/' }]);
+
+    // Closing the live club account's dialog keeps its context; the idle one closes normally.
+    await app.inject({ method: 'POST', url: '/api/browser/acc2/close', headers: admin, payload: { save: false } });
     await app.inject({ method: 'POST', url: '/api/browser/acc1/close', headers: admin, payload: { save: false } });
     expect(calls.close).toEqual([{ accountId: 'acc1', save: false }]);
   });

@@ -181,8 +181,8 @@ describe('takedown via the health watcher', () => {
     // recovering throughout: no preparing/connecting/confirming flashes during the recovery.
     expect(h.history('ig')).toEqual(['preparing', 'connecting', 'confirming', 'live', 'recovering', 'live']);
     expect(h.notices).toEqual([
-      { level: 'warn', message: `IG: Instagram ended the live (${TAKEDOWN}). Starting a new one…` },
-      { level: 'info', message: 'IG: Instagram is live again (recovery #1)' },
+      { level: 'warn', message: `IG: Instagram ended the live (${TAKEDOWN}). Starting a new one…`, profileId: 'default' },
+      { level: 'info', message: 'IG: Instagram is live again (recovery #1)', profileId: 'default' },
     ]);
   });
 
@@ -447,7 +447,7 @@ describe('failed recoveries', () => {
     expect(prepare).toHaveBeenCalledTimes(4);
     expect(h.phase('ig')).toBe('error');
     expect(h.destState('ig').message).toBe(GIVE_UP);
-    expect(h.notices.at(-1)).toEqual({ level: 'error', message: `IG: ${GIVE_UP}` });
+    expect(h.notices.at(-1)).toEqual({ level: 'error', message: `IG: ${GIVE_UP}`, profileId: 'default' });
     await advance(10 * 60_000);
     expect(prepare).toHaveBeenCalledTimes(4);
 
@@ -655,7 +655,7 @@ describe('recovery attempt deadline', () => {
     expect(d.live.end).toHaveBeenCalledTimes(1);
     expect(h.phase('ig')).toBe('error');
     expect(h.destState('ig').message).toBe(GIVE_UP);
-    expect(h.notices.at(-1)).toEqual({ level: 'error', message: `IG: ${GIVE_UP}` });
+    expect(h.notices.at(-1)).toEqual({ level: 'error', message: `IG: ${GIVE_UP}`, profileId: 'default' });
     await advance(10 * 60_000);
     expect(prepare).toHaveBeenCalledTimes(4);
   });
@@ -813,7 +813,7 @@ describe('create/kill loop guard', () => {
     const message = `Instagram ended the live 10 times within 20 min (latest: ${reason}) — stopped starting new ones. Check it and press Retry.`;
     expect(h.destState('ig')).toMatchObject({ phase: 'error', message, recoveries: 9, lastRecovery: { reason } });
     expect(lives[9]!.live.end).toHaveBeenCalledTimes(1);
-    expect(h.notices.at(-1)).toEqual({ level: 'error', message: `IG: ${message}` });
+    expect(h.notices.at(-1)).toEqual({ level: 'error', message: `IG: ${message}`, profileId: 'default' });
     await advance(10 * 60_000);
     expect(prepare).toHaveBeenCalledTimes(10);
   });

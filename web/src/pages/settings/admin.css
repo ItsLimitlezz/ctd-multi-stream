@@ -397,6 +397,191 @@
 .token-prefix {
   font-size: 0.82rem;
 }
+.token-profile {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.token-profile .profile-dot {
+  width: 8px;
+  height: 8px;
+}
+.item-main.is-top {
+  align-items: flex-start;
+}
+
+/* ---------------------------------------------------------------- app pairing + connected apps */
+
+.pairings-card {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.pairing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pairing-row {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev-2);
+}
+.pairing-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.pairing-code {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  user-select: all;
+}
+.pairing-code.is-inline {
+  padding: 1px 6px;
+  font-size: 0.95rem;
+}
+.pairing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.pairing-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.pairing-form {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+@media (max-width: 560px) {
+  .pairing-head {
+    flex-wrap: wrap;
+  }
+  .pairing-head .item-text {
+    flex: 1 1 calc(100% - 56px);
+  }
+  .pairing-head .pairing-code {
+    margin-left: 44px;
+  }
+}
+
+.app-resources {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+.app-resources li {
+  display: block;
+}
+.app-resources .profile-dot {
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+/* ---------------------------------------------------------------- profiles page */
+
+.profile-row.is-current {
+  background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
+}
+.profile-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 6px;
+  font-size: 0.86rem;
+}
+.shared-list {
+  padding-left: 18px;
+}
+.swatches {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.swatches legend {
+  margin-bottom: 6px;
+  padding: 0;
+}
+.swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.swatch {
+  position: relative;
+  display: inline-flex;
+  cursor: pointer;
+}
+.swatch input[type='radio'] {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.swatch-chip {
+  display: block;
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--bg-elev);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+.swatch-chip.is-none {
+  background: repeating-linear-gradient(135deg, transparent 0 6px, var(--border-strong) 6px 7px);
+}
+.swatch input:checked + .swatch-chip {
+  box-shadow: 0 0 0 2px var(--text);
+}
+.swatch input:focus-visible + .swatch-chip {
+  box-shadow: var(--focus-ring);
+}
+/* The native colour input sits invisibly on top of its chip (rainbow until a custom colour is picked). */
+.swatch-custom input[type='color'] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.swatch-chip.is-rainbow {
+  background: conic-gradient(#e11d48, #f59e0b, #10b981, #06b6d4, #3b82f6, #8b5cf6, #e11d48);
+}
+.swatch-custom.is-checked .swatch-chip {
+  box-shadow: 0 0 0 2px var(--text);
+}
+.swatch-custom input:focus-visible + .swatch-chip {
+  box-shadow: var(--focus-ring);
+}
 .break-all {
   overflow-wrap: anywhere;
   word-break: break-all;

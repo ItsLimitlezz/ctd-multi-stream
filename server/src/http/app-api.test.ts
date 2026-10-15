@@ -4,11 +4,12 @@ import crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { PROBLEM_TYPE } from '../api/http.js';
-import { session, silentLog } from '../api/test-helpers.js';
+import { silentLog } from '../api/test-helpers.js';
 import type { AppConfig } from '../config.js';
 import { openDatabase } from '../db/database.js';
 import { createRepos } from '../db/repos.js';
 import { EventBus } from '../events.js';
+import { createOrchestratorRegistry } from '../orchestrator/registry.js';
 import { createPlatformRegistry } from '../platforms/registry.js';
 import { createSecretBox } from '../security/secretbox.js';
 import type { AppServices, Repos } from '../services.js';
@@ -30,15 +31,24 @@ beforeAll(async () => {
     repos,
     secretBox,
     tls: { mode: 'off', status: () => ({ fingerprint256: null }) },
-    orchestrator: { state: () => session({ status: 'offline', startedAt: null }) },
-    chat: { recent: () => [], overlayToken: vi.fn(async () => 'T'.repeat(43)), rotateOverlayToken: vi.fn(), attach: vi.fn() },
+    chat: {
+      recent: () => [],
+      overlayToken: vi.fn(async () => 'T'.repeat(43)),
+      rotateOverlayToken: vi.fn(),
+      profileForOverlayToken: vi.fn(async () => null),
+      attach: vi.fn(),
+    },
     platforms: createPlatformRegistry(),
     media: { feeds: () => [], ingestKeys: async () => ({}), appName: 'live' },
+    apps: { list: () => [], get: () => null },
+    pairings: { list: () => [] },
     browser: {},
     pushes: {},
     appSettings: () => ({ publicBaseUrl: '', ingestHost: '', disconnectGraceSec: 15 }),
     publicBaseUrl: () => 'http://localhost:8443',
   } as unknown as AppServices;
+  // The real per-profile registry over the in-memory DB (not started: no feeds, nothing live).
+  services.orchestrators = createOrchestratorRegistry(services);
   app = await buildApp(services, null);
   await app.ready();
 });
@@ -80,5 +90,13 @@ describe('buildApp + external API', () => {
     expect(dock.headers['content-security-policy']).toMatch(/script-src 'self'/);
     expect((await app.inject({ method: 'GET', url: '/api/tokens' })).statusCode).toBe(401);
     expect((await app.inject({ method: 'GET', url: '/api/v1/openapi.json' })).statusCode).toBe(200);
+  });
+
+  it('registers the profile, pairing and connected-app routes (login required)', async () => {
+    for (const url of ['/api/profiles', '/api/pairings', '/api/apps', '/api/session?profile=default']) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(401);
+      expect(res.json<{ code: string }>().code, url).toBe('unauthenticated');
+    }
   });
 });

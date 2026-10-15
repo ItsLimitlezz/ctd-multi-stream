@@ -138,6 +138,27 @@ export const KeyIcon = (p: IconProps) => (
   </Icon>
 );
 
+/** Streaming profiles. */
+export const LayersIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="m12 3 9 5-9 5-9-5 9-5Z" />
+    <path d="m3 13 9 5 9-5" />
+  </Icon>
+);
+
+/** Connected apps (the hub). */
+export const PlugIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0V7ZM12 17v5" />
+  </Icon>
+);
+
+export const CheckIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="m5 12.5 4.5 4.5L19 7.5" />
+  </Icon>
+);
+
 // Chat alert kinds.
 
 export const HeartIcon = (p: IconProps) => (

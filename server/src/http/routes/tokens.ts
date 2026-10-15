@@ -1,4 +1,5 @@
 // External API tokens (Settings → API) [admin]. The API itself lives under /api/v1 (server/src/api).
+// Tokens are shared by every profile but may be limited to one (`profileId`; null = every profile).
 
 import fs from 'node:fs';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
@@ -9,21 +10,44 @@ import { LAN_HTTP_HOST_ENV, LAN_HTTP_PORT_ENV, LAN_HTTP_PORT_SETTING, accessInfo
 import type { AppServices } from '../../services.js';
 import { lanClientPolicy } from '../../tls/http-listener.js';
 import { audit, requireAdmin, sendError, type RouteOptions } from '../guards.js';
+import { MAX_PROFILE_ID } from '../validation.js';
 
 export const MAX_API_TOKENS = 100;
 export const TOKEN_NAME_MAX = 60;
 
+export const tokenNameSchema = z
+  .string()
+  .trim()
+  .min(1, 'name is required')
+  .max(TOKEN_NAME_MAX, `name: at most ${TOKEN_NAME_MAX} characters`);
+export const scopesSchema = z
+  .array(z.enum(API_SCOPES as [ApiScope, ...ApiScope[]]))
+  .min(1, 'pick at least one scope')
+  .max(10);
+/** A profile id, or null = every profile. */
+export const tokenProfileSchema = z.string().trim().min(1, 'profileId must be a profile id or null').max(MAX_PROFILE_ID).nullable();
+
 const CreateBody = z.strictObject({
-  name: z.string().trim().min(1, 'name is required').max(TOKEN_NAME_MAX, `name: at most ${TOKEN_NAME_MAX} characters`),
-  scopes: z
-    .array(z.enum(API_SCOPES as [ApiScope, ...ApiScope[]]))
-    .min(1, 'pick at least one scope')
-    .max(10),
+  name: tokenNameSchema,
+  scopes: scopesSchema,
+  profileId: tokenProfileSchema.optional(),
 });
 const IdParams = z.object({ id: z.string().min(1).max(64) });
 
 // C0/C1 controls and bidi overrides don't belong in a label shown in the UI and the audit log.
-const CONTROL_RE = /[\u{0}-\u{1F}\u{7F}-\u{9F}\u{202A}-\u{202E}\u{2066}-\u{2069}]/u;
+export const CONTROL_RE = /[\u{0}-\u{1F}\u{7F}-\u{9F}\u{202A}-\u{202E}\u{2066}-\u{2069}]/u;
+
+/** Scopes in canonical order, each once. */
+export function uniqueScopes(scopes: readonly ApiScope[]): ApiScope[] {
+  return API_SCOPES.filter((s) => scopes.includes(s));
+}
+
+/** Audit wording for a token's profile binding. */
+export function profileLabel(services: Pick<AppServices, 'repos'>, profileId: string | null): string {
+  if (profileId === null) return 'every profile';
+  const name = services.repos.profiles.get(profileId)?.name;
+  return name ? `profile ${JSON.stringify(name)} (${profileId})` : `profile ${profileId}`;
+}
 
 let containerCache: boolean | null = null;
 /** Docker (/.dockerenv) or Podman (/run/.containerenv): this machine's addresses aren't the LAN's. */
@@ -73,13 +97,19 @@ const tokenRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) 
     }
     const { name, scopes } = parsed.data;
     if (CONTROL_RE.test(name)) return sendError(reply, 400, 'name: control characters are not allowed', 'invalid');
+    const profileId = parsed.data.profileId ?? null;
+    if (profileId !== null && !repos.profiles.get(profileId)) return sendError(reply, 404, 'Profile not found', 'unknown_profile');
     if (repos.apiTokens.list().length >= MAX_API_TOKENS) {
       return sendError(reply, 409, `At most ${MAX_API_TOKENS} tokens; revoke unused ones first`, 'limit');
     }
-    const unique = API_SCOPES.filter((s) => scopes.includes(s));
-    const created = repos.apiTokens.create({ name, scopes: unique, createdBy: req.user?.username ?? null });
+    const created = repos.apiTokens.create({ name, scopes: uniqueScopes(scopes), createdBy: req.user?.username ?? null, profileId });
     // Never log or audit the secret itself.
-    audit(services, req, 'api_token.create', `${created.token.name} (${created.token.scopes.join(', ')}) ${created.token.prefix}…`);
+    audit(
+      services,
+      req,
+      'api_token.create',
+      `${created.token.name} (${created.token.scopes.join(', ')}) ${profileLabel(services, created.token.profileId ?? null)} ${created.token.prefix}…`,
+    );
     const body: CreateApiTokenResponse = { token: created.token, secret: created.secret };
     return reply.header('cache-control', 'no-store').send(body);
   });
@@ -91,6 +121,12 @@ const tokenRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) 
     if (!token) return sendError(reply, 404, 'Token not found', 'not_found');
     // Requests with it fail from now on; its open event streams close at their next heartbeat (≤ 15 s).
     repos.apiTokens.delete(token.id);
+    // The apps it registered in the hub go with it (best effort: the token is already revoked).
+    try {
+      services.apps.removeByToken(token.id);
+    } catch (err) {
+      req.log.warn({ err, tokenId: token.id }, 'removing the apps of a revoked token failed');
+    }
     audit(services, req, 'api_token.delete', `${token.name} ${token.prefix}…`);
     return {};
   });

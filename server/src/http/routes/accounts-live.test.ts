@@ -11,6 +11,7 @@ import accountRoutes from './accounts.js';
 
 const ACCOUNT: Account = {
   id: 'acc1',
+  profileId: 'default',
   platform: 'tiktok',
   label: 'TikTok',
   status: 'connected',
@@ -32,14 +33,26 @@ function setup(connectMethod: PlatformInfo['connectMethod'] = 'browser') {
   const order: string[] = [];
   let phase: DestinationPhase = 'idle';
   const accounts = new Map<string, Account>([[ACCOUNT.id, { ...ACCOUNT }]]);
-  const dests = new Map<string, { id: string; accountId: string | null }>([
-    ['d1', { id: 'd1', accountId: 'acc1' }],
-    ['d2', { id: 'd2', accountId: 'acc1' }],
-    ['d3', { id: 'd3', accountId: 'other' }],
+  const dests = new Map<string, { id: string; profileId: string; accountId: string | null }>([
+    ['d1', { id: 'd1', profileId: 'default', accountId: 'acc1' }],
+    ['d2', { id: 'd2', profileId: 'default', accountId: 'acc1' }],
+    ['d3', { id: 'd3', profileId: 'default', accountId: 'other' }],
   ]);
   const drv = driver(connectMethod);
   const step = (name: string) => async () => {
     order.push(name);
+  };
+  // The default profile's engine (every account/destination here belongs to it).
+  const orchestrator = {
+    profileId: 'default',
+    state: () => ({ profileId: 'default', destinations: [{ destinationId: 'd1', profileId: 'default', phase }] }),
+    destinationChanged: vi.fn(async (id: string) => {
+      order.push(`changed:${id}:start`);
+      // The retired runner's end() runs here, while the session and tokens still exist.
+      await new Promise((r) => setTimeout(r, 20));
+      if (id === 'd2') throw new Error('end failed');
+      order.push(`changed:${id}:done`);
+    }),
   };
   const services = {
     log: pino({ level: 'silent' }),
@@ -69,15 +82,12 @@ function setup(connectMethod: PlatformInfo['connectMethod'] = 'browser') {
       audit: { log: () => {} },
     },
     platforms: { get: () => drv, all: () => [drv] },
-    orchestrator: {
-      state: () => ({ destinations: [{ destinationId: 'd1', phase }] }),
-      destinationChanged: vi.fn(async (id: string) => {
-        order.push(`changed:${id}:start`);
-        // The retired runner's end() runs here, while the session and tokens still exist.
-        await new Promise((r) => setTimeout(r, 20));
-        if (id === 'd2') throw new Error('end failed');
-        order.push(`changed:${id}:done`);
-      }),
+    orchestrators: {
+      get: (id: string) => {
+        if (id !== 'default') throw Object.assign(new Error('Profile not found'), { statusCode: 404, code: 'unknown_profile' });
+        return orchestrator;
+      },
+      all: () => [orchestrator],
     },
     browser: { close: vi.fn(step('browser.close')), clear: vi.fn(step('browser.clear')) },
     driverContext: async () => ({}),

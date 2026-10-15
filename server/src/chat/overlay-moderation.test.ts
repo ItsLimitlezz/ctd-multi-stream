@@ -11,26 +11,30 @@ import type { AppServices, ChatHub } from '../services.js';
 import overlayModeration from './overlay-moderation.js';
 
 const TOKEN = 'A'.repeat(43);
+const CLUB_TOKEN = 'C'.repeat(43);
 const deleted: ChatModeration = {
   kind: 'message-deleted',
   platform: 'twitch',
   destinationId: 'd1',
+  profileId: 'default',
   ts: '2026-10-13T12:00:00.000Z',
   messageId: 'twitch:1',
   platformMessageId: '1',
 };
+const clubCleared: ChatModeration = { kind: 'cleared', platform: 'kick', destinationId: 'd9', profileId: 'club', ts: '2026-10-13T12:00:00.000Z' };
 
 let app: FastifyInstance;
 let bus: EventBus;
-let token: string;
+let tokens: Record<string, string>;
 
 beforeEach(async () => {
   bus = new EventBus();
-  token = TOKEN;
+  tokens = { default: TOKEN, club: CLUB_TOKEN };
   const chat = {
     recent: vi.fn(() => []),
-    overlayToken: vi.fn(async () => token),
-    rotateOverlayToken: vi.fn(async () => token),
+    overlayToken: vi.fn(async (profileId = 'default') => tokens[profileId]),
+    rotateOverlayToken: vi.fn(async (profileId = 'default') => tokens[profileId]),
+    profileForOverlayToken: vi.fn(async (token: string) => Object.entries(tokens).find(([, t]) => t === token)?.[0] ?? null),
     attach: vi.fn(),
   } as unknown as ChatHub;
   const services = { log: pino({ level: 'silent' }), bus, chat, repos: { audit: { log: vi.fn() } }, publicBaseUrl: () => 'https://h' } as unknown as AppServices;
@@ -80,5 +84,22 @@ describe('overlay moderation forwarding', () => {
     await tick();
     expect(bad.messages).toEqual([]);
     expect(good.messages).toEqual([]);
+  });
+
+  it("forwards only the moderation of the token's profile", async () => {
+    const main = await connect(`/overlay/ws?token=${TOKEN}`);
+    const club = await connect(`/overlay/ws?token=${CLUB_TOKEN}`);
+    await tick();
+    bus.emit('chat-moderation', deleted);
+    bus.emit('chat-moderation', clubCleared);
+    // Moderation from before profiles carried no profile: it belongs to the default profile.
+    const { profileId: _drop, ...legacy } = deleted;
+    bus.emit('chat-moderation', legacy as ChatModeration);
+    await tick();
+    expect(main.messages).toEqual([
+      { type: 'chat-moderation', moderation: deleted },
+      { type: 'chat-moderation', moderation: legacy },
+    ]);
+    expect(club.messages).toEqual([{ type: 'chat-moderation', moderation: clubCleared }]);
   });
 });

@@ -4,6 +4,7 @@ import { isIP } from 'node:net';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
+  DEFAULT_PROFILE_ID,
   FEEDS,
   LINK_TITLE_MAX,
   LINKS_MAX,
@@ -11,6 +12,7 @@ import {
   type FieldSpec,
   type LinkItem,
   type PlatformId,
+  type Profile,
 } from '../../../shared/types.js';
 import type { PlatformDriver } from '../platforms/types.js';
 import type { AppServices } from '../services.js';
@@ -60,6 +62,50 @@ export const optionsSchema = z.record(z.string().max(100), z.unknown());
 export const MAX_NAME = 100;
 export const MAX_URL = 2048;
 const MAX_TEXT = 2048;
+
+// ---------------------------------------------------------------------------
+// Profiles (the `?profile=` scoping convention in shared/api.ts)
+// ---------------------------------------------------------------------------
+
+/** Upper bound for a profile id in a query string or body (ids are short: 'default' or a UUID). */
+export const MAX_PROFILE_ID = 64;
+
+/** `profileId` in a request body: omitted, null or '' = not given. */
+export const profileIdField = z.string().trim().max(MAX_PROFILE_ID).nullish();
+
+export const unknownProfile = (): HttpError => new HttpError(404, 'Profile not found', 'unknown_profile');
+
+/** The profile with this id, or 404 'unknown_profile'. */
+export function requireProfile(services: Pick<AppServices, 'repos'>, id: string): Profile {
+  const profile = services.repos.profiles.get(id);
+  if (!profile) throw unknownProfile();
+  return profile;
+}
+
+/**
+ * Id of an existing profile, or the default profile when `id` is not given (undefined, null or '').
+ * The default profile always exists (it can't be deleted), so it needs no lookup.
+ */
+export function resolveProfileId(services: Pick<AppServices, 'repos'>, id: string | null | undefined): string {
+  if (id === undefined || id === null || id === '' || id === DEFAULT_PROFILE_ID) return DEFAULT_PROFILE_ID;
+  return requireProfile(services, id).id;
+}
+
+/**
+ * The profile a request is about: `?profile=<id>` (default: the default profile, so clients from
+ * before profiles keep working). 400 for a malformed value, 404 'unknown_profile' for an unknown id.
+ */
+export function profileFromQuery(services: Pick<AppServices, 'repos'>, query: unknown): string {
+  const raw = isRecord(query) ? query.profile : undefined;
+  if (raw === undefined) return DEFAULT_PROFILE_ID;
+  if (typeof raw !== 'string' || raw.length > MAX_PROFILE_ID) throw badRequest('profile must be one profile id');
+  return resolveProfileId(services, raw.trim());
+}
+
+/** Owning profile of a stored account/destination (rows from before profiles belong to the default one). */
+export function profileOf(item: { profileId?: string | undefined }): string {
+  return item.profileId || DEFAULT_PROFILE_ID;
+}
 
 // ---------------------------------------------------------------------------
 // Platforms

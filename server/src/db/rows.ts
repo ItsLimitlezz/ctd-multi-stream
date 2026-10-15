@@ -64,6 +64,18 @@ export function jsonObject(row: Row, col: string): Record<string, unknown> {
   }
 }
 
+/** Parse a JSON array column; anything else (corrupt, object, null) becomes []. */
+export function jsonArray(row: Row, col: string): unknown[] {
+  const v = row[col];
+  if (typeof v !== 'string') return [];
+  try {
+    const parsed: unknown = JSON.parse(v);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export function nowIso(): string {
   return new Date().toISOString();
 }

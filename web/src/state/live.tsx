@@ -1,15 +1,18 @@
-// Live store React bindings: one WebSocket to /api/ws while logged in.
-// Hooks: useSession, useChat, useLiveStatus, useLiveConnections, useAccountUpdates,
-// useAccountsVersion, useDestinationsVersion, useLiveEvent, useLiveActions.
+// Live store React bindings: one WebSocket to /api/ws?profile=<current profile> while logged in
+// (switching profile reconnects it). Hooks: useSession, useChat, useLiveStatus, useLiveSocketReady, useLiveConnections,
+// useAccountUpdates, useAccountsVersion, useDestinationsVersion, usePairings, useConnectedApps,
+// useLiveEvent, useLiveActions.
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { WsServerMessage } from '@shared/api';
-import type { Account, ChatMessage, SessionState } from '@shared/types';
+import type { Account, ChatMessage, ConnectedApp, PairingRequest, ProfileSummary, SessionState } from '@shared/types';
 import { api, wsUrl } from '../api';
 import { alertForNotice, installAlerts } from './alerts';
 import { useAuth } from './auth';
 import { isApiError } from './errors';
 import { LiveConnection, LiveStore, type LiveState } from './live-store';
+import { useProfileContext } from './profile';
+import { profileAlerts, withProfileQuery } from './profiles';
 import { toast } from './toast';
 
 const LiveContext = createContext<LiveStore | null>(null);
@@ -24,25 +27,74 @@ async function stillLoggedIn(): Promise<boolean> {
   }
 }
 
+/** A server notice for another profile within this window replaces the summary-based alert. */
+const NOTICE_DEDUPE_MS = 15_000;
+
+/** The profile a notice is about, when the server says (newer servers may stamp it). */
+export function noticeProfileId(msg: WsServerMessage): string | null {
+  const id = (msg as { profileId?: unknown }).profileId;
+  return typeof id === 'string' && id !== '' ? id : null;
+}
+
+/** The live socket's path for a profile. */
+export function liveSocketPath(profileId: string): string {
+  return withProfileQuery('/api/ws', profileId);
+}
+
 export function LiveProvider({ children }: { children: ReactNode }) {
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
+  const { profileId, ready, apply, refresh } = useProfileContext();
   const [store] = useState(() => new LiveStore());
   const userId = user?.id ?? null;
+  // Latest values for the socket callbacks (they must not reconnect the socket when they change).
+  const latest = useRef({ apply, refresh, isAdmin });
+  useEffect(() => {
+    latest.current = { apply, refresh, isAdmin };
+  });
 
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || !ready) return;
+    store.startProfile(profileId);
+    // Other profiles' alerts come from comparing successive 'profiles' pushes (see profileAlerts).
+    // The baseline is reset on every 'hello' (connect, reconnect; a profile switch reconnects), so
+    // a reconnect never replays stale alerts.
+    let lastProfiles: ProfileSummary[] | null = null;
+    // Profiles whose own notice already reached this socket recently (a server that sends
+    // other profiles' notices too): the summary-based alert would only repeat it.
+    const noticed = new Map<string, number>();
     const conn = new LiveConnection({
-      url: () => wsUrl('/api/ws'),
+      url: () => wsUrl(liveSocketPath(profileId)),
       onMessage: (msg) => {
         store.dispatch(msg);
-        if (msg.type === 'notice') {
+        if (msg.type === 'hello') {
+          lastProfiles = Array.isArray(msg.profiles) ? msg.profiles : null;
+          if (Array.isArray(msg.profiles)) latest.current.apply(msg.profiles);
+          // Pending app pairings aren't in the hello: admins load them on every (re)connect.
+          if (latest.current.isAdmin) void store.loadPairings(api.pairings).catch(() => undefined);
+        } else if (msg.type === 'profiles') {
+          const now = Date.now();
+          for (const a of profileAlerts(lastProfiles, msg.profiles, profileId)) {
+            if (a.alert && now - (noticed.get(a.profileId) ?? -Infinity) < NOTICE_DEDUPE_MS) continue;
+            toast(a.message, { tone: a.level });
+            if (a.alert) alertForNotice(a.level, a.message);
+          }
+          lastProfiles = msg.profiles;
+          latest.current.apply(msg.profiles);
+        } else if (msg.type === 'notice') {
+          const from = noticeProfileId(msg);
+          if (from && from !== profileId) noticed.set(from, Date.now());
           toast(msg.message, { tone: msg.level });
           // Opt-in sound + browser notification (Profile → Alerts / dashboard "Alert me").
           alertForNotice(msg.level, msg.message);
         }
       },
       onConnectedChange: (connected) => store.setConnected(connected),
-      checkAuth: stillLoggedIn,
+      checkAuth: async () => {
+        // A refused socket can also mean the profile is gone (deleted elsewhere): re-check the list
+        // too, which moves the app to the default profile.
+        void latest.current.refresh().catch(() => undefined);
+        return stillLoggedIn();
+      },
     });
     const uninstallAlerts = installAlerts();
     conn.start();
@@ -57,8 +109,13 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       document.removeEventListener('visibilitychange', onVisible);
       uninstallAlerts();
       conn.stop();
-      store.reset();
     };
+  }, [userId, ready, profileId, store]);
+
+  // Logged out (or another user): forget everything, including pairings and apps.
+  useEffect(() => {
+    if (!userId) store.reset();
+    return () => store.reset();
   }, [userId, store]);
 
   return <LiveContext.Provider value={store}>{children}</LiveContext.Provider>;
@@ -77,10 +134,32 @@ export function useLiveState<T>(selector: (s: LiveState) => T): T {
   return useSyncExternalStore(store.subscribe, get, get);
 }
 
-/** Current session (null until the first snapshot arrives). */
-export const useSession = (): SessionState | null => useLiveState((s) => s.session);
-/** Combined chat, oldest first (last 500). */
-export const useChat = (): ChatMessage[] => useLiveState((s) => s.chat);
+const NO_CHAT: ChatMessage[] = [];
+
+/**
+ * Whether the store holds the profile on screen. Right after a profile switch the pages render once
+ * before LiveProvider's effect resets the store, so its session and chat are still the previous
+ * profile's: hide them (and let REST fallbacks run) until the store follows.
+ */
+export function storeShowsProfile(state: Pick<LiveState, 'profileId'>, profileId: string): boolean {
+  return state.profileId === null || state.profileId === profileId;
+}
+
+/** Current session (null until the first snapshot for the profile on screen arrives). */
+export function useSession(): SessionState | null {
+  const { profileId } = useProfileContext();
+  return useLiveState((s) => (storeShowsProfile(s, profileId) ? s.session : null));
+}
+/** Combined chat, oldest first (last 500), of the profile on screen. */
+export function useChat(): ChatMessage[] {
+  const { profileId } = useProfileContext();
+  return useLiveState((s) => (storeShowsProfile(s, profileId) ? s.chat : NO_CHAT));
+}
+/** True while the live socket for the profile on screen is connected. */
+export function useLiveSocketReady(): boolean {
+  const { profileId } = useProfileContext();
+  return useLiveState((s) => s.connected && s.profileId === profileId);
+}
 /** True while the live WebSocket is connected. */
 export const useLiveStatus = (): boolean => useLiveState((s) => s.connected);
 /** How many times the socket has connected (0 = still connecting for the first time). */
@@ -91,6 +170,10 @@ export const useAccountUpdates = (): Readonly<Record<string, Account>> => useLiv
 export const useAccountsVersion = (): number => useLiveState((s) => s.accountsVersion);
 /** Changes whenever destinations change (or after a reconnect): use as a refetch dependency. */
 export const useDestinationsVersion = (): number => useLiveState((s) => s.destinationsVersion);
+/** Pending app pairings (admins), every profile; null until loaded. */
+export const usePairings = (): PairingRequest[] | null => useLiveState((s) => s.pairings);
+/** Connected apps, every profile; null until loaded. */
+export const useConnectedApps = (): ConnectedApp[] | null => useLiveState((s) => s.apps);
 
 /** Run `handler` for every server message of `type` (latest handler is always used). */
 export function useLiveEvent<K extends WsServerMessage['type']>(
@@ -120,17 +203,28 @@ export interface LiveActions {
   patchSession: (patch: Partial<SessionState>) => void;
   /** Merge chat messages fetched over REST. */
   mergeChat: (messages: ChatMessage[]) => void;
+  /** (Re)load pending pairings over REST [admin]. Rejects with the request's error. */
+  loadPairings: () => Promise<void>;
+  /** (Re)load connected apps over REST [admin]. Rejects with the request's error. */
+  loadApps: () => Promise<void>;
 }
 
+/**
+ * Push REST results into the live store. Bound to the profile on screen when the hook ran: an
+ * answer that arrives after switching to another profile is dropped instead of mixing profiles.
+ */
 export function useLiveActions(): LiveActions {
   const store = useStore();
+  const { profileId } = useProfileContext();
   return useMemo(
     () => ({
-      applySession: (s) => store.applySession(s),
-      seedSession: (s) => store.seedSession(s),
-      patchSession: (p) => store.patchSession(p),
-      mergeChat: (m) => store.mergeChat(m),
+      applySession: (s) => store.applySession(s, profileId),
+      seedSession: (s) => store.seedSession(s, profileId),
+      patchSession: (p) => store.patchSession(p, profileId),
+      mergeChat: (m) => store.mergeChat(m, profileId),
+      loadPairings: () => store.loadPairings(api.pairings),
+      loadApps: () => store.loadApps(api.apps),
     }),
-    [store],
+    [store, profileId],
   );
 }

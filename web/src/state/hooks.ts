@@ -5,6 +5,7 @@ import type { Destination } from '@shared/types';
 import { api } from '../api';
 import { errorMessage } from './errors';
 import { useDestinationsVersion } from './live';
+import { useProfileId } from './profile';
 
 export interface ApiResource<T> {
   data: T | undefined;
@@ -55,10 +56,14 @@ export function useApi<T>(fetcher: () => Promise<T>, deps: DependencyList): ApiR
   return { data, error, loading, reload, setData };
 }
 
-/** All destinations; refetches when the server reports destination changes or after a reconnect. */
+/**
+ * The current profile's destinations; refetches when the server reports destination changes, after
+ * a reconnect and when the profile changes.
+ */
 export function useDestinations(): ApiResource<Destination[]> {
   const version = useDestinationsVersion();
-  return useApi(() => api.destinations(), [version]);
+  const profileId = useProfileId();
+  return useApi(() => api.destinations(profileId), [version, profileId]);
 }
 
 /** Current time in ms, updated every `intervalMs` (null pauses the clock). */

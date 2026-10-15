@@ -40,7 +40,8 @@ export function createMediaMtxApi(port: number, fetchImpl: FetchFn = fetch): Med
   };
 
   const listPaths = async (signal?: AbortSignal): Promise<MtxPath[]> => {
-    const res = await call('GET', 'paths/list?itemsPerPage=100', signal);
+    // Two static paths + the active paths of every other profile; one page is plenty.
+    const res = await call('GET', 'paths/list?itemsPerPage=1000', signal);
     const body = (await res.json()) as MtxPathList;
     return Array.isArray(body.items) ? body.items : [];
   };
