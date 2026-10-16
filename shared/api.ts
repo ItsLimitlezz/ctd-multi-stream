@@ -328,6 +328,21 @@ export interface AppSettings {
   /** Seconds to wait after OBS disconnects before ending the session (covers OBS reconnects). */
   disconnectGraceSec: number;
 }
+/**
+ * GET /api/version [user] -> VersionResponse: which build is running (shown at the bottom of every
+ * page, so it's clear what is being tested). Not public: the login page doesn't show it.
+ */
+export interface VersionResponse {
+  /** package.json version, e.g. "0.1.0". */
+  version: string;
+  /** Short git commit of the image, or null for a local/dev build. */
+  commit: string | null;
+  /** ISO time the image was built, or null. */
+  buildDate: string | null;
+  /** External API revision (docs/API.md changelog), e.g. "1.3". */
+  apiRevision: string;
+}
+
 /** GET /api/settings -> SettingsResponse ; PUT /api/settings body Partial<AppSettings> -> SettingsResponse */
 export interface SettingsResponse {
   settings: AppSettings;

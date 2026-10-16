@@ -35,6 +35,7 @@ import type {
   UpdateDestinationRequest,
   UpdateProfileRequest,
   UpdateUserRequest,
+  VersionResponse,
 } from '@shared/api';
 import { CSRF_HEADER } from '@shared/api';
 import type {
@@ -208,6 +209,7 @@ export const api = {
 
   // settings + audit
   settings: () => get<SettingsResponse>('/api/settings'),
+  version: () => get<VersionResponse>('/api/version'),
   putSettings: (body: Partial<AppSettings>) => put<SettingsResponse>('/api/settings', body),
   audit: (limit = 100, before?: number) =>
     get<AuditResponse>(`/api/audit?limit=${limit}${before !== undefined ? `&before=${before}` : ''}`),

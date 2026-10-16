@@ -73,10 +73,17 @@ jobs:
             org.opencontainers.image.title=CTD Multi-Stream
             org.opencontainers.image.licenses=AGPL-3.0-only
 
+      - name: Build time
+        id: when
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
           context: .
+          build-args: |
+            CTD_BUILD_COMMIT=${{ github.sha }}
+            CTD_BUILD_DATE=${{ steps.when.outputs.date }}
           platforms: ${{ env.PUSH == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ env.PUSH == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}

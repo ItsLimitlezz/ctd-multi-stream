@@ -14,7 +14,7 @@ import { buildClock, parseT0 } from './clock.js';
 import { eventHubFor, type EventHub, type EventReader } from './event-hub.js';
 import { resolveTypes } from './filters.js';
 import { ConcurrencyLimiter, SlidingWindowLimiter, isProblemCode, presentedToken, query, sendProblem, type ProblemCode } from './http.js';
-import { openApiDocument } from './openapi.js';
+import { API_REVISION, openApiDocument } from './openapi.js';
 import type { ApiEventType, Envelope } from './types.js';
 import { parseUlid } from './ulid.js';
 import { registerHubRoutes } from './v1-hub.js';
@@ -239,9 +239,13 @@ const v1Plugin: FastifyPluginAsync<V1Options> = async (app, opts) => {
 
   app.get('/', { preHandler: requireToken(null) }, async (req, reply) => {
     const { token } = authOf(req);
+    const { build } = services.config;
     return reply.header('cache-control', 'no-store').send({
       name: 'ctd-multi-stream',
       version: services.config.version,
+      // v1.3: which image is running (null commit/date: a local build).
+      build: { commit: build?.commit ?? null, date: build?.date ?? null },
+      apiRevision: API_REVISION,
       apiVersion: 1,
       token: { name: token.name, scopes: token.scopes, profileId: token.profileId ?? null },
     });

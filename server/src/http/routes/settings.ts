@@ -1,10 +1,12 @@
-// App settings (public base URL, ingest host, disconnect grace) + TLS status and version.
+// App settings (public base URL, ingest host, disconnect grace) + TLS status and version; the
+// running build for every signed-in user (GET /api/version, the web UI footer).
 
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import type { AppSettings, SettingsResponse } from '../../../../shared/api.js';
+import type { AppSettings, SettingsResponse, VersionResponse } from '../../../../shared/api.js';
+import { API_REVISION } from '../../api/openapi.js';
 import type { AppServices } from '../../services.js';
-import { audit, requireAdmin, type RouteOptions } from '../guards.js';
+import { audit, requireAdmin, requireUser, type RouteOptions } from '../guards.js';
 import { installErrorHandler, isRecord, normalizeIngestHost, normalizePublicBaseUrl } from '../validation.js';
 
 const SETTINGS_KEY = 'app';
@@ -23,6 +25,12 @@ const settingsRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services 
   installErrorHandler(app);
 
   app.get('/api/settings', { preHandler: requireAdmin }, async () => settingsResponse(services));
+
+  app.get('/api/version', { preHandler: requireUser }, async (_req, reply) => {
+    const { version, build } = services.config;
+    const res: VersionResponse = { version, commit: build?.commit ?? null, buildDate: build?.date ?? null, apiRevision: API_REVISION };
+    return reply.header('cache-control', 'no-store').send(res);
+  });
 
   app.put('/api/settings', { preHandler: requireAdmin }, async (req) => {
     const body = putBody.parse(req.body ?? {});

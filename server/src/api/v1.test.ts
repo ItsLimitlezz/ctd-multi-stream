@@ -44,7 +44,14 @@ describe('auth', () => {
   it('GET / identifies the token', async () => {
     const res = await get('/api/v1/', both);
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ name: 'ctd-multi-stream', version: '9.9.9', apiVersion: 1, token: { name: 'test', scopes: ['chat:read', 'status:read'], profileId: null } });
+    expect(res.json()).toEqual({
+      name: 'ctd-multi-stream',
+      version: '9.9.9',
+      build: { commit: null, date: null },
+      apiRevision: '1.3',
+      apiVersion: 1,
+      token: { name: 'test', scopes: ['chat:read', 'status:read'], profileId: null },
+    });
     expect((await get('/api/v1', both)).statusCode).toBe(200);
   });
 

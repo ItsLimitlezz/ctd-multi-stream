@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import type { VersionResponse } from '@shared/api';
 import type { SessionStatus } from '@shared/types';
+import { api } from '../api';
 import { Link, ROUTES, useRoute } from '../router';
 import { useAuth } from '../state/auth';
 import { useNow } from '../state/hooks';
@@ -84,7 +86,55 @@ export function AppShell({ children }: { children: ReactNode }) {
         <PairingBanner />
         {children}
       </main>
+      <AppFooter />
     </div>
+  );
+}
+
+const REPO_URL = 'https://github.com/ItsLimitlezz/ctd-multi-stream';
+
+/** "v0.1.0 · build d6b0c9e (Oct 17, 01:30)" — which server build is running, so tests name it. */
+export function versionLabel(v: VersionResponse): { version: string; build: string } {
+  const date = v.buildDate ? new Date(v.buildDate) : null;
+  const when = date && Number.isFinite(date.getTime())
+    ? date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : null;
+  return {
+    version: `v${v.version}`,
+    build: v.commit ? `build ${v.commit}${when ? ` (${when})` : ''}` : 'dev build',
+  };
+}
+
+/** Bottom line of every page: app version, build (commit + date) and API revision. */
+function AppFooter() {
+  const [info, setInfo] = useState<VersionResponse | null>(null);
+  const connected = useLiveStatus();
+  // Re-read after the live connection comes back: that's when an updated server restarted.
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    api.version().then(
+      (v) => !cancelled && setInfo(v),
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [connected]);
+  if (!info) return null;
+  const label = versionLabel(info);
+  return (
+    <footer className="app-footer muted small">
+      CTD Multi-Stream {label.version} ·{' '}
+      {info.commit ? (
+        <a href={`${REPO_URL}/commit/${info.commit}`} target="_blank" rel="noreferrer">
+          {label.build}
+        </a>
+      ) : (
+        label.build
+      )}{' '}
+      · API {info.apiRevision}
+    </footer>
   );
 }
 

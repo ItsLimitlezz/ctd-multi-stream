@@ -360,10 +360,16 @@ export function openApiDocument(version: string): Record<string, unknown> {
         Scope: { enum: [...API_SCOPES] },
         WhoAmI: {
           type: 'object',
-          required: ['name', 'version', 'apiVersion', 'token'],
+          required: ['name', 'version', 'build', 'apiRevision', 'apiVersion', 'token'],
           properties: {
             name: { const: 'ctd-multi-stream' },
             version: str,
+            build: {
+              type: 'object',
+              description: 'v1.3: the running image (null for a local build)',
+              properties: { commit: nullable({ type: 'string', description: 'Short git commit' }), date: nullable(isoTime) },
+            },
+            apiRevision: { type: 'string', description: 'v1.3: API revision, e.g. "1.3"' },
             apiVersion: { const: 1 },
             token: {
               type: 'object',

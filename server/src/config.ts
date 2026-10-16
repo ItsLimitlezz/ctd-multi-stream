@@ -43,7 +43,27 @@ const EnvSchema = z.object({
   /** Trust X-Forwarded-* headers (only when running behind your own reverse proxy). */
   TRUST_PROXY: bool.default(false),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  /** Set by the Docker build (CI): the git commit and build time of this image. */
+  CTD_BUILD_COMMIT: optionalString,
+  CTD_BUILD_DATE: optionalString,
 });
+
+/** Which build is running: shown at the bottom of the web UI and in the external API. */
+export interface BuildInfo {
+  /** Short git commit (7 chars), or null for a local/dev build. */
+  commit: string | null;
+  /** ISO time the image was built, or null. */
+  date: string | null;
+}
+
+export function buildInfo(commit: string | undefined, date: string | undefined): BuildInfo {
+  const sha = commit?.trim().toLowerCase() ?? '';
+  const when = date?.trim() ?? '';
+  return {
+    commit: /^[0-9a-f]{7,40}$/.test(sha) ? sha.slice(0, 7) : null,
+    date: when && Number.isFinite(Date.parse(when)) ? new Date(when).toISOString() : null,
+  };
+}
 
 export interface AppConfig {
   dataDir: string;
@@ -66,6 +86,8 @@ export interface AppConfig {
   trustProxy: boolean;
   logLevel: string;
   version: string;
+  /** Missing in hand-built test configs. */
+  build?: BuildInfo;
 }
 
 /**
@@ -107,5 +129,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, version = '0.0.
     trustProxy: e.TRUST_PROXY,
     logLevel: e.LOG_LEVEL,
     version,
+    build: buildInfo(e.CTD_BUILD_COMMIT, e.CTD_BUILD_DATE),
   };
 }

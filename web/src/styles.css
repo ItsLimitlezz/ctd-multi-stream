@@ -1227,6 +1227,19 @@ img {
   padding: 20px var(--gutter) 40px;
 }
 
+.app-footer {
+  width: 100%;
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 12px var(--gutter) 20px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+.app-footer a {
+  color: inherit;
+  text-decoration: underline dotted;
+}
+
 .page {
   display: flex;
   flex-direction: column;

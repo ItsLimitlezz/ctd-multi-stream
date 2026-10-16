@@ -110,6 +110,13 @@ COPY --from=build /app/dist ./dist
 COPY scripts/healthcheck.mjs ./scripts/healthcheck.mjs
 COPY LICENSE ./LICENSE
 
+# Which build this is (shown at the bottom of the web UI). CI passes the commit and build time;
+# declared last so a new commit doesn't invalidate the cached layers above.
+ARG CTD_BUILD_COMMIT=""
+ARG CTD_BUILD_DATE=""
+ENV CTD_BUILD_COMMIT=${CTD_BUILD_COMMIT} \
+    CTD_BUILD_DATE=${CTD_BUILD_DATE}
+
 USER 568:568
 
 # 8443 web UI (HTTPS unless TLS_MODE=off) · 8080 Let's Encrypt HTTP-01 + redirect · 1935 RTMP (LAN only)
