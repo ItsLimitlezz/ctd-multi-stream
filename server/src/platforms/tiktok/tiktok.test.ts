@@ -138,7 +138,8 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('TikTok driver against a LIVE Produ
       expect(m.id).toBe(`m${n}`);
       expect(m.author.avatarUrl).toBe(`${fixture.origin}/a/${n}.jpg`);
     }
-    expect(joins[0]).toMatchObject({ author: { name: 'TikTok' } });
+    expect(joins[0]).toMatchObject({ author: { name: 'TikTok' }, join: true });
+    for (const m of messages) expect(m.join).toBeUndefined();
     expect(joins[0]!.text).toMatch(/^viewer\d+ joined$/);
     ac.abort();
     expect((await withTimeout(chat.next(), 5000, 'chat did not stop')).done).toBe(true);

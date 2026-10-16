@@ -464,7 +464,9 @@ export const CHAT_EXTRACT = `(el) => {
   const avatar = img && /^https?:/.test(img.src || '') ? img.src : undefined;
   const id = el.getAttribute('data-id') || el.getAttribute('data-msg-id') || el.getAttribute('data-message-id') ||
     el.getAttribute('data-comment-id') || null;
-  return { id, author: author || (isEvent ? 'TikTok' : ''), text, avatarUrl: avatar, kind: isEvent ? 'event' : 'message' };
+  // "<name> joined": a presence line, not a gift/like/system notice.
+  const join = isEvent && (/enter|join/i.test(e2e + ' ' + cls) || /\\bjoined\\b\\.?$/i.test(text));
+  return { id, author: author || (isEvent ? 'TikTok' : ''), text, avatarUrl: avatar, kind: isEvent ? 'event' : 'message', join };
 }`;
 
 // ---------------------------------------------------------------------------

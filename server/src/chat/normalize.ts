@@ -118,6 +118,7 @@ export function normalizeChatMessage(
   if (kind === 'event') {
     const alert = cleanAlert(input.alert, name);
     if (alert) msg.alert = alert;
+    if (input.join === true) msg.join = true;
   }
   return msg;
 }

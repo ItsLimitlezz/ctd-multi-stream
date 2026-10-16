@@ -395,6 +395,7 @@ export const CHAT_EXTRACT_SOURCE = `(el) => {
   const altRe = /^(.+?)['\\u2019]s profile picture$/i;
   const metaRe = /^(reply|replies|see translation|pin|pin comment|unpin|report|like|liked|\\u00b7|\\u2022|now|just now|\\d+\\s?[smhdw]|\\d+\\s?(sec|min|hr|hour|day|week)s?( ago)?|verified)$/i;
   const eventRe = /^(joined|joined the live video|joined the live|is watching|started watching|requested to join)\\.?$/i;
+  const joinRe = /^(joined|joined the live video|joined the live|is watching|started watching)\\.?$/i;
   const visible = (n) => !!(n && (n.offsetWidth || n.offsetHeight || n.getClientRects().length));
   const img = el.querySelector('img[alt$="profile picture" i]');
   let author = '';
@@ -431,6 +432,7 @@ export const CHAT_EXTRACT_SOURCE = `(el) => {
     author: author || 'Instagram',
     text: isEvent && author ? author + ' ' + text : text,
     kind: isEvent ? 'event' : 'message',
+    join: isEvent && joinRe.test(text),
     avatarUrl: img && /^https?:/i.test(img.src || '') ? img.src : undefined,
     badges: badges,
   };

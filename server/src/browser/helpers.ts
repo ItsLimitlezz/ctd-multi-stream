@@ -247,6 +247,8 @@ export interface ChatExtractResult {
   avatarUrl?: string;
   badges?: string[];
   kind?: 'message' | 'event';
+  /** A "<name> joined" presence line (with kind 'event'). */
+  join?: boolean;
 }
 
 export interface ScrapeChatOptions {
@@ -273,6 +275,7 @@ interface ScannedItem {
   avatarUrl: string | null;
   badges: string[] | null;
   kind: 'message' | 'event';
+  join: boolean;
   occ: number;
 }
 
@@ -320,6 +323,7 @@ const SCAN_SOURCE = `(args, extract) => {
         avatarUrl: str(r.avatarUrl) || null,
         badges: Array.isArray(r.badges) ? r.badges.filter((b) => typeof b === 'string').slice(0, 10) : null,
         kind: r.kind === 'event' ? 'event' : 'message',
+        join: r.kind === 'event' && r.join === true,
       };
       st.cache.set(el, data);
     }
@@ -372,6 +376,7 @@ function toChatInput(item: ScannedItem): ChatMessageInput {
     kind: item.kind,
   };
   if (item.id) msg.id = item.id;
+  if (item.join) msg.join = true;
   return msg;
 }
 

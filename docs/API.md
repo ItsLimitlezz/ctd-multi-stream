@@ -149,7 +149,8 @@ event stream.
     "startedAt": "2026-10-17T03:00:04Z",
     "title": "DPRTMNT Saturday",
     "testMode": false,
-    "autoGoLive": true
+    "autoGoLive": true,
+    "viewers": 214
   },
   "feeds": [
     { "feed": "landscape", "online": true, "since": "2026-10-17T02:59:58Z",
@@ -183,6 +184,10 @@ event stream.
 }
 ```
 
+- `session.viewers` (v1.3): **total viewers across every platform** of the profile — the sum of the
+  destinations whose count is known (`null` when none is). It rides on `stream.status`, which is
+  sent whenever the total changes, so an overlay's "watching now" counter needs only that event.
+  Per platform: `platforms[].viewers`; per destination: `destinations[].viewers`.
 - `phase`: `idle`, `disabled`, `waiting-for-feed`, `preparing`, `connecting`, `confirming`, `live`,
   `retrying`, `recovering`, `ending`, `error`. `live` = phase is `live`.
 - `down` = the session is running, the destination is enabled (and not skipped by test mode), and
@@ -315,6 +320,7 @@ Without `after`: returns nothing but the current cursor (`next`), so you can sta
   "highlighted": false,
   "action": false,
   "kind": "message",
+  "join": false,
   "ts": 1791830000123
 }
 ```
@@ -336,6 +342,11 @@ Without `after`: returns nothing but the current cursor (`next`), so you can sta
 - `kind: "event"` = a platform notice shown in chat (sub, raid, Super Chat…), `text` is its
   human-readable line. When the notice is a structured alert, an `alert.<kind>` event (below)
   follows it.
+- `join: true` (v1.3) marks a **presence line**, not a comment: someone joined / started watching
+  (Instagram's and TikTok's live chat show "dj_fan joined" between the comments). Always with
+  `kind: "event"`; `user.name` is who joined, `text` the line as shown ("dj_fan joined"). A chat box
+  that should show only comments drops `join` lines (or shows them as a light "👋 joined" toast);
+  they can be frequent at a busy live.
 - `color` is `#RRGGBB` or `null`; `avatar` is an `https` URL or `null`. `channel` is the
   destination name.
 - `platformMessageId` and `user.login` are `null` when the chat source doesn't provide them
@@ -774,6 +785,10 @@ the revision in `info.version`.
   at the feed's frame rate.
 - `destination.down` / `destination.up`: a retry stays down until the destination is live again
   (no down → up → down flapping while a platform keeps refusing).
+- **Total viewers:** `session.viewers` in `/status` and on `stream.status` (sent when the total
+  changes) = viewers across every platform added up.
+- **Joins:** `chat.message` gets `join` — `true` on "<name> joined" presence lines (Instagram,
+  TikTok) so chat boxes can keep them apart from comments.
 
 ### v1.2
 

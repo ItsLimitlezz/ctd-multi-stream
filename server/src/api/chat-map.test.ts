@@ -60,6 +60,7 @@ describe('chat.message mapping', () => {
       highlighted: false,
       action: false,
       kind: 'message',
+      join: false,
       ts: Date.parse('2026-10-17T03:00:04.123Z'),
     });
   });

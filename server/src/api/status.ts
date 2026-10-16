@@ -29,13 +29,29 @@ export interface StatusSources {
 
 type SessionLike = Pick<SessionState, 'status' | 'startedAt' | 'title' | 'autoGoLive' | 'testMode'>;
 
-export function apiSession(s: SessionLike): ApiSession {
+/** A usable viewer count (finite, ≥ 0), else null. */
+function viewerCount(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/** Viewers across every platform: the sum of the counts that are known, null when none is. */
+export function totalViewers(items: Iterable<{ viewers?: number | null }>): number | null {
+  let total: number | null = null;
+  for (const item of items) {
+    const n = viewerCount(item.viewers);
+    if (n !== null) total = (total ?? 0) + n;
+  }
+  return total;
+}
+
+export function apiSession(s: SessionLike, viewers: number | null = null): ApiSession {
   return {
     status: s.status,
     startedAt: s.startedAt,
     title: s.title,
     testMode: s.testMode === true,
     autoGoLive: s.autoGoLive,
+    viewers,
   };
 }
 
@@ -77,7 +93,7 @@ export function apiDestination(
   info: PlatformInfo | null,
 ): ApiDestination {
   const phase: DestinationPhase = st?.phase ?? (dest.enabled ? 'idle' : 'disabled');
-  const viewers = typeof st?.viewers === 'number' && Number.isFinite(st.viewers) && st.viewers >= 0 ? st.viewers : null;
+  const viewers = viewerCount(st?.viewers);
   return {
     id: dest.id,
     name: dest.name,
@@ -125,7 +141,7 @@ export function buildStatus(src: StatusSources): ApiStatus {
   const byId = new Map(state.destinations.map((d) => [d.destinationId, d]));
   const destinations = src.destinations().map((d) => apiDestination(d, byId.get(d.id), state, src.platformInfo(d.platform)));
   return {
-    session: apiSession(state),
+    session: apiSession(state, totalViewers(destinations)),
     feeds: state.feeds.map(apiFeed),
     destinations,
     platforms: platformRollup(destinations, state.title),

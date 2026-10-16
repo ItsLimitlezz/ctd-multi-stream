@@ -145,6 +145,7 @@ export function chatMessageData(msg: ChatMessage, channel: string): ApiChatMessa
     highlighted: msg.highlighted === true,
     action: msg.action === true,
     kind: msg.kind,
+    join: msg.kind === 'event' && msg.join === true,
     ts: Number.isFinite(ts) ? ts : Date.now(),
   };
 }

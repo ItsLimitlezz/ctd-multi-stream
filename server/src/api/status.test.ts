@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PlatformInfo } from '../../../shared/types.js';
-import { apiDestination, buildStatus, isDown, platformRollup } from './status.js';
+import { apiDestination, buildStatus, isDown, platformRollup, totalViewers } from './status.js';
 import { dest, dstate, session } from './test-helpers.js';
 
 const info = (supported: boolean): PlatformInfo => ({ testMode: { supported, description: '' } }) as PlatformInfo;
@@ -34,6 +34,15 @@ describe('down', () => {
   });
 });
 
+describe('totalViewers', () => {
+  it('adds up the known counts; null when none is known', () => {
+    expect(totalViewers([{ viewers: 3 }, { viewers: null }, {}, { viewers: 0 }, { viewers: 40 }])).toBe(43);
+    expect(totalViewers([{ viewers: 0 }])).toBe(0);
+    expect(totalViewers([{ viewers: null }, { viewers: -1 }, { viewers: Number.NaN }])).toBeNull();
+    expect(totalViewers([])).toBeNull();
+  });
+});
+
 describe('status builder', () => {
   it('builds session, feeds, destinations and the per-platform rollup', () => {
     const destinations = [
@@ -63,7 +72,8 @@ describe('status builder', () => {
       platformInfo: () => null,
     });
 
-    expect(status.session).toEqual({ status: 'live', startedAt: '2026-10-17T03:00:04.000Z', title: 'DPRTMNT Saturday', testMode: false, autoGoLive: true });
+    // viewers: every platform added up (214 + 10; Instagram's unknown count is left out).
+    expect(status.session).toEqual({ status: 'live', startedAt: '2026-10-17T03:00:04.000Z', title: 'DPRTMNT Saturday', testMode: false, autoGoLive: true, viewers: 224 });
     expect(status.feeds).toHaveLength(2);
     expect(status.feeds[0]).toMatchObject({ feed: 'landscape', online: true, bitrateKbps: 6012 });
     expect(status.destinations.map((d) => d.id)).toEqual(['t1', 'i1', 't2', 'k1']);

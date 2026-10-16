@@ -99,7 +99,7 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('instagram driver (Chromium + local
     await page.evaluate(`window.__addComment('alice', 'hello from the fixture 👋')`);
     expect(await first).toMatchObject({ author: { name: 'alice' }, text: 'hello from the fixture 👋', kind: 'message' });
     await page.evaluate(`window.__addJoin('bob')`);
-    expect(await next(chat)).toMatchObject({ author: { name: 'bob' }, text: 'bob joined', kind: 'event' });
+    expect(await next(chat)).toMatchObject({ author: { name: 'bob' }, text: 'bob joined', kind: 'event', join: true });
     await page.evaluate(`window.__addComment('alice', 'hello from the fixture 👋')`); // same text again = new message
     expect(await next(chat)).toMatchObject({ author: { name: 'alice' }, text: 'hello from the fixture 👋' });
     await page.evaluate(`window.__addPlain('carol', 'no avatar here')`); // list item without an avatar

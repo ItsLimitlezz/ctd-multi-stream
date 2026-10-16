@@ -295,6 +295,11 @@ export interface ChatMessage {
    * Matches CTD Overlay's alert payload; the external API also emits it as `alert.<kind>`.
    */
   alert?: ChatAlert;
+  /**
+   * A presence line, not a comment: someone joined / started watching ("dj_fan joined" in Instagram's
+   * and TikTok's live chat). Only on `kind: 'event'` lines.
+   */
+  join?: boolean;
 }
 
 export type ChatAlertKind = 'follow' | 'subscription' | 'gift' | 'cheer' | 'kicks' | 'raid' | 'membership' | 'superchat' | 'tip';

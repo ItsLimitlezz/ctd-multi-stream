@@ -378,7 +378,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
         Platform: { enum: [...PLATFORM_IDS] },
         Session: {
           type: 'object',
-          required: ['status', 'startedAt', 'title', 'testMode', 'autoGoLive'],
+          required: ['status', 'startedAt', 'title', 'testMode', 'autoGoLive', 'viewers'],
           properties: {
             status: { enum: ['offline', 'starting', 'live', 'stopping'] },
             startedAt: nullable(isoTime),
@@ -389,6 +389,10 @@ export function openApiDocument(version: string): Record<string, unknown> {
                 'Test mode: every destination streams with its platform’s private/test setting; destinations without one are skipped (phase disabled, message "Skipped — <Platform> has no test mode"). Channel titles (Twitch, Kick) are never changed in test mode',
             },
             autoGoLive: bool,
+            viewers: {
+              oneOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }],
+              description: 'v1.3: viewers across every platform of the profile (sum of the known counts); null when none is known',
+            },
           },
         },
         Feed: {
@@ -500,7 +504,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
         },
         ChatMessage: {
           type: 'object',
-          required: ['id', 'platform', 'channel', 'destinationId', 'platformMessageId', 'user', 'text', 'fragments', 'reply', 'highlighted', 'action', 'kind', 'ts'],
+          required: ['id', 'platform', 'channel', 'destinationId', 'platformMessageId', 'user', 'text', 'fragments', 'reply', 'highlighted', 'action', 'kind', 'join', 'ts'],
           properties: {
             id: { type: 'string', description: 'Stable, platform-prefixed: use it to apply deletions' },
             platform: ref('Platform'),
@@ -526,6 +530,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
             highlighted: bool,
             action: bool,
             kind: { enum: ['message', 'event'] },
+            join: { type: 'boolean', description: 'v1.3: a "<name> joined" presence line (Instagram, TikTok), not a comment; always with kind "event"' },
             ts: epochMs,
           },
         },

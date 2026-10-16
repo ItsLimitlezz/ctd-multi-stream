@@ -32,7 +32,7 @@ import { apiMessageFromUser, chatMessageData, moderationEvent } from './chat-map
 import { appsForProfile, publicApp } from './hub.js';
 import { deepEqual } from './json.js';
 import { apiProfile } from './profiles.js';
-import { apiDestination, apiFeed, apiSession, buildStatus } from './status.js';
+import { apiDestination, apiFeed, apiSession, buildStatus, totalViewers } from './status.js';
 import {
   CONNECTOR,
   CORE,
@@ -454,7 +454,7 @@ export class EventHub {
     }
     const track: ProfileTrack = {
       session: state ?? offlineSession(),
-      sentSession: state ? apiSession(state) : null,
+      sentSession: state ? apiSession(state, totalViewers(state.destinations)) : null,
       states: new Map(),
       feeds: new Map(),
       latestFeeds: new Map(),
@@ -600,14 +600,18 @@ export class EventHub {
     const profile = s.profileId ?? DEFAULT_PROFILE_ID;
     const track = this.track(profile, false);
     track.session = s;
-    const session = apiSession(s);
-    if (track.sentSession === null || !deepEqual(session, track.sentSession)) {
-      track.sentSession = session;
-      this.publish('stream.status', coreSource(profile), session);
-    }
     track.states = new Map(s.destinations.map((st) => [st.destinationId, st]));
+    this.sendSession(profile, track, true);
     this.refreshAll(profile);
     this.refreshSummaries();
+  }
+
+  /** stream.status when the session (or the total viewer count) changed; `force` when it's never been sent. */
+  private sendSession(profile: string, track: ProfileTrack, force: boolean): void {
+    const session = apiSession(track.session, totalViewers(track.states.values()));
+    if (track.sentSession === null ? !force : deepEqual(session, track.sentSession)) return;
+    track.sentSession = session;
+    this.publish('stream.status', coreSource(profile), session);
   }
 
   private onDestination(st: DestinationState): void {
@@ -616,6 +620,8 @@ export class EventHub {
     const track = this.track(profile);
     const prev = track.states.get(st.destinationId);
     track.states.set(st.destinationId, st);
+    // The total viewer count rides on stream.status.
+    if ((prev?.viewers ?? null) !== (st.viewers ?? null)) this.sendSession(profile, track, false);
     if (dest) this.refreshDestination(dest);
     // Live/down counts only change with the phase (stats and viewers updates don't).
     if (!prev || prev.phase !== st.phase) this.refreshSummaries();

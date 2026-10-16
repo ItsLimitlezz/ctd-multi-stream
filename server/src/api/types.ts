@@ -98,6 +98,8 @@ export interface ApiSession {
   title: string;
   testMode: boolean;
   autoGoLive: boolean;
+  /** Viewers across every platform of the profile (sum of the known counts); null when none is known. v1.3. */
+  viewers: number | null;
 }
 
 export type ApiFeed = FeedState;
@@ -174,6 +176,8 @@ export interface ApiChatMessage {
   highlighted: boolean;
   action: boolean;
   kind: 'message' | 'event';
+  /** v1.3: a "<name> joined" presence line (Instagram, TikTok), not a comment; always with kind 'event'. */
+  join: boolean;
   ts: number;
 }
 

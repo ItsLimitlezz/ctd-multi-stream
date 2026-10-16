@@ -92,7 +92,17 @@ describe('envelopes', () => {
     bus.emit('session', current);
     bus.emit('session', current);
     expect(types().filter((t) => t === 'stream.status')).toHaveLength(4);
-    expect(events.at(-1)?.data).toEqual({ status: 'live', startedAt: '2026-10-17T03:00:04.000Z', title: 'New title', testMode: true, autoGoLive: false });
+    expect(events.at(-1)?.data).toEqual({ status: 'live', startedAt: '2026-10-17T03:00:04.000Z', title: 'New title', testMode: true, autoGoLive: false, viewers: null });
+  });
+
+  it('stream.status carries the viewers of every platform added up, sent when the total changes', () => {
+    current = { ...current, status: 'live', startedAt: '2026-10-17T03:00:04.000Z' };
+    bus.emit('session', current);
+    bus.emit('destination', dstate('t1', 'live', { viewers: 120 }));
+    bus.emit('destination', dstate('i1', 'live', { viewers: 30 }));
+    bus.emit('destination', dstate('i1', 'live', { viewers: 30, stats: { bitrateKbps: 1, fps: 30, speed: 1, uptimeSec: 9 } })); // same count
+    const totals = events.filter((e) => e.type === 'stream.status').map((e) => (e.data as { viewers: number | null }).viewers);
+    expect(totals).toEqual([null, 120, 150]);
   });
 });
 
@@ -118,21 +128,23 @@ describe('throttling', () => {
 
   it('destination.status: immediate on phase change, at most every 2 s for stats/viewers', async () => {
     current = { ...current, status: 'live' };
+    // Only destination.status here (a viewer change also updates the total on stream.status).
+    const dests = () => events.filter((e) => e.type === 'destination.status');
     bus.emit('destination', dstate('t1', 'live'));
-    expect(types()).toEqual(['destination.status']);
+    expect(dests()).toHaveLength(1);
     const stats = (kbps: number) => ({ bitrateKbps: kbps, fps: 60, speed: 1, uptimeSec: 10 });
     bus.emit('destination', dstate('t1', 'live', { stats: stats(6000) }));
     bus.emit('destination', dstate('t1', 'live', { stats: stats(6001), viewers: 5 }));
     bus.emit('destination', dstate('t1', 'live', { stats: stats(6002), viewers: 7 }));
-    expect(types()).toEqual(['destination.status']);
+    expect(dests()).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1999);
-    expect(types()).toHaveLength(1);
+    expect(dests()).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(types()).toHaveLength(2);
-    expect(events[1]!.data).toMatchObject({ stats: { bitrateKbps: 6002 }, viewers: 7 });
+    expect(dests()).toHaveLength(2);
+    expect(dests()[1]!.data).toMatchObject({ stats: { bitrateKbps: 6002 }, viewers: 7 });
 
     bus.emit('destination', dstate('t1', 'retrying', { message: 'Connection lost' }));
-    expect(types().slice(2)).toEqual(['destination.status']); // phase change: right away (down only while running...)
+    expect(dests()).toHaveLength(3); // phase change: right away (down only while running...)
   });
 });
 

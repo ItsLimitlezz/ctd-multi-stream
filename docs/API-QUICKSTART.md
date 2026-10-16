@@ -45,7 +45,8 @@ A token limited to one profile only ever sees that profile; you don't need `?pro
 ```
 
 **Event types:**
-- `chat.message`: `data` = `{ id, platform, channel, user { id, login, name, color, avatar, badges, roles }, text, fragments, action, kind, ts }`.
+- `chat.message`: `data` = `{ id, platform, channel, user { id, login, name, color, avatar, badges, roles }, text, fragments, action, kind, join, ts }`. `join: true` = a "<name> joined" line (Instagram, TikTok), not a comment.
+- `stream.status`: the session, including `viewers` = **total viewers across all platforms** (v1.3; sent whenever it changes).
 - `chat.message.deleted` / `chat.user.cleared` / `chat.cleared`: remove the matching messages.
 - `alert.<kind>`: subscription, gift, cheer, raid, membership, superchat. Money is `{ unit: "currency", value: "5.00", currency: "USD" }`.
 - `stream.status`, `destination.status`, `destination.down` / `destination.up`, `feed.status`, `system.notice`.
