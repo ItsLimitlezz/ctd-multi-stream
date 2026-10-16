@@ -12,6 +12,11 @@ import type { ApiDestination, ApiFeed, ApiPlatform, ApiSession, ApiStatus } from
 
 /** Phases in which an enabled destination of a running session isn't reaching its platform. */
 export const DOWN_PHASES: ReadonlySet<DestinationPhase> = new Set<DestinationPhase>(['error', 'retrying', 'recovering', 'waiting-for-feed']);
+/**
+ * Steps towards live that a retry passes through: still down while `retries` > 0, so a retry that
+ * fails again doesn't flap down → up → down (the runner resets `retries` only once it is live).
+ */
+const RETRY_STEPS: ReadonlySet<DestinationPhase> = new Set<DestinationPhase>(['preparing', 'connecting', 'confirming']);
 
 export interface StatusSources {
   /** orchestrator.state() */
@@ -59,8 +64,10 @@ export function isDown(
   dest: Pick<Destination, 'enabled'>,
   phase: DestinationPhase,
   info: PlatformInfo | null,
+  retries = 0,
 ): boolean {
-  return sessionRunning(s) && dest.enabled && !skippedByTestMode(s, info) && DOWN_PHASES.has(phase);
+  const failing = DOWN_PHASES.has(phase) || (retries > 0 && RETRY_STEPS.has(phase));
+  return sessionRunning(s) && dest.enabled && !skippedByTestMode(s, info) && failing;
 }
 
 export function apiDestination(
@@ -79,7 +86,7 @@ export function apiDestination(
     enabled: dest.enabled,
     phase,
     live: phase === 'live',
-    down: isDown(session, dest, phase, info),
+    down: isDown(session, dest, phase, info, st?.retries ?? 0),
     message: st?.message ?? null,
     stats: st?.stats ?? null,
     viewers,

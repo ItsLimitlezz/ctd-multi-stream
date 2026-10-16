@@ -208,15 +208,16 @@ export class SessionOrchestrator implements Orchestrator {
    */
   summary(profile: Profile): ProfileSummary {
     const { state, list } = this.snapshot();
-    const phases = new Map(state.destinations.map((d) => [d.destinationId, d.phase]));
+    const states = new Map(state.destinations.map((d) => [d.destinationId, d]));
     let destinations = 0;
     let live = 0;
     let down = 0;
     for (const d of list) {
-      const phase = phases.get(d.id) ?? offlinePhase(d);
+      const st = states.get(d.id);
+      const phase = st?.phase ?? offlinePhase(d);
       if (d.enabled) destinations += 1;
       if (phase === 'live') live += 1;
-      if (isDown(state, d, phase, this.platformInfo(d))) down += 1;
+      if (isDown(state, d, phase, this.platformInfo(d), st?.retries ?? 0)) down += 1;
     }
     return {
       ...profile,

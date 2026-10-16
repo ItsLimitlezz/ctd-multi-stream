@@ -395,7 +395,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
             enabled: bool,
             phase: { enum: PHASES },
             live: bool,
-            down: { type: 'boolean', description: 'Session running, destination enabled (not skipped by test mode) and not reaching the platform (error, retrying, recovering, waiting-for-feed)' },
+            down: { type: 'boolean', description: 'Session running, destination enabled (not skipped by test mode) and not reaching the platform (error, retrying, recovering, waiting-for-feed; also preparing/connecting/confirming during a retry, until live)' },
             message: nullable(str),
             stats: nullable({ type: 'object', properties: { bitrateKbps: num, fps: num, speed: num, uptimeSec: num } }),
             viewers: { oneOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }], description: 'null when unknown' },

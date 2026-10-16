@@ -186,7 +186,9 @@ event stream.
 - `phase`: `idle`, `disabled`, `waiting-for-feed`, `preparing`, `connecting`, `confirming`, `live`,
   `retrying`, `recovering`, `ending`, `error`. `live` = phase is `live`.
 - `down` = the session is running, the destination is enabled (and not skipped by test mode), and
-  it isn't reaching the platform right now (`error`, `retrying`, `recovering`, or `waiting-for-feed`).
+  it isn't reaching the platform right now (`error`, `retrying`, `recovering`, or `waiting-for-feed`,
+  and also `preparing` / `connecting` / `confirming` while a retry works its way back — it stays down
+  until the destination is actually `live`, so `destination.up` only fires on a real live).
   This is the field to light up red.
 - `session.testMode`: the session streams in **test mode** (the dashboard switch; it can only change
   while no session runs). Every destination uses its platform's private/test setting: Twitch

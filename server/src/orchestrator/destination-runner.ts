@@ -473,8 +473,9 @@ export class DestinationRunner {
     this.prepared = prepared;
     this.attempts = 0;
     this.confirmState = 'none';
-    // While recovering, keep the recovery message until the next step replaces it.
-    this.set({ watchUrl: prepared.watchUrl ?? null, retries: 0, ...(this.recovery ? {} : { message: null }) });
+    // While recovering, keep the recovery message until the next step replaces it. `retries` stays
+    // until the live is reached (goLive): a retry isn't "back" before that (api/status.ts isDown).
+    this.set({ watchUrl: prepared.watchUrl ?? null, ...(this.recovery ? {} : { message: null }) });
 
     // The title changed while preparing: apply the current one.
     const current = this.driver ? this.prepareTitle(this.driver) : this.host.title();
@@ -635,6 +636,7 @@ export class DestinationRunner {
       phase: 'live',
       message: this.healthWarning,
       watchUrl: prepared.watchUrl ?? null,
+      retries: 0,
       ...(stats ? { stats } : {}),
     };
     const count = recovered ? (this.host.state(this.id)?.recoveries ?? 0) + 1 : 0;

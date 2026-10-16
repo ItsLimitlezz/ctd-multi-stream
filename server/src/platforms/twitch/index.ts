@@ -132,7 +132,7 @@ export const twitchInfo: PlatformInfo = {
   notes: [
     'Dual Format: "Relay one feed" sends this destination\'s feed as a normal Twitch stream.',
     '"OBS sends Dual Format directly": OBS streams to Twitch itself with Enhanced Broadcasting and the Aitum Vertical canvas; this app sends no video to Twitch and only keeps the title in sync and reads chat.',
-    '"Relay both feeds" (experimental) combines both feeds into one Enhanced RTMP multitrack connection (FFmpeg 8 or newer, bundled). Twitch must accept one pass-through track per feed (set the feed formats). As of October 2026 Twitch\'s Enhanced Broadcasting service also asks for the encoding GPU, which a relay does not have, so it usually refuses this mode; Twitch may also drop the stream because the relay cannot re-encode or add OBS\'s performance metrics. If it fails, use OBS direct.',
+    '"Relay both feeds" (experimental) combines both feeds into one Enhanced RTMP multitrack connection (FFmpeg 8 or newer, bundled). Twitch must accept one pass-through track per feed (set the feed formats). As of October 2026 Twitch\'s Enhanced Broadcasting service also asks for the encoding GPU, which a relay does not have, so it usually refuses this mode; Twitch may also drop the stream because the relay cannot re-encode or add OBS\'s performance metrics. When Twitch refuses it, the destination streams the landscape feed alone (with a warning on its card) instead of staying down; for real Dual Format use OBS direct.',
     'Bandwidth test streams without going live. Sign-ins expire after about 30 days without use.',
   ].join(' '),
   testMode: {
@@ -229,38 +229,54 @@ async function* warnFirst(
   yield* events;
 }
 
+/** The card warning while "Relay both feeds" falls back to the landscape feed alone. */
+export function dualFormatFallbackWarning(reason: string): string {
+  const why = reason.replace(/^Twitch rejected relay Dual Format:\s*/, '').replace(/\s*Use "OBS sends Dual Format directly" instead\.?$/, '');
+  return `Streaming landscape only: Twitch refused relay Dual Format (${why.replace(/[\s.]+$/, '')}). For Dual Format use "OBS sends Dual Format directly".`;
+}
+
 async function pushPlan(
   dest: Destination,
   options: TwitchDestinationOptions,
   client: TwitchClient,
   info: TokenInfo,
   ctx: DriverContext,
-): Promise<PushPlan | null> {
-  if (options.dualFormat === 'obs-direct') return null;
+): Promise<{ plan: PushPlan | null; warning: string | null }> {
+  if (options.dualFormat === 'obs-direct') return { plan: null, warning: null };
   let key: string;
   try {
     key = await client.streamKey(info.userId);
   } catch (err) {
     throw toDriverError(err, 'the stream key request');
   }
-  if (options.dualFormat === 'relay-multitrack') {
-    return prepareMultitrack(
-      {
-        streamKey: key,
-        landscape: options.landscapeFormat,
-        vertical: options.verticalFormat,
-        ingestServer: options.ingestServer,
-        bandwidthTest: options.bandwidthTest,
-      },
-      ctx.signal,
-      (warning) => ctx.log.warn({ destinationId: dest.id, warning }, 'twitch: Enhanced Broadcasting warning'),
-    );
-  }
-  return {
+  const single = (feed: Feed): PushPlan => ({
     url: buildIngestUrl(options.ingestServer ?? DEFAULT_INGEST, key, options.bandwidthTest),
     mode: 'copy',
-    feeds: [dest.feed],
-  };
+    feeds: [feed],
+  });
+  if (options.dualFormat === 'relay-multitrack') {
+    try {
+      const plan = await prepareMultitrack(
+        {
+          streamKey: key,
+          landscape: options.landscapeFormat,
+          vertical: options.verticalFormat,
+          ingestServer: options.ingestServer,
+          bandwidthTest: options.bandwidthTest,
+        },
+        ctx.signal,
+        (warning) => ctx.log.warn({ destinationId: dest.id, warning }, 'twitch: Enhanced Broadcasting warning'),
+      );
+      return { plan, warning: null };
+    } catch (err) {
+      if (!(err instanceof DriverError)) throw err; // aborts
+      // Twitch refused (or its config service is unreachable): stay on air with a normal stream of
+      // the main canvas instead of leaving Twitch down. Retried as Dual Format on the next live.
+      ctx.log.warn({ destinationId: dest.id, error: err.message }, 'twitch: relay Dual Format refused; streaming landscape only');
+      return { plan: single('landscape'), warning: dualFormatFallbackWarning(err.message) };
+    }
+  }
+  return { plan: single(dest.feed), warning: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -468,9 +484,10 @@ export const twitchDriver: PlatformDriver = {
         }
       }
 
-      const push = await pushPlan(dest, options, client, info, ctx);
+      const { plan: push, warning: fallbackWarning } = await pushPlan(dest, options, client, info, ctx);
+      const standingWarning = publicInTest ? OBS_DIRECT_TEST_WARNING : fallbackWarning;
       ctx.log.info(
-        { destinationId: dest.id, mode: options.dualFormat, bandwidthTest: options.bandwidthTest, testMode },
+        { destinationId: dest.id, mode: fallbackWarning ? 'landscape-fallback' : options.dualFormat, bandwidthTest: options.bandwidthTest, testMode },
         'twitch: live prepared',
       );
 
@@ -505,7 +522,7 @@ export const twitchDriver: PlatformDriver = {
             signal,
             { log: ctx.log, logContext: { destinationId: dest.id, platform: 'twitch' } },
           );
-          return publicInTest ? warnFirst(OBS_DIRECT_TEST_WARNING, viewers, signal) : viewers;
+          return standingWarning ? warnFirst(standingWarning, viewers, signal) : viewers;
         },
         // No end(): a Twitch stream ends when the video stops.
       };

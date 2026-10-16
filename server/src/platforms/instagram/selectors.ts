@@ -646,5 +646,38 @@ export const TAG_LINK_FORM_SOURCE = `(args) => {
   return true;
 }`;
 
+/**
+ * `() => string[]`: a short description of the visible controls in the topmost dialog (else the
+ * page), logged when a setup step can't be found, so a site change can be fixed from the logs.
+ * Roles, labels, states and short texts only; never input values.
+ */
+export const DESCRIBE_CONTROLS_SOURCE = `() => {
+  const visible = (el) => !!(el && el.isConnected && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+  const squash = (s) => String(s || '').replace(/\\s+/g, ' ').trim().slice(0, 50);
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]')).filter(visible);
+  const root = dialogs.length ? dialogs[dialogs.length - 1] : document.body;
+  const out = [];
+  for (const el of root.querySelectorAll('button, a, input, select, label, [role], [aria-checked], [aria-selected], [aria-pressed]')) {
+    if (out.length >= 60) break;
+    if (!visible(el) || el.matches('svg, svg *')) continue;
+    const parts = [el.tagName.toLowerCase()];
+    const role = el.getAttribute('role');
+    if (role) parts.push('role=' + role);
+    if (el.type && el.tagName === 'INPUT') parts.push('type=' + el.type);
+    for (const a of ['aria-label', 'aria-checked', 'aria-selected', 'aria-pressed', 'aria-expanded', 'aria-haspopup', 'placeholder', 'name']) {
+      const v = el.getAttribute(a);
+      if (v) parts.push(a + '=' + squash(v));
+    }
+    if (el.tagName === 'INPUT' && (el.type === 'radio' || el.type === 'checkbox')) parts.push('checked=' + el.checked);
+    if (el.tagName === 'SELECT') parts.push('options=' + Array.from(el.options).map((o) => squash(o.textContent)).join('|'));
+    if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA' && el.tagName !== 'SELECT') {
+      const t = squash(el.innerText || el.textContent);
+      if (t) parts.push('"' + t + '"');
+    }
+    out.push(parts.join(' '));
+  }
+  return out;
+}`;
+
 /** `(attr) => void`: removes a marker attribute from every element. */
 export const CLEAR_ATTR_SOURCE = `(attr) => { for (const el of document.querySelectorAll('[' + attr + ']')) el.removeAttribute(attr); }`;

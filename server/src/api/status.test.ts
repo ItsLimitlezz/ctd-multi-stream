@@ -22,6 +22,16 @@ describe('down', () => {
     expect(isDown(session({ testMode: true }), { enabled: true }, 'error', null)).toBe(false);
     expect(isDown(session({ testMode: true }), { enabled: true }, 'error', info(true))).toBe(true);
   });
+
+  it('stays down while a retry works its way back (no down → up → down flapping)', () => {
+    const running = session();
+    for (const phase of ['preparing', 'connecting', 'confirming'] as const) {
+      expect(isDown(running, { enabled: true }, phase, null, 2), phase).toBe(true);
+    }
+    expect(isDown(running, { enabled: true }, 'live', null, 2)).toBe(false);
+    expect(isDown(running, { enabled: true }, 'ending', null, 2)).toBe(false);
+    expect(isDown(session({ status: 'offline' }), { enabled: true }, 'preparing', null, 2)).toBe(false);
+  });
 });
 
 describe('status builder', () => {

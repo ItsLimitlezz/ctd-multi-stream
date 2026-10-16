@@ -29,7 +29,8 @@
 //   which is required by GetClientConfiguration ..."}, empty encoder_configurations, and ingest endpoints whose
 //   `authentication` is the plain key. The GPU check comes before the key check. We describe this machine
 //   honestly (the relay never encodes, so there is no encoder GPU to report), so Twitch currently rejects the
-//   relay at this step and the user sees Twitch's message plus the "OBS direct" hint.
+//   relay at this step; the driver (index.ts pushPlan) then streams the landscape feed alone and
+//   shows Twitch's message plus the "OBS direct" hint as a warning on the card.
 
 import os from 'node:os';
 import { fetchJson, PlatformHttpError } from '../common/http.js';

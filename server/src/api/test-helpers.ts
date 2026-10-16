@@ -185,9 +185,10 @@ export function fakeOrchestrators(repos: Repos, stateOf: (profileId: string) => 
         let live = 0;
         let down = 0;
         for (const d of enabled) {
-          const phase = byId.get(d.id)?.phase ?? 'idle';
+          const st = byId.get(d.id);
+          const phase = st?.phase ?? 'idle';
           if (phase === 'live') live++;
-          if (isDown(s, d, phase, platformInfo(d.platform))) down++;
+          if (isDown(s, d, phase, platformInfo(d.platform), st?.retries ?? 0)) down++;
         }
         return { ...p, status: s.status, startedAt: s.startedAt, testMode: s.testMode === true, destinations: enabled.length, live, down };
       });

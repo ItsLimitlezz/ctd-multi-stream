@@ -5,7 +5,7 @@ import type { BrowserManager, ScopedSecrets } from '../../services.js';
 import type { OAuthTokens } from '../common/oauth.js';
 import { DriverError, type DriverContext, type PreparedLive } from '../types.js';
 import { forgetValidation } from './api.js';
-import { OBS_DIRECT_TEST_WARNING, twitchDriver } from './index.js';
+import { dualFormatFallbackWarning, OBS_DIRECT_TEST_WARNING, twitchDriver } from './index.js';
 import { DEFAULT_INGEST } from './options.js';
 
 // ---------------------------------------------------------------------------
@@ -754,17 +754,35 @@ describe('prepare', () => {
     expect(byRoute(calls, routes.config)).toHaveLength(1);
   });
 
-  it('relay Dual Format surfaces a rejection as misconfigured', async () => {
+  it('relay Dual Format refused: streams the landscape feed alone with a warning on the card', async () => {
     stubFetch(
       liveRoutes({
         [routes.config]: () => json(200, { status: { result: 'error', html_en_us: 'Your GPU is not supported.' }, encoder_configurations: [] }),
       }),
     );
     const { ctx } = await connected();
-    await expect(twitchDriver.prepare(dest({ dualFormat: 'relay-multitrack' }), account, 'T', ctx)).rejects.toMatchObject({
-      code: 'misconfigured',
-      message: 'Twitch rejected relay Dual Format: Your GPU is not supported. Use "OBS sends Dual Format directly" instead.',
+    const live = await twitchDriver.prepare(dest({ dualFormat: 'relay-multitrack' }, 'vertical'), account, 'T', ctx);
+    expect(live.push).toMatchObject({ mode: 'copy', feeds: ['landscape'] });
+    expect(live.push?.url).toMatch(/^rtmps?:\/\/.+\/live_141981764_SECRET$/);
+
+    const ctl = new AbortController();
+    const first = await watch(live, ctl.signal).next();
+    expect(first.value).toEqual({
+      type: 'warning',
+      message:
+        'Streaming landscape only: Twitch refused relay Dual Format (Your GPU is not supported). For Dual Format use "OBS sends Dual Format directly".',
     });
+    ctl.abort();
+  });
+
+  it('dualFormatFallbackWarning strips the rejection wrapper', () => {
+    expect(
+      dualFormatFallbackWarning(
+        'Twitch rejected relay Dual Format: Your broadcast software (ctd-multi-stream) did not send GPU Information. Use "OBS sends Dual Format directly" instead.',
+      ),
+    ).toBe(
+      'Streaming landscape only: Twitch refused relay Dual Format (Your broadcast software (ctd-multi-stream) did not send GPU Information). For Dual Format use "OBS sends Dual Format directly".',
+    );
   });
 });
 

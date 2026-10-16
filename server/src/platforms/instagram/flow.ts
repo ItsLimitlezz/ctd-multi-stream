@@ -5,7 +5,7 @@ import type { Logger } from 'pino';
 import type { BrowserContext, Locator, Page } from 'playwright';
 import { abortable, fillField, humanPause, readTextValue, waitForAny } from '../../browser/helpers.js';
 import { DriverError } from '../types.js';
-import { LIVE_TITLE_ATTR, LOGIN_PATH, RE, SESSION_COOKIE, STREAM_DETAILS_SOURCE, sel } from './selectors.js';
+import { DESCRIBE_CONTROLS_SOURCE, LIVE_TITLE_ATTR, LOGIN_PATH, RE, SESSION_COOKIE, STREAM_DETAILS_SOURCE, sel } from './selectors.js';
 import {
   instagramTitle,
   isMasked,
@@ -354,6 +354,9 @@ async function chooseAudience(page: Page, audience: Audience, signal: AbortSigna
     log.warn({ error: shortError(err) }, 'selecting the Instagram audience failed');
   }
   if (ok) return;
+  // What the form shows instead, so the selectors can be fixed from the server log.
+  const controls = await page.evaluate(`(${DESCRIBE_CONTROLS_SOURCE})()`).catch(() => null);
+  log.warn({ audience, controls }, 'Instagram audience not selected; visible controls of the setup form');
   if (audience === 'practice') {
     throw new DriverError(`Couldn't select the "Practice" audience on Instagram, so no live was started. ${SITE_CHANGED}`, 'platform-error');
   }
