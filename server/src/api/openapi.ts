@@ -10,7 +10,7 @@ import { ALERT_COUNT_UNITS, ALERT_KINDS, API_ROLES, EVENT_TYPES } from './types.
 import { MESSAGE_DATA_MAX_BYTES, MESSAGE_TYPE_RE, MESSAGES_PER_MINUTE, PAIRINGS_PER_MINUTE_PER_IP } from './v1-hub.js';
 
 /** Minor revision of the v1 contract (additive changes only; see the changelog in docs/API.md). */
-export const API_REVISION = '1.2';
+export const API_REVISION = '1.3';
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const nullable = (schema: object) => ({ oneOf: [schema, { type: 'null' }] });
@@ -102,6 +102,25 @@ export function openApiDocument(version: string): Record<string, unknown> {
           parameters: [profileParam('default: the default profile')],
           responses: {
             '200': { description: 'Current status', content: json(ref('Status')) },
+            ...errors,
+            ...profileErrors,
+          },
+        },
+      },
+      '/clock': {
+        get: {
+          summary: 'Shared timecode clock (v1.3): server time for NTP-style sync, run and time-of-day timecodes',
+          operationId: 'getClock',
+          tags: ['status'],
+          description:
+            'Needs `status:read`. Send your own send time as `t0`; with your receive time t3: offset = ((receivedAt − t0) + (sentAt − t3)) / 2, delay = (t3 − t0) − (sentAt − receivedAt). Take the sample with the smallest delay out of a few, then run the clock locally.',
+          parameters: [
+            profileParam('default: the default profile'),
+            { name: 't0', in: 'query', required: false, description: 'Your send time, epoch milliseconds (fractions allowed)', schema: num },
+          ],
+          responses: {
+            '200': { description: 'Clock', content: json(ref('Clock')) },
+            '400': problemResponse('Bad t0 (`invalid`)'),
             ...errors,
             ...profileErrors,
           },
@@ -614,6 +633,36 @@ export function openApiDocument(version: string): Record<string, unknown> {
           },
         },
         ProfilesResponse: { type: 'object', required: ['items'], properties: { items: { type: 'array', items: ref('Profile') } } },
+        Clock: {
+          type: 'object',
+          required: ['t0', 'receivedAt', 'sentAt', 'iso', 'utcOffsetMinutes', 'profileId', 'session', 'fps', 'fpsSource', 'timecode'],
+          properties: {
+            t0: nullable({ ...num, description: 'Your t0 echoed back' }),
+            receivedAt: { ...num, description: 'Server time the request arrived, epoch ms' },
+            sentAt: { ...num, description: 'Server time the reply was built, epoch ms' },
+            iso: isoTime,
+            utcOffsetMinutes: { ...int, description: "Server's local time zone offset from UTC" },
+            profileId: str,
+            session: {
+              type: 'object',
+              properties: {
+                status: { enum: ['offline', 'starting', 'live', 'stopping'] },
+                startedAt: nullable(epochMs),
+                elapsedMs: nullable({ ...num, description: 'Run time at sentAt' }),
+              },
+            },
+            fps: { ...int, description: 'Nominal frame rate of the timecodes (non-drop-frame)' },
+            fpsSource: { enum: ['landscape', 'vertical', 'default'] },
+            timecode: {
+              type: 'object',
+              properties: {
+                run: nullable({ type: 'string', description: 'Session run time HH:MM:SS:FF; null when offline' }),
+                utc: { type: 'string', description: 'Time of day in UTC, HH:MM:SS:FF' },
+                local: { type: 'string', description: "Time of day in the server's time zone, HH:MM:SS:FF" },
+              },
+            },
+          },
+        },
         Ingest: {
           type: 'object',
           required: ['profileId', 'serverUrl', 'feeds'],

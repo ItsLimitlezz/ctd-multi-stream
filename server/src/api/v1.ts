@@ -10,6 +10,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { DEFAULT_PROFILE_ID, type ApiScope, type ApiTokenInfo } from '../../../shared/types.js';
 import type { RouteOptions } from '../http/guards.js';
 import type { AppServices } from '../services.js';
+import { buildClock, parseT0 } from './clock.js';
 import { eventHubFor, type EventHub, type EventReader } from './event-hub.js';
 import { resolveTypes } from './filters.js';
 import { ConcurrencyLimiter, SlidingWindowLimiter, isProblemCode, presentedToken, query, sendProblem, type ProblemCode } from './http.js';
@@ -252,6 +253,32 @@ const v1Plugin: FastifyPluginAsync<V1Options> = async (app, opts) => {
     if (!p.ok) return sendProblem(reply, p.status, p.code, p.detail);
     return reply.header('cache-control', 'no-store').send(hub().status(p.profile ?? DEFAULT_PROFILE_ID));
   });
+
+  // The arrival time is taken before authentication so the client's delay estimate stays honest.
+  const arrivals = new WeakMap<FastifyRequest, number>();
+  app.get(
+    '/clock',
+    {
+      onRequest: (req, _reply, done) => {
+        arrivals.set(req, now());
+        done();
+      },
+      preHandler: requireToken('status:read'),
+    },
+    async (req, reply) => {
+      const { token } = authOf(req);
+      const q = query(req);
+      const p = resolveProfile(token, q.profile, DEFAULT_PROFILE_ID);
+      if (!p.ok) return sendProblem(reply, p.status, p.code, p.detail);
+      const t0 = parseT0(q.t0);
+      if (t0 === undefined) return sendProblem(reply, 400, 'invalid', 't0 must be your send time in epoch milliseconds');
+      const profileId = p.profile ?? DEFAULT_PROFILE_ID;
+      const status = hub().status(profileId);
+      const sentAt = now();
+      const clock = buildClock({ t0, receivedAt: arrivals.get(req) ?? sentAt, sentAt, profileId, session: status.session, feeds: status.feeds });
+      return reply.header('cache-control', 'no-store').send(clock);
+    },
+  );
 
   app.get('/chat', { preHandler: requireToken('chat:read') }, async (req, reply) => {
     const { token } = authOf(req);

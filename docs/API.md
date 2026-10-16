@@ -205,6 +205,31 @@ event stream.
   of known counts (null if none known); `error` is the message of the first down destination that
   has one (`null` if none does; check `destinations[].down` for the down state itself).
 
+### `GET /api/v1/clock?t0=<your time>&profile=<id>` — `status:read` (v1.3)
+
+A shared **timecode clock**: every app syncs to this server's clock, so overlays, recordings and
+videos on different machines — on the LAN or across the internet — land on the same time code.
+```json
+{ "t0": 1791830000123.4, "receivedAt": 1791830000161, "sentAt": 1791830000162,
+  "iso": "2026-10-12T18:33:20.162Z", "utcOffsetMinutes": -240, "profileId": "default",
+  "session": { "status": "live", "startedAt": 1791829865000, "elapsedMs": 135162 },
+  "fps": 30, "fpsSource": "landscape",
+  "timecode": { "run": "00:02:15:04", "utc": "18:33:20:04", "local": "14:33:20:04" } }
+```
+- **Sync (NTP-style).** Send your own clock as `t0` (epoch ms, fractions allowed) and note when the
+  reply arrives (`t3`, same clock). Then `offset = ((receivedAt − t0) + (sentAt − t3)) / 2` (add it
+  to your clock to get server time) and `delay = (t3 − t0) − (sentAt − receivedAt)` (the round
+  trip). Take 4–8 samples a second apart, keep the one with the smallest `delay` (its offset is
+  the most accurate, typically within a few ms even over the internet), then **run the clock
+  locally** and re-sync every few minutes. Don't poll it for every frame (600 requests/minute).
+- **Timecodes** are `HH:MM:SS:FF`, non-drop-frame, at `fps`: the nominal integer rate of the
+  profile's landscape feed (else vertical, else 30; 29.97 → 30, 59.94 → 60).
+  `run` = session run time (from `session.startedAt`; `null` while offline; hours keep counting
+  past 24) — the same on every machine for the same stream. `utc` = time of day in UTC — use it
+  across time zones. `local` = time of day in the server's time zone (`utcOffsetMinutes`).
+- To compute them yourself from server time `s`: run = `s − session.startedAt`; frames =
+  `floor((ms mod 1000) × fps / 1000)`.
+
 ### `GET /api/v1/chat?limit=200&after=<id>&profile=<id>` — `chat:read`
 Recent chat of one profile (chosen like `/status`) still visible after moderation, **oldest
 first**, as `chat.message` envelopes. `limit` 1–500 (default 200). With `after`, only messages
@@ -740,6 +765,15 @@ Settings → API).
 `apiVersion` stays `1`: every change below is additive, so clients written for an earlier v1
 keep working (ignore event types and fields you don't know). `GET /api/v1/openapi.json` reports
 the revision in `info.version`.
+
+### v1.3
+
+- **Timecode clock (§4, `GET /clock`):** the server's clock as a shared timecode reference so apps
+  on other machines (LAN or internet) line up on the same time code: NTP-style timestamps
+  (`t0` / `receivedAt` / `sentAt`), session run time, and `HH:MM:SS:FF` run / UTC / local timecodes
+  at the feed's frame rate.
+- `destination.down` / `destination.up`: a retry stays down until the destination is live again
+  (no down → up → down flapping while a platform keeps refusing).
 
 ### v1.2
 

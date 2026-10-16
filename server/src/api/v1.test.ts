@@ -140,6 +140,7 @@ describe('GET /openapi.json', () => {
       '/',
       '/openapi.json',
       '/status',
+      '/clock',
       '/chat',
       '/events',
       '/events/poll',
@@ -172,6 +173,28 @@ describe('GET /status', () => {
     expect(Object.keys(body)).toEqual(['session', 'feeds', 'destinations', 'platforms']);
     expect(body.destinations[0]).toMatchObject({ id: d.id, name: 'Twitch', phase: 'error', down: true, message: 'Stream key rejected' });
     expect(body.platforms[0]).toMatchObject({ platform: 'twitch', error: 'Stream key rejected' });
+  });
+});
+
+describe('GET /clock', () => {
+  it('returns the shared timecode clock with the NTP-style timestamps', async () => {
+    t.state.current = session({ status: 'live', startedAt: new Date(Date.now() - 65_000).toISOString() });
+    const t0 = Date.now();
+    const res = await get(`/api/v1/clock?t0=${t0}`, both);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    const body = res.json();
+    expect(body).toMatchObject({ t0, profileId: DEFAULT_PROFILE_ID, session: { status: 'live' }, fps: 30 });
+    expect(body.receivedAt).toBeGreaterThanOrEqual(t0);
+    expect(body.sentAt).toBeGreaterThanOrEqual(body.receivedAt);
+    expect(body.session.elapsedMs).toBeGreaterThanOrEqual(65_000);
+    expect(body.timecode.run).toMatch(/^00:01:0\d:\d{2}$/);
+    expect(body.timecode.utc).toMatch(/^\d{2}:\d{2}:\d{2}:\d{2}$/);
+  });
+
+  it('needs status:read and a valid t0', async () => {
+    expectProblem(await get('/api/v1/clock?t0=soon', both), 400, 'invalid');
+    expectProblem(await get('/api/v1/clock', t.token(['chat:read'])), 403, 'missing_scope');
   });
 });
 
@@ -317,7 +340,7 @@ describe('alert.*', () => {
     const doc = (await get('/api/v1/openapi.json')).json();
     expect(doc.components.schemas.Envelope.properties.type.enum).toEqual(expect.arrayContaining(['alert.superchat', 'alert.subscription', 'alert.tip']));
     expect(doc.components.schemas.Alert.properties.kind.enum).toHaveLength(9);
-    expect(doc.info.version).toMatch(/^1\.2 /);
+    expect(doc.info.version).toMatch(/^1\.3 /);
   });
 });
 
