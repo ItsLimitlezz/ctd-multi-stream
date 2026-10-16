@@ -14,7 +14,9 @@
 // ASSUMPTIONS (not verifiable without an eligible logged-in account; keep locators tolerant):
 // - Accessible names may repeat an icon label ("New post Create"), hence `names()` below.
 // - The title is a textbox labelled/placeholdered "...title..."; the audience is a radio group,
-//   a <select> or a custom dropdown labelled "Audience".
+//   a <select> or a custom dropdown labelled "Audience". SEEN (Oct 2026, user screenshot): the
+//   "Add live video details" dialog has an "Add a title..." field and an unlabelled "Public ⌄"
+//   dropdown (Public / Practice), then "Next".
 // - Stream URL / key are inputs (or text) next to "Stream URL" / "Stream key" labels.
 // - "Go live" stays disabled until the preview arrives; "End live video" asks for confirmation.
 // - Comment rows show an avatar whose alt is "<username>'s profile picture" (the context is en-US).
@@ -64,6 +66,8 @@ export const RE = {
   audience: /audience|who can see/i,
   public: /^\s*public\b/i,
   practice: /^\s*practice\b/i,
+  /** A dropdown that only shows the current audience ("Public ⌄"), with no "Audience" label. */
+  audienceChoice: /^\s*(?:public|practice|close friends)\b/i,
   next: names('next'),
   streamUrlLabel: '^(?:stream|server) url$',
   streamKeyLabel: '^stream key$',
@@ -178,6 +182,10 @@ export const sel = {
     p.getByRole('textbox', { name: RE.title }).or(p.getByPlaceholder(RE.title)).or(p.getByLabel(RE.title)),
   audienceRadio: (p: Page, re: RegExp) => p.getByRole('radio', { name: re }),
   audienceCombo: (p: Page) => anyRole(p, ['combobox', 'button'], RE.audience),
+  /** An unlabelled <select> offering Practice (Instagram's setup form, Oct 2026: "Public ⌄"). */
+  audienceSelect: (p: Page) => p.locator('select').filter({ has: p.locator('option', { hasText: RE.practice }) }),
+  /** An unlabelled custom dropdown named after the current audience. */
+  audienceTrigger: (p: Page) => anyRole(p, ['combobox', 'button'], RE.audienceChoice),
   audienceOption: (p: Page, re: RegExp) => anyRole(p, ['option', 'menuitemradio', 'menuitem', 'radio'], re),
   audienceText: (p: Page, re: RegExp) => p.getByText(re),
   nextButton: (p: Page) => p.getByRole('button', { name: RE.next }),

@@ -16,7 +16,11 @@ export const FIXTURE_USER = 'tester_ig';
 export interface FixtureConfig {
   loggedIn: boolean;
   eligibility: 'eligible' | 'no-live' | 'notice';
-  audienceUi: 'radio' | 'select' | 'dropdown' | 'none';
+  /**
+   * 'bare-select' / 'bare-dropdown': no "Audience" label, only the current choice shown ("Public ⌄"),
+   * as Instagram's setup form had it in October 2026.
+   */
+  audienceUi: 'radio' | 'select' | 'dropdown' | 'bare-select' | 'bare-dropdown' | 'none';
   /** 'inputs': labelled inputs; 'text': plain text next to labels (key masked until "Show"). */
   detailsUi: 'inputs' | 'text';
   /** ms after the producer opens until "Go live" is enabled (-1 = never). */
@@ -105,6 +109,11 @@ function audienceHtml(ui: FixtureConfig['audienceUi']): string {
       return `<label for="audSel">Audience</label><select id="audSel"><option>Public</option><option>Practice</option></select>`;
     case 'dropdown':
       return `<div role="button" tabindex="0" id="audBtn">Audience: <span id="audVal">Public</span></div>
+        <div role="listbox" id="audList" hidden><div role="option" aria-selected="true">Public</div><div role="option" aria-selected="false">Practice</div></div>`;
+    case 'bare-select':
+      return `<select id="audSel"><option>Public</option><option>Practice</option></select>`;
+    case 'bare-dropdown':
+      return `<div role="button" tabindex="0" id="audBtn"><span id="audVal">Public</span> ⌄</div>
         <div role="listbox" id="audList" hidden><div role="option" aria-selected="true">Public</div><div role="option" aria-selected="false">Practice</div></div>`;
     case 'none':
       return '';
@@ -241,8 +250,8 @@ if ($('audBtn')) {
 }
 function audience() {
   if (CFG.audienceUi === 'radio') return document.querySelector('input[name="aud"]:checked').value;
-  if (CFG.audienceUi === 'select') return $('audSel').value;
-  if (CFG.audienceUi === 'dropdown') return $('audVal').textContent;
+  if (CFG.audienceUi === 'select' || CFG.audienceUi === 'bare-select') return $('audSel').value;
+  if (CFG.audienceUi === 'dropdown' || CFG.audienceUi === 'bare-dropdown') return $('audVal').textContent;
   return 'Public';
 }
 if (CFG.requireTitle) {

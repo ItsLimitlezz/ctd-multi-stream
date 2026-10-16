@@ -134,6 +134,20 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('instagram driver (Chromium + local
     await live.end!();
   }, 60_000);
 
+  it('selects Practice in an unlabelled "Public ⌄" select (Instagram, Oct 2026)', async () => {
+    await setup({ audienceUi: 'bare-select' });
+    const live = await prepareLive({ audience: 'practice' });
+    expect(fx.events).toContainEqual({ type: 'audience', value: 'Practice' });
+    await live.end!();
+  }, 60_000);
+
+  it('selects Practice in an unlabelled custom dropdown', async () => {
+    await setup({ audienceUi: 'bare-dropdown' });
+    const live = await prepareLive({ audience: 'practice' });
+    expect(fx.events).toContainEqual({ type: 'audience', value: 'Practice' });
+    await live.end!();
+  }, 60_000);
+
   it('refuses to start when Practice cannot be selected', async () => {
     await setup({ audienceUi: 'none' });
     const err = await prepareLive({ audience: 'practice' }).catch((e: unknown) => e);

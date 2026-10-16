@@ -376,6 +376,34 @@ async function shownAudience(combo: Locator): Promise<string> {
     .trim();
 }
 
+/** Pick the option matching `re` in a native <select>; true only when it is then selected. */
+async function chooseInSelect(select: Locator, re: RegExp, signal: AbortSignal): Promise<boolean> {
+  const labels = (await select.locator('option').allTextContents()).map((l) => l.trim());
+  const label = labels.find((l) => re.test(l));
+  if (!label) return false;
+  await humanPause(150, 400, signal);
+  await abortable(select.selectOption({ label }, { timeout: 5_000 }), signal);
+  const chosen = await select.evaluate((el) => {
+    const s = el as { selectedOptions?: ArrayLike<{ textContent: string | null }> };
+    return s.selectedOptions?.[0]?.textContent ?? '';
+  });
+  return re.test(chosen.trim());
+}
+
+/** Open a custom dropdown and pick the option matching `re`; true only when it then shows it. */
+async function chooseInDropdown(page: Page, trigger: Locator, re: RegExp, signal: AbortSignal): Promise<boolean> {
+  if (re.test(await shownAudience(trigger))) return true;
+  await click(trigger, signal, 5_000);
+  const option = await waitVisible(sel.audienceOption(page, re).or(sel.audienceText(page, re)), page, 5_000, signal);
+  if (!option) {
+    await page.keyboard.press('Escape').catch(() => {});
+    return false;
+  }
+  await click(option, signal, 5_000);
+  await humanPause(200, 400, signal);
+  return re.test(await shownAudience(trigger));
+}
+
 async function selectAudience(page: Page, re: RegExp, signal: AbortSignal): Promise<boolean> {
   // 1. A radio group.
   const radio = await visibleNow(sel.audienceRadio(page, re));
@@ -384,35 +412,23 @@ async function selectAudience(page: Page, re: RegExp, signal: AbortSignal): Prom
     return isChecked(radio);
   }
 
-  // 2. A dropdown: native <select> or a custom listbox.
+  // 2. A dropdown labelled "Audience": native <select> or a custom listbox.
   const combo = await visibleNow(sel.audienceCombo(page));
   if (combo) {
     const tag = await combo.evaluate((el) => String((el as { tagName?: unknown }).tagName ?? '')).catch(() => '');
-    if (tag.toUpperCase() === 'SELECT') {
-      const labels = (await combo.locator('option').allTextContents()).map((l) => l.trim());
-      const label = labels.find((l) => re.test(l));
-      if (!label) return false;
-      await humanPause(150, 400, signal);
-      await abortable(combo.selectOption({ label }, { timeout: 5_000 }), signal);
-      const chosen = await combo.evaluate((el) => {
-        const s = el as { selectedOptions?: ArrayLike<{ textContent: string | null }> };
-        return s.selectedOptions?.[0]?.textContent ?? '';
-      });
-      return re.test(chosen.trim());
-    }
-    if (re.test(await shownAudience(combo))) return true;
-    await click(combo, signal, 5_000);
-    const option = await waitVisible(sel.audienceOption(page, re), page, 5_000, signal);
-    if (!option) {
-      await page.keyboard.press('Escape').catch(() => {});
-      return false;
-    }
-    await click(option, signal, 5_000);
-    await humanPause(200, 400, signal);
-    return re.test(await shownAudience(combo));
+    if (tag.toUpperCase() === 'SELECT') return chooseInSelect(combo, re, signal);
+    return chooseInDropdown(page, combo, re, signal);
   }
 
-  // 3. Clickable text (e.g. a label whose radio input is visually hidden).
+  // 3. An unlabelled <select> offering Practice ("Public ⌄", Instagram's setup form in Oct 2026).
+  const select = await visibleNow(sel.audienceSelect(page));
+  if (select) return chooseInSelect(select, re, signal);
+
+  // 4. An unlabelled custom dropdown named after the current audience.
+  const trigger = await visibleNow(sel.audienceTrigger(page));
+  if (trigger) return chooseInDropdown(page, trigger, re, signal);
+
+  // 5. Clickable text (e.g. a label whose radio input is visually hidden).
   const text = await visibleNow(sel.audienceText(page, re));
   if (!text) return false;
   await click(text, signal, 5_000);
