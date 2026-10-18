@@ -152,6 +152,30 @@ async function clearInlineFields(page: Page): Promise<void> {
   }
 }
 
+/**
+ * In a link-type chooser, pick "Link / Add a URL" (never WhatsApp) and press "Confirm". False when
+ * `form` isn't such a chooser; throws when it is but the URL option can't be confirmed.
+ */
+async function chooseUrlLinkType(form: Locator, signal: AbortSignal): Promise<boolean> {
+  const option = await visibleNow(sel.linkTypeExternal(form));
+  const confirm = await visibleNow(sel.linkTypeConfirm(form), true);
+  if (!option || !confirm) return false;
+  await click(option, signal, 5_000);
+  // The radio behind the option must now be the checked one (when the form exposes it).
+  const radio = sel.linkTypeRadio(form).first();
+  if ((await radio.count().catch(() => 0)) > 0) {
+    const checked =
+      (await radio.isChecked({ timeout: 1_000 }).catch(() => false)) || (await radio.getAttribute('aria-checked').catch(() => null)) === 'true';
+    if (!checked) await radio.check({ force: true, timeout: 2_000 }).catch(() => {});
+  }
+  await humanPause(150, 300, signal);
+  if (!(await confirm.isEnabled({ timeout: 1_000 }).catch(() => false))) {
+    throw new LinkStepError('Instagram kept "Confirm" disabled after choosing "Link"');
+  }
+  await click(confirm, signal, 5_000);
+  return true;
+}
+
 async function fillLinkForm(
   page: Page,
   opener: Locator,
@@ -168,11 +192,18 @@ async function fillLinkForm(
   // when its URL field isn't recognized), else fields inline in the setup form / producer.
   let form: Locator | null = null;
   let urlField: Locator | null = null;
-  const fieldDeadline = Date.now() + stepMs;
+  let fieldDeadline = Date.now() + stepMs;
+  let choseType = false;
   for (;;) {
     form = await tagLinkForm(page);
     urlField = await visibleNow(sel.linkUrlInput(form ?? page));
     if (urlField) break;
+    // First a link-type chooser ("Link / Add a URL" or "WhatsApp link") + "Confirm": take the URL one.
+    if (!choseType && form && (await chooseUrlLinkType(form, signal))) {
+      choseType = true;
+      fieldDeadline = Date.now() + stepMs;
+      continue;
+    }
     if (Date.now() >= fieldDeadline) throw new LinkStepError("Instagram's link form has no URL field", await describeControls(page));
     await humanPause(150, 250, signal);
   }

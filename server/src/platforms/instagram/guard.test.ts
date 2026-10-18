@@ -403,6 +403,18 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('instagram stream guard (Chromium +
     expect(linkEvents()).toEqual([`${KICK.title}|${KICK.url}`, `${TWITCH.title}|${TWITCH.url}`]);
   }, 60_000);
 
+  it('Instagram\'s link-type chooser first (Oct 2026): picks "Link / Add a URL", confirms, then fills the URL form', async () => {
+    await setup({ linkUi: 'producer', linkChooser: true });
+    const secrets = new FakeSecrets();
+    const live = await prepare({ links: LINKS }, secrets);
+    expect(fx.events).toContainEqual({ type: 'link-type', value: 'external' });
+    expect(fx.events).not.toContainEqual({ type: 'link-type', value: 'whatsapp' });
+    expect(linkEvents()).toEqual([`${KICK.title}|${KICK.url}`]);
+    expect(await (await page()).isVisible('#linkChooser')).toBe(false);
+    expect(await secrets.getJson('linkRotation')).toEqual({ index: 1 });
+    await live.end!();
+  }, 60_000);
+
   it('first: always the first link; the setup form is used when it offers "Add link"', async () => {
     await setup({ linkUi: 'setup' });
     const secrets = new FakeSecrets();

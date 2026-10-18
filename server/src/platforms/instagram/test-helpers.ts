@@ -45,6 +45,11 @@ export interface FixtureConfig {
   /** "Add link" opens nothing. */
   linkDead: boolean;
   /**
+   * "Add link" first opens a chooser — "Link / Add a URL" or "WhatsApp link" (radios named
+   * linkType) + "Confirm" — and only then the URL form (Instagram's producer, Oct 2026).
+   */
+  linkChooser: boolean;
+  /**
    * The link form stays open after "Add": 'silent' = nothing else happens; 'shown' = the link is
    * taken and shown in the producer, but the form stays open.
    */
@@ -78,6 +83,7 @@ export const DEFAULT_FIXTURE: FixtureConfig = {
   linkTitleMax: 30,
   linkUrlUnlabelled: false,
   linkDead: false,
+  linkChooser: false,
   linkSticky: 'off',
   viewerUi: 'none',
   viewers: 3,
@@ -220,6 +226,13 @@ function homePage(cfg: FixtureConfig): string {
   <button type="button" id="endNow">End now</button><button type="button">Cancel</button></div></div>
 <div class="overlay" id="ended" hidden><div class="modal" role="dialog"><h2>Your live video has ended</h2>
   <button type="button" id="share">Share</button><button type="button" id="done">Done</button></div></div>
+<div class="overlay" id="linkChooser" hidden><div class="modal" role="dialog">
+  <div role="button" tabindex="0" aria-label="Close" id="linkChooserClose">Close</div>
+  <div role="button" tabindex="0" class="linkTypeOpt"><span>Link</span><span>Add a URL</span>
+    <input type="radio" name="linkType" aria-label="external" aria-checked="false"></div>
+  <div role="button" tabindex="0" class="linkTypeOpt"><span>WhatsApp link</span><span>Add a WhatsApp number</span>
+    <input type="radio" name="linkType" aria-label="whatsapp" aria-checked="false"></div>
+  <div role="button" tabindex="0" id="linkChooserConfirm">Confirm</div></div></div>
 <div class="overlay" id="linkDialog" hidden><div class="modal" role="dialog" aria-label="Add link"><h3>Add link</h3>
   <input id="linkTitle" type="text" placeholder="Link title" maxlength="${cfg.linkTitleMax}">
   <input id="linkUrl" ${cfg.linkUrlUnlabelled ? 'type="text"' : 'type="url" placeholder="URL"'}>
@@ -282,11 +295,31 @@ function startLive() {
   if (CFG.linkUi === 'live' && !$('linkShown').textContent) show('addLinkProducer');
 }
 window.__setViewers = setViewers;
-for (const b of document.querySelectorAll('.addLink')) b.onclick = () => {
-  if (CFG.linkDead) { ev('link-dead'); return; }
+function openLinkForm() {
   $('linkTitle').value = ''; $('linkUrl').value = ''; $('linkAdd').disabled = true; show('linkError', false);
   show('linkDialog'); ev('link-opened');
+}
+for (const b of document.querySelectorAll('.addLink')) b.onclick = () => {
+  if (CFG.linkDead) { ev('link-dead'); return; }
+  if (CFG.linkChooser) {
+    for (const r of document.querySelectorAll('input[name="linkType"]')) { r.checked = false; r.setAttribute('aria-checked', 'false'); }
+    show('linkChooser'); ev('link-chooser');
+    return;
+  }
+  openLinkForm();
 };
+for (const opt of document.querySelectorAll('.linkTypeOpt')) opt.onclick = () => {
+  const r = opt.querySelector('input'); r.checked = true;
+  for (const x of document.querySelectorAll('input[name="linkType"]')) x.setAttribute('aria-checked', String(x === r));
+};
+$('linkChooserConfirm').onclick = () => {
+  const chosen = document.querySelector('input[name="linkType"]:checked');
+  if (!chosen) return;
+  ev('link-type', chosen.getAttribute('aria-label'));
+  show('linkChooser', false);
+  if (chosen.getAttribute('aria-label') === 'external') openLinkForm();
+};
+$('linkChooserClose').onclick = () => { show('linkChooser', false); ev('link-chooser-closed'); };
 $('linkUrl').addEventListener('input', () => { $('linkAdd').disabled = !/^https?:\\/\\/\\S+$/.test($('linkUrl').value.trim()); });
 $('linkAdd').onclick = () => {
   if (CFG.linkFails) { show('linkError'); ev('link-refused'); return; }
@@ -301,6 +334,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   ev('key-escape');
   if (!$('linkDialog').hidden) { show('linkDialog', false); ev('link-escaped'); }
+  if (!$('linkChooser').hidden) { show('linkChooser', false); ev('link-chooser-escaped'); }
 });
 // Instagram ends the live (takedown): the live UI goes away and a notice shows.
 window.__takedown = (title, text) => {

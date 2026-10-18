@@ -119,6 +119,9 @@ export const RE = {
   linkSubmit: names('add', 'add link', 'save', 'done', 'apply', 'ok', 'confirm'),
   /** Closes the link form without adding anything (only ever looked up inside the tagged form). */
   linkCancel: names('cancel', 'close', 'not now', 'dismiss'),
+  /** "Link Add a URL" (the URL option of the link-type chooser; never "WhatsApp link"). */
+  linkTypeExternal: /^\s*link\b.*\badd a (?:url|link|website)\b/i,
+  linkTypeConfirm: names('confirm', 'next', 'continue'),
   linkError:
     /couldn'?t add (?:the |your |this )?link|could not add (?:the |your |this )?link|(?:invalid|unsupported) (?:link|url)|link (?:isn'?t|is not|can'?t be|cannot be) (?:allowed|supported|valid|added)|enter a valid (?:link|url)/i,
 } as const;
@@ -257,6 +260,14 @@ export const sel = {
       .or(p.getByRole('alertdialog'))
       .filter({ has: p.locator(`[${LINK_URL_ATTR}]`) }),
   linkSubmit: (scope: Scope) => scope.getByRole('button', { name: RE.linkSubmit }),
+  /**
+   * The link-type chooser "Add link" opens first (SEEN Oct 2026, server log): "Link / Add a URL"
+   * (radio name=linkType aria-label=external) or "WhatsApp link", then "Confirm".
+   */
+  linkTypeExternal: (scope: Scope) =>
+    scope.getByRole('button', { name: RE.linkTypeExternal }).or(scope.locator('input[type="radio"][aria-label="external" i]')),
+  linkTypeRadio: (scope: Scope) => scope.locator('input[type="radio"][aria-label="external" i], input[type="radio"][value="external" i]'),
+  linkTypeConfirm: (scope: Scope) => scope.getByRole('button', { name: RE.linkTypeConfirm }),
   linkError: (p: Page) => p.getByText(RE.linkError),
 };
 
