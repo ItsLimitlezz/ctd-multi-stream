@@ -400,6 +400,41 @@ export const CHAT_MARK_SOURCE = `(args) => {
 }`;
 
 /**
+ * `(args) => object` — what the comments reader sees, logged when no comment came through: the tagged
+ * container (tag/role/label, size, avatars, short leaf texts, tagged rows) and, page-wide, the avatar
+ * images and comment-ish labels, so the reader can be fixed from the server log. Short texts only.
+ */
+export const CHAT_DIAG_SOURCE = `(args) => {
+  const visible = (el) => !!(el && el.isConnected && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+  const squash = (s) => String(s || '').replace(/\\s+/g, ' ').trim().slice(0, 40);
+  const describe = (el) => el ? [el.tagName.toLowerCase(), el.getAttribute('role') ? 'role:' + el.getAttribute('role') : '', el.getAttribute('aria-label') ? 'label:' + squash(el.getAttribute('aria-label')) : ''].filter(Boolean).join(' ') : null;
+  const avatarSel = 'img[alt$="profile picture" i]';
+  const c = document.querySelector('[' + args.containerAttr + ']');
+  const leaves = [];
+  if (c) {
+    for (const el of c.querySelectorAll('*')) {
+      if (leaves.length >= 25) break;
+      if (el.children.length || !visible(el)) continue;
+      const t = squash(el.textContent);
+      if (t) leaves.push(t);
+    }
+  }
+  const imgAlts = Array.from(document.querySelectorAll('img[alt]')).filter(visible).map((i) => squash(i.getAttribute('alt'))).filter(Boolean).slice(0, 15);
+  const labels = Array.from(document.querySelectorAll('[aria-label], [placeholder]')).filter(visible)
+    .map((e) => squash(e.getAttribute('aria-label') || e.getAttribute('placeholder'))).filter((t) => /comment|chat|message/i.test(t)).slice(0, 10);
+  return {
+    container: describe(c),
+    containerSize: c ? Math.round(c.getBoundingClientRect().width) + 'x' + Math.round(c.getBoundingClientRect().height) : null,
+    containerAvatars: c ? c.querySelectorAll(avatarSel).length : 0,
+    taggedRows: document.querySelectorAll('[' + args.rowAttr + ']').length,
+    containerLeaves: leaves,
+    pageAvatars: document.querySelectorAll(avatarSel).length,
+    pageImageAlts: imgAlts,
+    commentLabels: labels,
+  };
+}`;
+
+/**
  * `(el) => ChatExtractResult | null` for one tagged row (see scrapeChat in browser/helpers.ts).
  * Author from the avatar alt (else the first profile link / first text). Text = the row's other
  * visible text nodes minus timestamps and action labels. "joined" rows become events.

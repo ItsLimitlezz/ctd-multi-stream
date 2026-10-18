@@ -9,7 +9,7 @@ import type { Page } from 'playwright';
 import { humanPause, scrapeChat } from '../../browser/helpers.js';
 import type { ChatMessageInput } from '../types.js';
 import { selectCommentsTab } from './flow.js';
-import { CHAT_CONTAINER_ATTR, CHAT_EXTRACT_SOURCE, CHAT_MARK_SOURCE, CHAT_ROW_ATTR, DESCRIBE_CONTROLS_SOURCE } from './selectors.js';
+import { CHAT_CONTAINER_ATTR, CHAT_DIAG_SOURCE, CHAT_EXTRACT_SOURCE, CHAT_MARK_SOURCE, CHAT_ROW_ATTR, DESCRIBE_CONTROLS_SOURCE } from './selectors.js';
 import { shortError } from './util.js';
 
 const MARK_EXPRESSION = `(${CHAT_MARK_SOURCE})(${JSON.stringify({ containerAttr: CHAT_CONTAINER_ATTR, rowAttr: CHAT_ROW_ATTR })})`;
@@ -31,11 +31,16 @@ async function markRows(page: Page): Promise<number> {
 
 /** After this long without finding the comments panel, log what the producer shows (once). */
 const DIAGNOSE_AFTER_MS = 30_000;
+/** After this long without a single comment row, log what the reader sees (once). */
+const DIAGNOSE_ROWS_AFTER_MS = 45_000;
+const CHAT_DIAG = `(${CHAT_DIAG_SOURCE})(${JSON.stringify({ containerAttr: CHAT_CONTAINER_ATTR, rowAttr: CHAT_ROW_ATTR })})`;
 
 async function keepMarking(page: Page, signal: AbortSignal, ms: number, log: Logger): Promise<void> {
   let tabTries = 0;
   const started = Date.now();
   let diagnosed = false;
+  let diagnosedRows = false;
+  let sawRows = false;
   while (!signal.aborted && !page.isClosed()) {
     try {
       await humanPause(ms, ms, signal);
@@ -43,7 +48,9 @@ async function keepMarking(page: Page, signal: AbortSignal, ms: number, log: Log
       return; // aborted
     }
     // After a re-render the panel may be back on another tab: reopen "Comments" now and then.
-    if ((await markRows(page)) === 0 && tabTries++ % 10 === 0) {
+    const marked = await markRows(page);
+    if (marked > 0) sawRows = true;
+    if (marked === 0 && tabTries++ % 10 === 0) {
       await selectCommentsTab(page, signal).catch(() => {});
     }
     if (!diagnosed && Date.now() - started >= DIAGNOSE_AFTER_MS) {
@@ -53,6 +60,11 @@ async function keepMarking(page: Page, signal: AbortSignal, ms: number, log: Log
         const controls = await page.evaluate(`(${DESCRIBE_CONTROLS_SOURCE})()`).catch(() => null);
         log.warn({ controls }, 'Instagram comments panel not found; visible controls of the producer');
       }
+    }
+    if (!diagnosedRows && !sawRows && Date.now() - started >= DIAGNOSE_ROWS_AFTER_MS) {
+      diagnosedRows = true;
+      const seen = await page.evaluate(CHAT_DIAG).catch(() => null);
+      log.warn({ seen }, 'no Instagram comment rows found yet; what the comments reader sees');
     }
   }
 }
