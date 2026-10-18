@@ -51,6 +51,16 @@ describe('dashboard destination card', () => {
     expect(card(state('error', { message: 'gave up' }))).toContain('Retry');
   });
 
+  it('flags a Twitch destination whose own "Bandwidth test" option is on (the channel stays offline)', () => {
+    const twitch = (options: Record<string, unknown>) =>
+      renderToStaticMarkup(
+        <DestinationCard dest={{ ...destination, platform: 'twitch', feed: 'landscape', options }} state={state('live')} onUpdated={() => undefined} />,
+      );
+    expect(twitch({ bandwidthTest: true })).toContain('Bandwidth test: not public');
+    expect(twitch({ bandwidthTest: false })).not.toContain('Bandwidth test');
+    expect(twitch({})).not.toContain('Bandwidth test');
+  });
+
   it('shows viewers while live (hidden when unknown)', () => {
     const live = card(state('live', { viewers: 1234 }));
     expect(live).toContain('dest-viewers');

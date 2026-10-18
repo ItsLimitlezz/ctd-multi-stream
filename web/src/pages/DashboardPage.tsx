@@ -53,6 +53,8 @@ import {
 
 export const TITLE_MAX = 140;
 const FEED_LABEL: Record<Feed, string> = { landscape: 'Landscape', vertical: 'Vertical' };
+const BANDWIDTH_TEST_TITLE =
+  'This destination has "Bandwidth test" on: Twitch receives the video but nobody sees it and the channel stays offline. Turn it off in Destinations for a real stream.';
 const ACTIVE_PHASES: ReadonlySet<DestinationPhase> = new Set([
   'waiting-for-feed',
   'preparing',
@@ -666,6 +668,8 @@ export function DestinationCard({
   // Test mode skips platforms without a private/test setting: the server parks them as 'disabled'.
   const skipped = dest.enabled && testMode?.action === 'skip' && (phase === 'idle' || phase === 'disabled');
   const privateTest = dest.enabled && testMode?.action === 'test' && !skipped;
+  // The destination's own "Bandwidth test" option: Twitch takes the video but the channel stays offline.
+  const bandwidthTest = dest.enabled && !privateTest && dest.platform === 'twitch' && dest.options.bandwidthTest === true;
 
   const toggle = async (enabled: boolean) => {
     setToggling(true);
@@ -727,6 +731,11 @@ export function DestinationCard({
           {privateTest && (
             <Badge tone="warn" title={testMode?.text}>
               Private test
+            </Badge>
+          )}
+          {bandwidthTest && (
+            <Badge tone="warn" title={BANDWIDTH_TEST_TITLE}>
+              Bandwidth test: not public
             </Badge>
           )}
           <Badge tone="neutral">{FEED_LABEL[dest.feed]}</Badge>
