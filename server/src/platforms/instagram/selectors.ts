@@ -200,6 +200,8 @@ export const sel = {
 
   // ---- producer ----
   goLiveButton: (p: Page) => p.getByRole('button', { name: RE.goLive }),
+  /** "Go live" inside an open dialog (it then sits above the page's own button). */
+  dialogGoLiveButton: (p: Page) => p.getByRole('dialog').getByRole('button', { name: RE.goLive }),
   /** A possible "Go live?" confirmation step after clicking "Go live". */
   goLiveConfirmButton: (p: Page) =>
     p

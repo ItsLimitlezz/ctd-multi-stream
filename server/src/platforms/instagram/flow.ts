@@ -525,18 +525,19 @@ export async function readStreamDetails(page: Page, cfg: FlowConfig, signal: Abo
  * Wait (≤ timeoutMs) for "Go live" to become enabled — Instagram enables it once the preview of
  * our video arrives — click it and wait for the live indicator.
  */
-export async function goLive(page: Page, timeoutMs: number, cfg: FlowConfig, signal: AbortSignal): Promise<void> {
+export async function goLive(page: Page, timeoutMs: number, cfg: FlowConfig, signal: AbortSignal, log?: Logger): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let seen = false;
   for (;;) {
     signal.throwIfAborted();
     if (page.isClosed()) throw new DriverError('The Instagram page was closed before going live', 'platform-error');
-    const button = await visibleNow(sel.goLiveButton(page));
+    // The one in the open dialog first: a dialog (e.g. the stream key step) covers the page's own button.
+    const button = (await visibleNow(sel.dialogGoLiveButton(page), true)) ?? (await visibleNow(sel.goLiveButton(page), true));
     if (button) {
       seen = true;
       const enabled = await button.isEnabled({ timeout: 1000 }).catch(() => false);
       if (enabled && !(await visibleNow(sel.waitingForStream(page)))) {
-        await click(button, signal);
+        await clickGoLive(page, button, signal, log);
         break;
       }
     } else if (await visibleNow(sel.endLiveButton(page))) {
@@ -551,6 +552,28 @@ export async function goLive(page: Page, timeoutMs: number, cfg: FlowConfig, sig
     await humanPause(400, 600, signal);
   }
   await waitUntilLive(page, cfg, signal);
+}
+
+/**
+ * Click "Go live". When something covers it (Playwright waits for the click until it times out),
+ * log what the page shows — the full Playwright error names the covering element — close prompts,
+ * and click the button directly (a DOM click event, which a covering layer can't swallow).
+ */
+async function clickGoLive(page: Page, button: Locator, signal: AbortSignal, log?: Logger): Promise<void> {
+  try {
+    await click(button, signal, 8_000);
+    return;
+  } catch (err) {
+    if (signal.aborted) throw err;
+    const controls = await page.evaluate(`(${DESCRIBE_CONTROLS_SOURCE})()`).catch(() => null);
+    log?.warn(
+      { error: err instanceof Error ? err.message.slice(0, 1500) : String(err), controls },
+      'clicking Instagram\'s "Go live" failed; visible controls of the page',
+    );
+  }
+  await dismissInterstitials(page, signal);
+  const again = (await visibleNow(sel.dialogGoLiveButton(page), true)) ?? (await visibleNow(sel.goLiveButton(page), true)) ?? button;
+  await abortable(again.dispatchEvent('click', undefined, { timeout: 5_000 }), signal);
 }
 
 async function waitUntilLive(page: Page, cfg: FlowConfig, signal: AbortSignal): Promise<void> {

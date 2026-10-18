@@ -115,6 +115,16 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('instagram driver (Chromium + local
     await live.end!(); // idempotent
   }, 90_000);
 
+  it('goes live when a layer covers "Go live" (the real click times out; a direct click goes through)', async () => {
+    await setup({ goLiveCovered: true, previewDelayMs: 300 });
+    const live = await prepareLive({ audience: 'practice', goLiveTimeoutSec: 30 });
+    await live.confirm!(new AbortController().signal);
+    expect(fx.events).toContainEqual({ type: 'golive' });
+    const page = await manager.page('acc-ig');
+    await page.evaluate(`document.getElementById('cover').hidden = true`);
+    await live.end!();
+  }, 60_000);
+
   it('public audience: watch URL, select dropdown, masked key in text, "Go live?" step, end without confirm', async () => {
     await setup({ audienceUi: 'select', detailsUi: 'text', goLiveConfirm: true, endConfirm: false, previewDelayMs: 300 });
     const live = await prepareLive({ audience: 'public' });

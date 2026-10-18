@@ -28,6 +28,8 @@ export interface FixtureConfig {
   notificationsPrompt: boolean;
   cookieBanner: boolean;
   goLiveConfirm: boolean;
+  /** An invisible layer over the producer swallows real clicks on "Go live" (seen on Instagram, Oct 2026). */
+  goLiveCovered: boolean;
   endConfirm: boolean;
   titleMaxLength: number;
   /** "Next" stays disabled while the title is empty. */
@@ -67,6 +69,7 @@ export const DEFAULT_FIXTURE: FixtureConfig = {
   notificationsPrompt: false,
   cookieBanner: false,
   goLiveConfirm: false,
+  goLiveCovered: false,
   endConfirm: true,
   titleMaxLength: 30,
   requireTitle: false,
@@ -225,6 +228,7 @@ function homePage(cfg: FixtureConfig): string {
 <div class="overlay" id="takedown" hidden><div class="modal" role="dialog"><h2 id="tdTitle"></h2><p id="tdText"></p>
   <button type="button" id="tdShare">Share</button><button type="button" id="tdDone">Done</button></div></div>
 ${leftoverHtml(cfg.leftover)}
+<div id="cover" style="position: fixed; inset: 0; z-index: 50" hidden></div>
 <script>
 const CFG = ${JSON.stringify(cfg)};
 const AVATAR = ${JSON.stringify(AVATAR)};
@@ -262,7 +266,7 @@ $('next').onclick = async () => {
   await ev('title', $('title').value);
   await ev('audience', audience());
   $('producerTitle').textContent = $('title').value;
-  show('setup', false); show('producer');
+  show('setup', false); show('producer'); if (CFG.goLiveCovered) show('cover');
   if (CFG.previewDelayMs >= 0) setTimeout(() => { $('goLive').disabled = false; show('waiting', false); }, CFG.previewDelayMs);
 };
 if ($('showKey')) $('showKey').onclick = () => { $('keyText').textContent = ${JSON.stringify(FIXTURE_KEY)}; };

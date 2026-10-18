@@ -269,7 +269,7 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
         const started = Date.now();
         try {
           await closeLinkForm(page); // a link form left open would take the "Go live" click (no-op otherwise)
-          await goLive(page, options.goLiveTimeoutSec * 1000, cfg, signal);
+          await goLive(page, options.goLiveTimeoutSec * 1000, cfg, signal, log);
         } catch (err) {
           throw toDriverError(err, 'Instagram automation failed', signal); // the runner prefixes "Couldn't go live"
         }
