@@ -289,7 +289,7 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
           }
           try {
             await closeLinkForm(page); // never leave a link form over "End live video" (no-op otherwise)
-            const result = await endLive(page, cfg, isCurrent);
+            const result = await endLive(page, cfg, isCurrent, log);
             log.info({ result }, 'Instagram live ended');
           } catch (err) {
             log.warn({ error: shortError(err) }, 'ending the Instagram live failed; leaving the live page');

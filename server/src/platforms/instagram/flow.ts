@@ -560,19 +560,38 @@ export async function goLive(page: Page, timeoutMs: number, cfg: FlowConfig, sig
  * and click the button directly (a DOM click event, which a covering layer can't swallow).
  */
 async function clickGoLive(page: Page, button: Locator, signal: AbortSignal, log?: Logger): Promise<void> {
+  await clickThrough(page, button, signal, 'Go live', 8_000, log, async () =>
+    (await visibleNow(sel.dialogGoLiveButton(page), true)) ?? (await visibleNow(sel.goLiveButton(page), true)),
+  );
+}
+
+/**
+ * Click `button`; when something covers it (the click times out), log what the page shows (the full
+ * Playwright error names the covering element), close prompts, and click it directly with a DOM
+ * click event, which a covering layer can't swallow. `refind` locates the button again afterwards.
+ */
+async function clickThrough(
+  page: Page,
+  button: Locator,
+  signal: AbortSignal,
+  what: string,
+  timeoutMs: number,
+  log: Logger | undefined,
+  refind: () => Promise<Locator | null>,
+): Promise<void> {
   try {
-    await click(button, signal, 8_000);
+    await click(button, signal, timeoutMs);
     return;
   } catch (err) {
     if (signal.aborted) throw err;
     const controls = await page.evaluate(`(${DESCRIBE_CONTROLS_SOURCE})()`).catch(() => null);
     log?.warn(
       { error: err instanceof Error ? err.message.slice(0, 1500) : String(err), controls },
-      'clicking Instagram\'s "Go live" failed; visible controls of the page',
+      `clicking Instagram's "${what}" failed; visible controls of the page`,
     );
   }
   await dismissInterstitials(page, signal);
-  const again = (await visibleNow(sel.dialogGoLiveButton(page), true)) ?? (await visibleNow(sel.goLiveButton(page), true)) ?? button;
+  const again = (await refind()) ?? button;
   await abortable(again.dispatchEvent('click', undefined, { timeout: 5_000 }), signal);
 }
 
@@ -613,7 +632,7 @@ export type EndResult = 'ended' | 'not-live' | 'closed' | 'skipped';
  * checked before every click: once it returns false (the page now hosts a newer live) nothing
  * more is clicked ('skipped').
  */
-export async function endLive(page: Page, cfg: FlowConfig, stillOwner: () => boolean = () => true): Promise<EndResult> {
+export async function endLive(page: Page, cfg: FlowConfig, stillOwner: () => boolean = () => true, log?: Logger): Promise<EndResult> {
   if (page.isClosed()) return 'closed';
   if (!stillOwner()) return 'skipped';
   const signal = AbortSignal.timeout(cfg.timeouts.end);
@@ -625,7 +644,8 @@ export async function endLive(page: Page, cfg: FlowConfig, stillOwner: () => boo
     return 'not-live';
   }
   if (!stillOwner()) return 'skipped';
-  await click(endButton, signal);
+  // Live test (Oct 2026): this click timed out like "Go live" did; a live that isn't ended stays up.
+  await clickThrough(page, endButton, signal, 'End live video', 5_000, log, () => visibleNow(sel.endLiveButton(page)));
 
   let confirmed = false;
   for (;;) {

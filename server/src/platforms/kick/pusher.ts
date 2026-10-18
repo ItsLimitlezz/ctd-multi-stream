@@ -1,8 +1,8 @@
 // Minimal read-only Pusher Channels client (protocol 7) for Kick's public chat websocket.
 // Protocol: https://pusher.com/docs/channels/library_auth_reference/pusher-websockets-protocol/
-// Kick's web chat uses the public app key below on cluster us2 (seen in kick.com's frontend and
-// community clients, e.g. https://github.com/236sec/streamer-chat/pull/5, Sep 2026). The key is not an
-// official API and has changed before: KICK_PUSHER_KEY / KICK_PUSHER_CLUSTER override it without a rebuild.
+// Until Oct 2026 Kick's web chat used the public app key below on cluster us2. Kick now serves chat
+// over Centrifugo (realtime.ts); this client stays for when Kick's realtime service offers Pusher, and
+// for KICK_PUSHER_KEY / KICK_PUSHER_CLUSTER set by hand (they force this transport).
 
 export const KICK_PUSHER_KEY = '32cbd69e4b950bf97679';
 export const KICK_PUSHER_CLUSTER = 'us2';
@@ -74,7 +74,7 @@ function pusherError(data: unknown): PusherError | null {
   const message = typeof d?.message === 'string' ? d.message.slice(0, 200) : 'unknown error';
   if (code !== null && code >= 4300) return null; // client-event rejections etc.: not fatal
   const fatal = code !== null && code >= 4000 && code < 4100;
-  const hint = fatal ? ' — Kick may have changed its chat key; set KICK_PUSHER_KEY / KICK_PUSHER_CLUSTER to update it' : '';
+  const hint = fatal ? ' — Kick may have changed its chat key (unset KICK_PUSHER_KEY to use Kick\'s current chat service)' : '';
   return new PusherError(`Kick chat server error${code !== null ? ` ${code}` : ''}: ${message}${hint}`, code, fatal);
 }
 

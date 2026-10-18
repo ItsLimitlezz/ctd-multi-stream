@@ -1,5 +1,6 @@
 // Chat source for one prepared Kick live: resolve the chatroom id (cached), then stream the
-// chatroom's Pusher events (chat, moderation, alerts) until the signal aborts.
+// chatroom's events (chat, moderation, alerts) until the signal aborts — over Kick's Centrifugo
+// websocket since Oct 2026 (realtime.ts), or Pusher when Kick offers it / KICK_PUSHER_KEY is set.
 
 import type { Account } from '../../../../shared/types.js';
 import type { ChatSourceItem, DriverContext } from '../types.js';
@@ -7,7 +8,8 @@ import { errorText } from './api.js';
 import { channelEventsChannel, chatroomChannel, giftsChannel, kickEventKey, parseKickChatEvent } from './chat.js';
 import { ChatroomNotFoundError, lookupChatroom, type ChatroomInfo } from './chatroom.js';
 import { readOptions, sameSlug, updateOptions } from './options.js';
-import { kickPusherUrl, pusherEvents } from './pusher.js';
+import { kickPusherUrl, pusherEvents, type PusherEvent } from './pusher.js';
+import { centrifugoEvents, kickGuestToken, kickRealtimeTarget, pusherUrlFor, type RealtimeTarget } from './realtime.js';
 
 /** Waits between failed chatroom lookups (each may launch a browser, so back off generously). */
 const LOOKUP_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 300_000] as const;
@@ -27,6 +29,10 @@ export interface KickChatOptions {
   pusherUrl?: string;
   lookup?: (slug: string, signal: AbortSignal) => Promise<ChatroomInfo>;
   backoffMs?: readonly number[];
+  realtime?: (channelId: number, signal: AbortSignal) => Promise<RealtimeTarget>;
+  guestToken?: (clientId: string, signal: AbortSignal) => Promise<string>;
+  /** Skip caches that lack the channel id (Kick's realtime service needs it). */
+  requireChannelId?: boolean;
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
@@ -49,9 +55,9 @@ export async function resolveChatroom(opts: KickChatOptions): Promise<ChatroomIn
   const { ctx, account, slug, signal } = opts;
   const key = slug.toLowerCase();
   const memo = chatroomCache.get(key);
-  if (memo) return memo;
+  if (memo && (memo.channelId || !opts.requireChannelId)) return memo;
   const cached = readOptions(account);
-  if (cached.chatroomId && sameSlug(cached.slug, slug)) {
+  if (cached.chatroomId && sameSlug(cached.slug, slug) && (cached.channelId || !opts.requireChannelId)) {
     return { chatroomId: cached.chatroomId, channelId: cached.channelId ?? null };
   }
 
@@ -119,16 +125,14 @@ export class RecentEventKeys {
  * drops (the ChatHub restarts it).
  */
 export async function* kickChat(opts: KickChatOptions): AsyncGenerator<ChatSourceItem> {
-  const room = await resolveChatroom(opts);
+  // Kick's realtime service is asked per channel id, so a cached chatroom without one is looked up again.
+  const room = await resolveChatroom({ ...opts, requireChannelId: !opts.pusherUrl && !legacyPusherForced() });
   if (room === null || opts.signal.aborted) return;
   const optionalChannels = [giftsChannel(room.chatroomId)];
   if (room.channelId) optionalChannels.push(channelEventsChannel(room.channelId));
-  const events = pusherEvents({
-    url: opts.pusherUrl ?? kickPusherUrl(),
-    channels: [chatroomChannel(room.chatroomId)],
-    optionalChannels,
-    signal: opts.signal,
-  });
+  const channels = [chatroomChannel(room.chatroomId)];
+  const events = await chatEvents(opts, room, channels, optionalChannels);
+  if (!events) return;
   const recent = new RecentEventKeys();
   for await (const ev of events) {
     const item = parseKickChatEvent(ev.event, ev.data);
@@ -137,6 +141,34 @@ export async function* kickChat(opts: KickChatOptions): AsyncGenerator<ChatSourc
     if (key && recent.repeat(key)) continue;
     yield item;
   }
+}
+
+/** KICK_PUSHER_KEY set by hand: keep using that Pusher key (the pre-Oct-2026 transport). */
+function legacyPusherForced(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.KICK_PUSHER_KEY?.trim());
+}
+
+/**
+ * The chatroom's event stream: whatever Kick's realtime service offers for the channel (Centrifugo
+ * since Oct 2026, or a Pusher key/cluster), else the hand-set / built-in Pusher key. Null when aborted.
+ */
+async function chatEvents(
+  opts: KickChatOptions,
+  room: ChatroomInfo,
+  channels: string[],
+  optionalChannels: string[],
+): Promise<AsyncGenerator<PusherEvent> | null> {
+  const { signal } = opts;
+  if (opts.pusherUrl || legacyPusherForced() || !room.channelId) {
+    return pusherEvents({ url: opts.pusherUrl ?? kickPusherUrl(), channels, optionalChannels, signal });
+  }
+  const target = await (opts.realtime ?? kickRealtimeTarget)(room.channelId, signal);
+  if (signal.aborted) return null;
+  if (target.provider === 'pusher') {
+    return pusherEvents({ url: pusherUrlFor(target.appKey, target.cluster), channels, optionalChannels, signal });
+  }
+  const token = opts.guestToken ?? kickGuestToken;
+  return centrifugoEvents({ url: target.url, token: () => token(target.clientId, signal), channels, optionalChannels, signal });
 }
 
 /** For tests. */

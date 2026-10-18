@@ -120,9 +120,9 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('instagram driver (Chromium + local
     const live = await prepareLive({ audience: 'practice', goLiveTimeoutSec: 30 });
     await live.confirm!(new AbortController().signal);
     expect(fx.events).toContainEqual({ type: 'golive' });
-    const page = await manager.page('acc-ig');
-    await page.evaluate(`document.getElementById('cover').hidden = true`);
+    // Still covered: "End live video" must get through too (a live that isn't ended stays up).
     await live.end!();
+    expect(fx.events).toContainEqual({ type: 'end' });
   }, 60_000);
 
   it('public audience: watch URL, select dropdown, masked key in text, "Go live?" step, end without confirm', async () => {
