@@ -13,6 +13,7 @@ import { truncateTitle } from '../common/http.js';
 import { click, visibleNow, waitVisible } from './flow.js';
 import {
   CLEAR_ATTR_SOURCE,
+  DESCRIBE_CONTROLS_SOURCE,
   LINK_FORM_ARGS,
   LINK_FORM_ATTR,
   LINK_TITLE_ARGS,
@@ -27,10 +28,25 @@ import {
 } from './selectors.js';
 import { LINK_ROTATION_KEY, pickLink, shortError, type LinkMode, type LinkRotation } from './util.js';
 
-export type LinkResult = { status: 'added' } | { status: 'not-found' } | { status: 'failed'; reason: string };
+export type LinkResult = { status: 'added' } | { status: 'not-found' } | { status: 'failed'; reason: string; controls?: unknown };
 
-/** A failed step inside the link form (its message becomes the warning's reason). */
-class LinkStepError extends Error {}
+/**
+ * A failed step inside the link form (its message becomes the warning's reason). `controls`: what the
+ * form showed (DESCRIBE_CONTROLS_SOURCE), logged so the selectors can be fixed from the server log.
+ */
+class LinkStepError extends Error {
+  constructor(
+    message: string,
+    readonly controls?: unknown,
+  ) {
+    super(message);
+  }
+}
+
+/** The visible controls of the topmost dialog (else the page), or null. */
+function describeControls(page: Page): Promise<unknown> {
+  return page.evaluate(`(${DESCRIBE_CONTROLS_SOURCE})()`).catch(() => null);
+}
 
 const MARK_DIALOGS = `(${MARK_DIALOGS_SOURCE})(${JSON.stringify(LINK_FORM_ARGS)})`;
 const TAG_LINK_FORM = `(${TAG_LINK_FORM_SOURCE})(${JSON.stringify(LINK_FORM_ARGS)})`;
@@ -157,7 +173,7 @@ async function fillLinkForm(
     form = await tagLinkForm(page);
     urlField = await visibleNow(sel.linkUrlInput(form ?? page));
     if (urlField) break;
-    if (Date.now() >= fieldDeadline) throw new LinkStepError("Instagram's link form has no URL field");
+    if (Date.now() >= fieldDeadline) throw new LinkStepError("Instagram's link form has no URL field", await describeControls(page));
     await humanPause(150, 250, signal);
   }
   await clearTags(page);
@@ -190,7 +206,10 @@ async function fillLinkForm(
     const error = await visibleNow(sel.linkError(page));
     if (error) throw new LinkStepError(`Instagram said: ${await textOf(error)}`);
     if (Date.now() >= deadline) {
-      throw new LinkStepError(target ? 'Instagram kept the link\'s "Add" button disabled' : 'no "Add" button in the link form');
+      throw new LinkStepError(
+        target ? 'Instagram kept the link\'s "Add" button disabled' : 'no "Add" button in the link form',
+        await describeControls(page),
+      );
     }
     await humanPause(150, 250, signal);
   }
@@ -236,16 +255,24 @@ export async function addLiveLink(
     opts.findMs > 0 ? await waitVisible(sel.addLinkButton(page), page, opts.findMs, signal) : await visibleNow(sel.addLinkButton(page));
   if (!opener) return { status: 'not-found' };
   const state = { clicked: false };
+  // Which control was taken for "Add link" (its role/name/text), for the log when the form fails.
+  const openerText = await opener
+    .evaluate((el) => {
+      const e = el as unknown as { tagName: string; getAttribute(n: string): string | null; textContent: string | null };
+      return `${e.tagName.toLowerCase()} ${e.getAttribute('role') ?? ''} ${e.getAttribute('aria-label') ?? ''} "${(e.textContent ?? '').trim().slice(0, 60)}"`;
+    })
+    .catch(() => null);
   try {
     return await fillLinkForm(page, opener, link, signal, opts.stepMs, state);
   } catch (err) {
+    const controls = err instanceof LinkStepError && err.controls !== undefined ? { opener: openerText, form: err.controls } : undefined;
     // Also on abort and when no URL field was recognized: never leave the form over "Next" /
     // "Go live". A form that only showed up late is still found once the opener was clicked.
     if (state.clicked) await tagLinkForm(page);
     await closeLinkForm(page);
     await clearInlineFields(page);
     if (signal.aborted) throw err;
-    return { status: 'failed', reason: err instanceof LinkStepError ? err.message : shortError(err) };
+    return { status: 'failed', reason: err instanceof LinkStepError ? err.message : shortError(err), ...(controls ? { controls } : {}) };
   } finally {
     await clearTags(page, true);
   }
@@ -333,7 +360,8 @@ export class LiveLink {
     this.state = 'failed';
     const reason = result.status === 'failed' ? result.reason : 'no "Add link" option found on Instagram';
     this.problem = `Couldn't add the link "${this.link.title || 'link'}" to the Instagram live: ${reason}`;
-    this.log.warn({ stage, reason }, 'adding the link to the Instagram live failed; the live goes on without it');
+    const controls = result.status === 'failed' ? result.controls : undefined;
+    this.log.warn({ stage, reason, ...(controls ? { controls } : {}) }, 'adding the link to the Instagram live failed; the live goes on without it');
   }
 
   /** Give up (e.g. no time left): the link is reported as not added. */
