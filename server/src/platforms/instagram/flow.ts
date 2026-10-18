@@ -658,7 +658,7 @@ export async function endLive(page: Page, cfg: FlowConfig, stillOwner: () => boo
       const ends = sel.endLiveButton(page).filter({ visible: true });
       const confirm = (await visibleNow(sel.endConfirmButton(page), true)) ?? ((await ends.count().catch(() => 0)) > 1 ? ends.last() : null);
       if (confirm) {
-        await click(confirm, signal, 5_000);
+        await clickThrough(page, confirm, signal, 'End live (confirm)', 4_000, log, () => visibleNow(sel.endConfirmButton(page), true));
         confirmed = true;
         continue;
       }
