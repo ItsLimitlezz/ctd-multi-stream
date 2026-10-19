@@ -217,7 +217,7 @@ function homePage(cfg: FixtureConfig): string {
     <button type="button" role="tab" id="tabComments" aria-selected="false" aria-controls="panelComments">Comments</button></div>
   <div role="tabpanel" id="panelComments" aria-labelledby="tabComments" hidden>
     <div id="commentList"></div>
-    <div class="composer"><img alt="${FIXTURE_USER}'s profile picture" src="${AVATAR}"><input placeholder="Add a comment…"><button type="button">Post</button></div>
+    <div class="composer"><img alt="${FIXTURE_USER}'s profile picture" src="${AVATAR}"><input id="composerInput" placeholder="Add a comment…"><button type="button" id="composerPost">Post</button></div>
   </div>
 </div>
 <div class="overlay" id="goLiveConfirm" hidden><div class="modal" role="dialog"><h3>Go live?</h3>
@@ -365,6 +365,16 @@ window.__addComment = (user, text) => {
   row.querySelector('.u').textContent = user; row.querySelector('.t').textContent = text;
   $('commentList').appendChild(row);
 };
+// The producer's own comment box: posting adds the account's comment to the list (as Instagram does).
+function postOwnComment() {
+  const text = $('composerInput').value.trim();
+  if (!text) return;
+  ev('comment-posted', text);
+  window.__addComment(${JSON.stringify(FIXTURE_USER)}, text);
+  $('composerInput').value = '';
+}
+$('composerPost').onclick = postOwnComment;
+$('composerInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') postOwnComment(); });
 window.__addPlain = (user, text) => {
   const li = document.createElement('li');
   li.innerHTML = '<a href="/' + user + '/"></a><span></span>';

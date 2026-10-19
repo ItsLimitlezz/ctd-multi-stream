@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { withTimeout } from '../../browser/helpers.js';
 import { DriverError, type ChatSourceItem, type PlatformDriver, type PreparedLive } from '../types.js';
 import { DEFAULT_TIMEOUTS, endLive, goLive, type FlowConfig } from './flow.js';
+import { TEST_COMMENT } from './chat.js';
 import { createInstagramDriver } from './index.js';
 import {
   FakeBrowserManager,
@@ -114,6 +115,28 @@ describe.skipIf(!!process.env.CI_NO_BROWSER)('instagram driver (Chromium + local
     expect(manager.saves).toBeGreaterThanOrEqual(2);
     await live.end!(); // idempotent
   }, 90_000);
+
+  it('test mode (Practice): posts one test comment in the producer and the chat reads it back', async () => {
+    await setup({ previewDelayMs: 300 });
+    const { ctx } = makeCtx(manager);
+    ctx.testMode = true;
+    const live = await driver.prepare(makeDestination({ audience: 'public' }), makeAccount(), 'Rehearsal', ctx);
+    await live.confirm!(new AbortController().signal);
+    const chatCtl = new AbortController();
+    const chat = live.chat!(chatCtl.signal)[Symbol.asyncIterator]();
+    expect(await withTimeout(next(chat), 15_000, 'test comment not read')).toMatchObject({ text: TEST_COMMENT, kind: 'message' });
+    expect(fx.events.filter((e) => e.type === 'comment-posted')).toEqual([{ type: 'comment-posted', value: TEST_COMMENT }]);
+    chatCtl.abort();
+    // A restarted chat source doesn't post it again.
+    const againCtl = new AbortController();
+    const again = live.chat!(againCtl.signal)[Symbol.asyncIterator]();
+    const pending = again.next();
+    await new Promise((r) => setTimeout(r, 5_500));
+    expect(fx.events.filter((e) => e.type === 'comment-posted')).toHaveLength(1);
+    againCtl.abort();
+    expect((await withTimeout(pending, 5_000, 'chat did not stop')).done).toBe(true);
+    await live.end!();
+  }, 60_000);
 
   it('goes live when a layer covers "Go live" (the real click times out; a direct click goes through)', async () => {
     await setup({ goLiveCovered: true, previewDelayMs: 300 });

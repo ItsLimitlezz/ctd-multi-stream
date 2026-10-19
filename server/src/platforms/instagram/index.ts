@@ -10,7 +10,7 @@ import type { ConnectPoll, ConnectStart } from '../../../../shared/api.js';
 import type { Account, PlatformInfo } from '../../../../shared/types.js';
 import { requireLoggedIn } from '../../browser/helpers.js';
 import { DriverError, type DriverContext, type PlatformDriver, type PreparedLive } from '../types.js';
-import { DEFAULT_CHAT_TIMINGS, instagramChat, type ChatTimings } from './chat.js';
+import { DEFAULT_CHAT_TIMINGS, instagramChat, TEST_COMMENT, type ChatTimings } from './chat.js';
 import {
   checkpointError,
   DEFAULT_TIMEOUTS,
@@ -227,6 +227,8 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
     release: () => void;
     ctx: DriverContext;
     log: Logger;
+    /** Session test mode (Practice): the chat posts one test comment so the reader can be checked. */
+    testMode: boolean;
   }
 
   /** Add the link right after going live (last chance), within what is left of confirm's budget. */
@@ -255,8 +257,10 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
   }
 
   function prepared(parts: LiveParts): PreparedLive {
-    const { page, account, details, options, username, link, isCurrent, release, ctx, log } = parts;
+    const { page, account, details, options, username, link, isCurrent, release, ctx, log, testMode } = parts;
     const marks: LiveMarks = { liveAt: null, sawLive: false };
+    // Practice test lives: one test comment per live (only the account sees it), once the reader runs.
+    const chatTest = { comment: testMode && options.audience === 'practice' ? TEST_COMMENT : null, posted: false };
     let ending: Promise<void> | null = null;
     return {
       push: { url: joinStreamUrl(details.server, details.key), mode: 'copy', feeds: ['vertical'] },
@@ -307,7 +311,7 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
         return ending;
       },
 
-      chat: (signal) => instagramChat(page, signal, log, chatTimings),
+      chat: (signal) => instagramChat(page, signal, log, chatTimings, chatTest),
 
       health(signal) {
         const monitor = new HealthMonitor({
@@ -464,7 +468,7 @@ export function createInstagramDriver(opts: InstagramDriverOptions = {}): Platfo
         log.info({ audience: options.audience, testMode }, 'Instagram live created; stream URL and key read');
         await link.attempt(p, 'producer', signal, { findMs: 1_000, stepMs: linkStep, final: false });
         await saveSession(ctx, account.id, log);
-        return prepared({ page: p, account, details, options, username, link, isCurrent, release, ctx, log });
+        return prepared({ page: p, account, details, options, username, link, isCurrent, release, ctx, log, testMode });
       } catch (err) {
         const ownsPage = isCurrent();
         release();

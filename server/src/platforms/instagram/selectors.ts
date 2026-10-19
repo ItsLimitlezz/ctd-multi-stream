@@ -223,6 +223,13 @@ export const sel = {
   afterEndButton: (p: Page) => p.getByRole('button', { name: RE.afterEnd }),
   platformError: (p: Page) => p.getByText(RE.platformError),
   commentsTab: (p: Page) => anyRole(p, ['tab', 'button'], RE.comments),
+  /** The producer's own comment box ("Add a comment…"); never the live's title field. */
+  commentBox: (p: Page) =>
+    p
+      .locator('textarea, input[type="text"], input:not([type]), [contenteditable="true"]')
+      .and(p.locator('[placeholder*="comment" i], [aria-label*="comment" i]'))
+      .and(p.locator(`:not([${LIVE_TITLE_ATTR}])`)),
+  commentPost: (p: Page) => p.getByRole('button', { name: names('post', 'send') }),
 
   // ---- after a takedown ----
   /**
