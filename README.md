@@ -1,3 +1,5 @@
+<img src="web/public/favicon.svg" alt="CTD Relay icon" width="96" height="96">
+
 # CTD Relay
 
 Self-hosted, open-source multistreaming, an alternative to Restream that you run yourself. OBS sends a **landscape** feed (its main output) and a **vertical** feed (the Aitum Vertical plugin) to your own server, which relays each one to the platforms that want it: Twitch, YouTube, Kick, Facebook, X, Instagram, TikTok and any custom RTMP server. One stream title is kept in sync everywhere, and every platform's chat lands in one combined view. It ships as a single Docker image that installs on TrueNAS in a few minutes, and no domain name is needed.
