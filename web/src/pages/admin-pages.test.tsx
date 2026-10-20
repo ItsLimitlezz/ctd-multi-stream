@@ -345,10 +345,10 @@ describe('Settings → API (static render)', () => {
 
   it('new token form: name, profile and a checkbox per scope (read-only basics checked)', () => {
     const out = html(<NewTokenForm onCreated={noop} onCancel={noop} />);
-    expect(out.match(/type="checkbox"/g)).toHaveLength(5);
-    // Only chat:read and status:read start checked; stream keys and the hub are opt-in.
+    expect(out.match(/type="checkbox"/g)).toHaveLength(6);
+    // Only chat:read and status:read start checked; stream keys, the hub and OBS events are opt-in.
     expect(out.match(/type="checkbox" checked=""/g)).toHaveLength(2);
-    for (const s of ['chat:read', 'status:read', 'ingest:read', 'apps:read', 'apps:write']) expect(out).toContain(s);
+    for (const s of ['chat:read', 'status:read', 'ingest:read', 'apps:read', 'apps:write', 'obs:write']) expect(out).toContain(s);
     expect(out).toContain('maxLength="60"');
     expect(out).toContain('Create token');
     expect(out).toContain('Profile');

@@ -293,6 +293,10 @@ export const API_SCOPE_INFO: Readonly<Record<ApiScope, { label: string; help: st
     label: 'Register and message apps',
     help: 'Register this app and what it offers so other apps can find it, and send messages to other apps through CTD Multi-Stream.',
   },
+  'obs:write': {
+    label: 'Send OBS events',
+    help: "OBS's state — sources losing or regaining signal, outputs starting and stopping, scene changes — for apps like CTD Live mobile to show (the CTD OBS plugin).",
+  },
 };
 
 /** Permissions a new token starts with (read-only basics; the others are opt-in). */

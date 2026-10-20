@@ -8,9 +8,11 @@ import { PROBLEM_CODES, PROBLEM_TYPE } from './http.js';
 import { MAX_PENDING_PAIRINGS, MAX_PENDING_PAIRINGS_INTERNET, MAX_PENDING_PAIRINGS_PER_ADDRESS, PAIRING_CODE_RE, PAIRING_POLL_INTERVAL_SEC, PAIRING_TTL_MS } from './pairing.js';
 import { ALERT_COUNT_UNITS, ALERT_KINDS, API_ROLES, EVENT_TYPES } from './types.js';
 import { MESSAGE_DATA_MAX_BYTES, MESSAGE_TYPE_RE, MESSAGES_PER_MINUTE, PAIRINGS_PER_MINUTE_PER_IP } from './v1-hub.js';
+import { OBS_BODY_LIMIT, OBS_DATA_MAX_BYTES, OBS_EVENT_TYPES, OBS_MAX_EVENTS, OBS_POSTS_PER_MINUTE } from './obs.js';
+import { PREVIEW_MAX_AGE_MS } from './previews.js';
 
 /** Minor revision of the v1 contract (additive changes only; see the changelog in docs/API.md). */
-export const API_REVISION = '1.3';
+export const API_REVISION = '1.4';
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const nullable = (schema: object) => ({ oneOf: [schema, { type: 'null' }] });
@@ -229,6 +231,32 @@ export function openApiDocument(version: string): Record<string, unknown> {
           responses: { '200': { description: 'Overlays', content: json(ref('OverlaysResponse')) }, ...errors, ...profileErrors },
         },
       },
+      '/profiles/{id}/obs': {
+        get: {
+          summary: 'Latest OBS state of a profile, per connected app (v1.4)',
+          operationId: 'getProfileObs',
+          tags: ['profiles', 'apps'],
+          description: 'Needs `status:read`. Built from the obs.* events the CTD OBS plugin sends (POST /apps/{appId}/events). In memory: empty after a server restart until the plugin sends again.',
+          parameters: [idPath],
+          responses: { '200': { description: 'OBS state', content: json(ref('ObsStateResponse')) }, ...errors, ...profileErrors },
+        },
+      },
+      '/profiles/{id}/previews/{feed}': {
+        get: {
+          summary: 'JPEG preview of what OBS sends on a feed (v1.4)',
+          operationId: 'getFeedPreview',
+          tags: ['profiles'],
+          description: `Needs \`status:read\` (\`Authorization\`, or \`?access_token=\` for image loaders). One keyframe of the feed, 640 px wide, made on request and cached ${PREVIEW_MAX_AGE_MS / 1000} s (poll every 3–5 s). Header \`X-Preview-At\`: when the frame was taken.`,
+          parameters: [idPath, { name: 'feed', in: 'path', required: true, schema: { enum: ['landscape', 'vertical'] } }, { name: 'access_token', in: 'query', required: false, schema: str }],
+          responses: {
+            '200': { description: 'The preview', content: { 'image/jpeg': { schema: { type: 'string', format: 'binary' } } } },
+            '404': problemResponse('Feed offline (`feed_offline`), no such feed (`not_found`) or profile (`unknown_profile`)'),
+            '503': problemResponse('The preview could not be taken right now (`unavailable`, with Retry-After)'),
+            '401': errors['401'],
+            '429': errors['429'],
+          },
+        },
+      },
       '/apps': {
         get: {
           summary: 'Connected apps and their resources',
@@ -285,6 +313,23 @@ export function openApiDocument(version: string): Record<string, unknown> {
             '403': problemResponse('Token lacks apps:write (`missing_scope`)'),
             '404': problemResponse('Not registered (`not_found`): register with PUT'),
             '409': problemResponse('Registered by another token (`app_owned`)'),
+          },
+        },
+      },
+      '/apps/{appId}/events': {
+        post: {
+          summary: 'Send OBS events into the hub (v1.4)',
+          operationId: 'postObsEvents',
+          tags: ['apps'],
+          description: `Needs \`obs:write\`; only the token that registered \`appId\`. Body \`{ events: [{ id, type, ts, data }] }\`, at most ${OBS_MAX_EVENTS} events, data ≤ ${OBS_DATA_MAX_BYTES / 1024} KB each, body ≤ ${OBS_BODY_LIMIT / 1024} KB, ${OBS_POSTS_PER_MINUTE} requests/minute per token. Types: ${OBS_EVENT_TYPES.join(', ')}. Unknown types, malformed events and duplicate ids (10 min) are ignored, not refused. \`ts\`: epoch ms on the hub's clock (more than 5 min off → the server's time). The profile: the token's, else \`?profile=\`, else the default profile. Re-emitted on /events (status:read); obs.feed.stats at most every 5 s per source.`,
+          parameters: [appIdPath, profileParam('default: the default profile')],
+          responses: {
+            '202': { description: 'Accepted', content: json({ type: 'object', properties: { accepted: int, ignored: int } }) },
+            '400': problemResponse('Bad body (`invalid`)'),
+            '409': problemResponse('Registered by another token (`app_owned`)'),
+            ...errors,
+            ...profileErrors,
+            '404': problemResponse('No app registered under this id (`not_found`): register it first; or no such profile (`unknown_profile`)'),
           },
         },
       },
@@ -644,6 +689,40 @@ export function openApiDocument(version: string): Record<string, unknown> {
           },
         },
         ProfilesResponse: { type: 'object', required: ['items'], properties: { items: { type: 'array', items: ref('Profile') } } },
+        ObsStateResponse: {
+          type: 'object',
+          required: ['apps'],
+          properties: {
+            apps: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  appId: str,
+                  online: bool,
+                  updatedAt: { ...num, description: 'Epoch ms of the latest event' },
+                  feeds: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        source: str,
+                        state: { description: 'CONNECTING | LIVE | STALLED | RECONNECTING | NO_SIGNAL (as the plugin sent it)' },
+                        previous: {},
+                        gapMs: {},
+                        stats: nullable({ type: 'object', description: 'Latest obs.feed.stats data' }),
+                        info: nullable({ type: 'object', description: 'The source object as sent (name, path, server…)' }),
+                        updatedAt: num,
+                      },
+                    },
+                  },
+                  outputs: { type: 'array', items: { type: 'object', description: 'Latest obs.output data per output, plus updatedAt' } },
+                  scenes: { type: 'array', items: { type: 'object', properties: { canvas: str, scene: {}, updatedAt: num } } },
+                },
+              },
+            },
+          },
+        },
         Clock: {
           type: 'object',
           required: ['t0', 'receivedAt', 'sentAt', 'iso', 'utcOffsetMinutes', 'profileId', 'session', 'fps', 'fpsSource', 'timecode'],

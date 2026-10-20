@@ -36,6 +36,7 @@ import { createAppRegistry, type AppRegistryHandle } from './hub.js';
 import { lanHttpPlugin } from './lan.js';
 import { createPairingService, type PairingServiceHandle } from './pairing.js';
 import { isDown } from './status.js';
+import type { PreviewService } from './previews.js';
 import v1Routes, { API_PREFIX } from './v1.js';
 
 export function dest(id: string, over: Partial<Destination> = {}): Destination {
@@ -234,7 +235,9 @@ export interface TestApi {
   close(): Promise<void>;
 }
 
-export async function createTestApi(opts: { tlsMode?: AppConfig['tlsMode']; heartbeatMs?: number; now?: () => number } = {}): Promise<TestApi> {
+export async function createTestApi(
+  opts: { tlsMode?: AppConfig['tlsMode']; heartbeatMs?: number; now?: () => number; previews?: PreviewService } = {},
+): Promise<TestApi> {
   const now = opts.now ?? Date.now;
   const secretBox = createSecretBox(crypto.randomBytes(32));
   const db = openDatabase(':memory:');
@@ -297,7 +300,14 @@ export async function createTestApi(opts: { tlsMode?: AppConfig['tlsMode']; hear
   await app.register(lanHttpPlugin, { services });
   await app.register(authPlugin, { services });
   await app.register(tokenRoutes, { services });
-  await app.register(v1Routes, { services, hub, prefix: API_PREFIX, ...(opts.heartbeatMs ? { heartbeatMs: opts.heartbeatMs } : {}), ...(opts.now ? { now: opts.now } : {}) });
+  await app.register(v1Routes, {
+    services,
+    hub,
+    prefix: API_PREFIX,
+    ...(opts.heartbeatMs ? { heartbeatMs: opts.heartbeatMs } : {}),
+    ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.previews ? { previews: opts.previews } : {}),
+  });
   await app.register(dockRoutes, { services });
   await app.ready();
 

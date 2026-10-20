@@ -3,7 +3,9 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { API_SCOPES, type ApiScope } from '../../../shared/types.js';
+import { API_SCOPES, DEFAULT_PROFILE_ID, type ApiScope } from '../../../shared/types.js';
+import { OBS_BODY_LIMIT, OBS_POSTS_PER_MINUTE, ObsEventsBody, obsStoreFor, parseObsEvents } from './obs.js';
+import { grabWithFfmpeg, previewServiceFor } from './previews.js';
 import type { AppMessage } from '../events.js';
 import type { AppServices } from '../services.js';
 import { APP_ID_RE, APP_KIND_RE, issuesText, overlaysFor, parseAppRegistration, publicApp } from './hub.js';
@@ -90,6 +92,12 @@ export function registerHubRoutes(app: FastifyInstance, ctx: V1Context): void {
   const pairingLimiter = new SlidingWindowLimiter(PAIRINGS_PER_MINUTE_PER_IP, 60_000, ctx.now);
   const pollLimiter = new SlidingWindowLimiter(PAIRING_POLLS_PER_MINUTE_PER_IP, 60_000, ctx.now);
   const messageId = createUlidGenerator(ctx.now);
+  const obsLimiter = new SlidingWindowLimiter(OBS_POSTS_PER_MINUTE, 60_000, ctx.now);
+  const obsStore = obsStoreFor(services);
+  const previews = ctx.previews ?? previewServiceFor(services, () => ({
+    online: (profileId, feed) => services.media.feed(profileId, feed).online,
+    grab: (profileId, feed) => grabWithFfmpeg(services.config.ffmpegBin, services.media.readUrl(profileId, feed)),
+  }));
 
   /** The `{id}` profile of a path, checked against the token; sends the problem and returns null otherwise. */
   const pathProfile = (req: FastifyRequest, reply: FastifyReply): string | null => {
@@ -180,6 +188,76 @@ export function registerHubRoutes(app: FastifyInstance, ctx: V1Context): void {
     if (existing.tokenId !== token.id) return sendProblem(reply, 409, 'app_owned', `"${id}" was registered by another token.`);
     services.apps.remove(id);
     return reply.code(204).send();
+  });
+
+  // ---- OBS events (v1.4, §10) ----
+
+  app.post('/apps/:appId/events', { preHandler: requireToken('obs:write'), bodyLimit: OBS_BODY_LIMIT }, async (req, reply) => {
+    const { token } = authOf(req);
+    const id = params(req).appId;
+    if (typeof id !== 'string' || !APP_ID_RE.test(id)) return sendProblem(reply, 400, 'invalid', 'App id: [a-z0-9-], 1 to 40 characters');
+    const rate = obsLimiter.hit(token.id);
+    if (!rate.ok) {
+      reply.header('retry-after', String(rate.retryAfterSec));
+      return sendProblem(reply, 429, 'rate_limited', `Over ${OBS_POSTS_PER_MINUTE} event batches per minute for this token. Retry in ${rate.retryAfterSec} s.`);
+    }
+    const appRecord = services.apps.get(id);
+    if (!appRecord) return sendProblem(reply, 404, 'not_found', `No app is registered as "${id}": register it first (PUT /api/v1/apps/${id}).`);
+    if (appRecord.tokenId !== token.id) return sendProblem(reply, 409, 'app_owned', `"${id}" was registered by another token.`);
+    // The profile: the token's own, else ?profile=, else the default profile.
+    const p = resolveProfile(token, query(req).profile, DEFAULT_PROFILE_ID);
+    if (!p.ok) return sendProblem(reply, p.status, p.code, p.detail);
+    const profileId = p.profile ?? DEFAULT_PROFILE_ID;
+    const parsed = ObsEventsBody.safeParse(req.body ?? {});
+    if (!parsed.success) return sendProblem(reply, 400, 'invalid', issuesText(parsed.error));
+
+    const now = ctx.now();
+    const { events, ignored } = parseObsEvents(parsed.data.events, now);
+    let accepted = 0;
+    let duplicates = 0;
+    for (const ev of events) {
+      const fresh = obsStore.apply(profileId, id, ev, now);
+      accepted++;
+      if (fresh) services.bus.emit('obs-event', { appId: id, profileId, type: ev.type, id: ev.id, ts: ev.ts, data: ev.data });
+      else duplicates++;
+    }
+    services.apps.heartbeat(token, id); // sending events keeps the app online
+    return reply.code(202).header('cache-control', 'no-store').send({ accepted: accepted - duplicates, ignored: ignored + duplicates });
+  });
+
+  app.get('/profiles/:id/obs', { preHandler: requireToken('status:read') }, async (req, reply) => {
+    const id = pathProfile(req, reply);
+    if (id === null) return reply;
+    // Apps that unregistered since are left out; `online` follows the hub's 90 s presence rule.
+    const apps = obsStore.view(id).flatMap((a) => {
+      const registered = services.apps.get(a.appId);
+      return registered ? [{ ...a, online: registered.online }] : [];
+    });
+    return reply.header('cache-control', 'no-store').send({ apps });
+  });
+
+  // ---- feed previews (v1.4, §10) ----
+
+  // ?access_token= is accepted too, so an <img> (or a phone's image loader) can show it.
+  app.get('/profiles/:id/previews/:feed', { preHandler: requireToken('status:read', true) }, async (req, reply) => {
+    const id = pathProfile(req, reply);
+    if (id === null) return reply;
+    const feed = params(req).feed;
+    if (feed !== 'landscape' && feed !== 'vertical') return sendProblem(reply, 404, 'not_found', 'Feed: landscape or vertical.');
+    let preview;
+    try {
+      preview = await previews.get(id, feed);
+    } catch (err) {
+      services.log.warn({ profileId: id, feed, error: err instanceof Error ? err.message : String(err) }, 'feed preview failed');
+      reply.header('retry-after', '5');
+      return sendProblem(reply, 503, 'unavailable', "Couldn't take a preview of the feed right now; retry in a few seconds.");
+    }
+    if (!preview) return sendProblem(reply, 404, 'feed_offline', `The ${feed} feed is offline (OBS isn't sending it).`);
+    return reply
+      .header('content-type', 'image/jpeg')
+      .header('cache-control', 'no-store')
+      .header('x-preview-at', new Date(preview.at).toISOString())
+      .send(preview.jpeg);
   });
 
   // ---- app-to-app messages ----

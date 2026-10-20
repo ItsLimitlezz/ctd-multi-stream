@@ -37,6 +37,10 @@ export type ApiEventType =
   | 'profiles.changed'
   | 'apps.changed'
   | 'app.message'
+  | 'obs.feed.state'
+  | 'obs.feed.stats'
+  | 'obs.output'
+  | 'obs.scene'
   | 'system.reset';
 
 /** Scope each event type needs. system.reset is a control frame every stream may get. */
@@ -64,6 +68,10 @@ export const EVENT_SCOPES: Record<ApiEventType, ApiScope | null> = {
   'profiles.changed': 'status:read',
   'apps.changed': 'apps:read',
   'app.message': 'apps:read',
+  'obs.feed.state': 'status:read',
+  'obs.feed.stats': 'status:read',
+  'obs.output': 'status:read',
+  'obs.scene': 'status:read',
   'system.reset': null,
 };
 
@@ -71,10 +79,10 @@ export const EVENT_TYPES = Object.keys(EVENT_SCOPES) as ApiEventType[];
 
 export interface EnvelopeSource {
   connector: typeof CONNECTOR;
-  /** Destination id, or 'core' for session-wide events. */
+  /** Destination id, 'core' for session-wide events, or the sending app's id for obs.* events. */
   connection: string;
-  /** PlatformId, or 'core'. */
-  platform: PlatformId | typeof CORE;
+  /** PlatformId, 'core', or 'obs' (obs.* events from a connected app, v1.4). */
+  platform: PlatformId | typeof CORE | 'obs';
   /**
    * Profile the event belongs to, or null for events about no single profile (profiles.changed,
    * apps.changed, app.message without a profile, notices for the whole server, system.reset).

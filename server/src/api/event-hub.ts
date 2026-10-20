@@ -25,7 +25,7 @@ import {
   type ProfileSummary,
   type SessionState,
 } from '../../../shared/types.js';
-import type { AppMessage, EventBus } from '../events.js';
+import type { AppMessage, EventBus, ObsEvent } from '../events.js';
 import type { AppServices } from '../services.js';
 import { alertEventData } from './alert-map.js';
 import { apiMessageFromUser, chatMessageData, moderationEvent } from './chat-map.js';
@@ -249,6 +249,7 @@ export class EventHub {
       bus.on('profiles-changed', () => this.guard(() => this.onProfilesChanged())),
       bus.on('apps-changed', () => this.guard(() => this.onAppsChanged())),
       bus.on('app-message', (m) => this.guard(() => this.onAppMessage(m))),
+      bus.on('obs-event', (e) => this.guard(() => this.onObsEvent(e))),
     );
   }
 
@@ -537,6 +538,11 @@ export class EventHub {
       audience = apps.find((a) => a.id === m.to)?.tokenId ?? NOBODY;
     }
     this.publish('app.message', coreSource(m.profileId), apiAppMessage(m, this.now()), audience);
+  }
+
+  /** obs.* from a connected app: its data plus who sent it (`appId`), its id and its time (`at`). */
+  private onObsEvent(e: ObsEvent): void {
+    this.publish(e.type as ApiEventType, source(e.appId, 'obs', e.profileId), { ...e.data, appId: e.appId, eventId: e.id, at: e.ts });
   }
 
   // -------------------------------------------------------------------------

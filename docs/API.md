@@ -57,6 +57,7 @@ Authorization: Bearer ctd_pat_3fK9wQ1v…
 | `ingest:read` | `GET /profiles/{id}/ingest`: OBS server URL and **stream keys** (only for apps that configure OBS) |
 | `apps:read` | `GET /apps`, `GET /profiles/{id}/overlays`, `apps.changed` and `app.message` events |
 | `apps:write` | `PUT`/`DELETE /apps/{id}`, `POST /apps/{id}/heartbeat`, `POST /messages` |
+| `obs:write` | `POST /apps/{id}/events`: OBS events into the hub (the CTD OBS plugin; v1.4, §10) |
 
 A token may also be **limited to one profile** (§9.1). `/`, `/events` and `/events/poll` return
 whatever the token's scopes allow. Browser-only fallback: `GET /events` also accepts
@@ -771,11 +772,94 @@ Settings → API).
   register its overlays with their assigned `profileId` (`PUT /apps/ctd-overlay`) → listen for
   `app.message` (e.g. `overlay.create` from the OBS plugin) and reply.
 
+## 10. OBS events and feed previews (v1.4)
+
+CTD Multi-Stream relays what OBS knows — sources losing or regaining signal, outputs starting and
+stopping, scene changes — and previews of the feeds, to apps that connect over the internet with a
+token (e.g. **CTD Live mobile**). Nothing here is public: every route needs a token, like the rest
+of the API (use the HTTPS address from outside your network).
+
+### `POST /api/v1/apps/{appId}/events` — `obs:write`
+
+The CTD OBS plugin sends batches of events. `appId` is the id it registered (`PUT /apps/{appId}`);
+only the token that registered it may send for it (`409 app_owned`), an unregistered id is `404
+not_found` (register first). Sending also counts as the app's heartbeat. The profile is the token's,
+else `?profile=<id>`, else the default profile.
+```json
+{ "events": [
+  { "id": "a1b2", "type": "obs.feed.state", "ts": 1791830000123,
+    "data": { "source": { "name": "Club cam", "path": "live/club", "server": "srt://…" },
+              "state": "NO_SIGNAL", "previous": "LIVE", "gapMs": 0 } },
+  { "id": "a1b3", "type": "obs.output", "ts": 1791830000200,
+    "data": { "output": "main", "canvas": "landscape", "state": "live" } }
+] }
+```
+→ `202 { "accepted": 2, "ignored": 0 }`. Limits: ≤ 50 events per request, `data` ≤ 8 KB each, body
+≤ 64 KB, 120 requests/minute per token (one batch a second fits). **Unknown types, malformed events
+and duplicate `id`s (seen in the last 10 minutes) are ignored and counted, never refused**, so a
+newer plugin keeps working with an older server. `id` ≤ 64 characters, unique per app. `ts` is
+epoch ms on the hub's clock (use your `/clock` offset); one more than 5 minutes off is replaced by
+the server's time.
+
+| Type | `data` | Kept as |
+|---|---|---|
+| `obs.feed.state` | `{ source: { name, path?, server? }, state: CONNECTING \| LIVE \| STALLED \| RECONNECTING \| NO_SIGNAL, previous?, gapMs? }` | the source's state |
+| `obs.feed.stats` | `{ source: { name }, fps, width, height, latenessMs, resyncs, reconnects, decoder }` | the source's `stats` (re-emitted at most every 5 s per source) |
+| `obs.output` | `{ output: "main" \| "vertical" \| "record" \| <name>, canvas?, state: starting \| live \| reconnecting \| stopped, error? }` | the output's state |
+| `obs.scene` | `{ canvas: "landscape" \| "vertical", scene }` | the canvas's program scene |
+
+(`obs.issue.raised` / `obs.issue.cleared` and `obs.sync.status` will follow; until then they are
+ignored.) "obs.feed" is a source *inside OBS* (e.g. a remote camera), not CTD's own ingest feeds,
+which are `feed.status`.
+
+**On `/events`** (`status:read`): the same types, `src` = `{ connection: <appId>, platform: "obs",
+profile }`, `data` = what the app sent plus `appId`, `eventId` and `at` (its `ts`).
+
+### `GET /api/v1/profiles/{id}/obs` — `status:read`
+
+The latest OBS state of a profile, per connected app (apps that unregistered are left out):
+```json
+{ "apps": [ { "appId": "ctd-obs-plugin-studio", "online": true, "updatedAt": 1791830000200,
+  "feeds": [ { "source": "Club cam", "state": "NO_SIGNAL", "previous": "LIVE", "gapMs": 0,
+               "stats": { "fps": 59.94, "width": 1920, "height": 1080 },
+               "info": { "name": "Club cam", "path": "live/club" }, "updatedAt": 1791830000123 } ],
+  "outputs": [ { "output": "main", "canvas": "landscape", "state": "live", "updatedAt": 1791830000200 } ],
+  "scenes": [ { "canvas": "vertical", "scene": "Takeover", "updatedAt": 1791829990000 } ] } ] }
+```
+`online` follows the hub's presence rule (seen in the last 90 s); treat an offline app's state as
+stale. Kept in memory: after a server restart it is empty until the plugin sends again.
+
+### `GET /api/v1/profiles/{id}/previews/{feed}` — `status:read`
+
+A JPEG of what OBS sends on the profile's `landscape` or `vertical` feed — OBS's program output (the
+vertical one from Aitum Vertical). 640 px wide, one keyframe, made on request and cached 5 s, so
+poll every 3–5 s while showing it. `?access_token=<token>` works too, for image loaders that can't
+set headers. Headers: `Content-Type: image/jpeg`, `Cache-Control: no-store`, `X-Preview-At` (when
+the frame was taken). `404 feed_offline` while OBS isn't sending that feed; `503 unavailable` (with
+`Retry-After`) when a frame couldn't be taken — retry.
+
+### Typical set-up: CTD Live mobile
+
+Pair (`kind: "ctd-live-mobile"`, scopes `status:read` + `chat:read`) → `GET /profiles` → per
+profile: `/events?profile=<id>` for `stream.status` (live, total viewers), `destination.down/up`,
+`obs.*` and chat → `GET /profiles/{id}/obs` once on start → poll
+`/profiles/{id}/previews/landscape|vertical` every few seconds while the screen shows them.
+
 ## Changelog
 
 `apiVersion` stays `1`: every change below is additive, so clients written for an earlier v1
 keep working (ignore event types and fields you don't know). `GET /api/v1/openapi.json` reports
 the revision in `info.version`.
+
+### v1.4
+
+- **OBS events (§10):** new scope `obs:write`; `POST /apps/{appId}/events` (the CTD OBS plugin sends
+  `obs.feed.state`, `obs.feed.stats`, `obs.output`, `obs.scene`), re-emitted on `/events`
+  (`status:read`, `src.platform: "obs"`), latest state at `GET /profiles/{id}/obs`.
+- **Feed previews (§10):** `GET /profiles/{id}/previews/landscape|vertical` → JPEG (also with
+  `?access_token=`).
+- New problem codes `feed_offline` and `unavailable`.
+- `GET /api/v1/` also reports `build` (`{ commit, date }`) and `apiRevision`.
 
 ### v1.3
 

@@ -15,6 +15,7 @@ import { eventHubFor, type EventHub, type EventReader } from './event-hub.js';
 import { resolveTypes } from './filters.js';
 import { ConcurrencyLimiter, SlidingWindowLimiter, isProblemCode, presentedToken, query, sendProblem, type ProblemCode } from './http.js';
 import { API_REVISION, openApiDocument } from './openapi.js';
+import type { PreviewService } from './previews.js';
 import type { ApiEventType, Envelope } from './types.js';
 import { parseUlid } from './ulid.js';
 import { registerHubRoutes } from './v1-hub.js';
@@ -43,6 +44,8 @@ export interface V1Options extends RouteOptions {
   hub?: EventHub;
   now?: () => number;
   heartbeatMs?: number;
+  /** Test seam: the feed preview service (default: FFmpeg grabs from MediaMTX). */
+  previews?: PreviewService;
 }
 
 export interface Auth {
@@ -71,6 +74,7 @@ export interface V1Context {
    * a limited one).
    */
   resolveProfileView(token: ApiTokenInfo, raw: unknown, fallback: string | null): ProfileResolution;
+  previews?: PreviewService;
 }
 
 const CORS_HEADERS: Record<string, string> = {
@@ -222,7 +226,7 @@ const v1Plugin: FastifyPluginAsync<V1Options> = async (app, opts) => {
     return resolveProfile(token, raw, fallback);
   }
 
-  const ctx: V1Context = { services, hub, now, requireToken, authOf, resolveProfile, resolveProfileView };
+  const ctx: V1Context = { services, hub, now, requireToken, authOf, resolveProfile, resolveProfileView, ...(opts.previews ? { previews: opts.previews } : {}) };
 
   /** The reader of /events and /events/poll for this token and profile view. */
   const readerOf = (token: ApiTokenInfo, profile: string | null): EventReader => ({

@@ -23,6 +23,7 @@ Every request: `Authorization: Bearer ctd_pat_…`
 - `status:read`: streams, profiles.
 - `ingest:read`: OBS keys.
 - `apps:read` / `apps:write`: the hub.
+- `obs:write`: send OBS events (the CTD OBS plugin only).
 
 ## Read
 
@@ -33,6 +34,8 @@ Every request: `Authorization: Bearer ctd_pat_…`
 | `GET /events?profile=<id>&types=chat.*,alert.*` | live stream (SSE), resumable with `Last-Event-ID` |
 | `GET /events/poll?profile=<id>&after=<id>` | the same events by polling: `{ items, next, reset }` |
 | `GET /profiles` | profiles with live status (v1.2) |
+| `GET /profiles/<id>/obs` | latest OBS state (sources, outputs, scenes) from the CTD OBS plugin (v1.4) |
+| `GET /profiles/<id>/previews/landscape` (or `vertical`) | JPEG preview of the feed, 640 px, poll every 3–5 s; `?access_token=` works for image loaders (v1.4) |
 | `GET /clock?profile=<id>&t0=<your epoch ms>` | shared timecode clock (v1.3): server time for NTP-style sync, `timecode.run` / `utc` / `local` as `HH:MM:SS:FF` (see API.md §4) |
 
 A token limited to one profile only ever sees that profile; you don't need `?profile=` with it.
@@ -86,4 +89,4 @@ Always reply, including refusals (`{ "ok": false, "reason": "…" }`).
 - Errors are `application/problem+json`: `{ title, status, detail, code }`. `401` means a bad token, `403 missing_scope` means the token lacks a scope, `429` means slow down (honour `Retry-After`).
 - Limits: 600 requests/min, 5 event streams per token, 120 messages/min.
 
-> **Status:** v1.2 (profiles, hub, pairing) is live on the NAS. v1.3 (`/clock`) ships with the next update.
+> **Status:** v1.3 is live on the NAS. v1.4 (OBS events, previews) ships with the next update.

@@ -18,6 +18,8 @@ export type ProblemCode =
   | 'limit'
   | 'denied'
   | 'expired'
+  | 'feed_offline'
+  | 'unavailable'
   | 'internal';
 
 const TITLES: Record<ProblemCode, string> = {
@@ -32,6 +34,8 @@ const TITLES: Record<ProblemCode, string> = {
   limit: 'Limit reached',
   denied: 'Pairing denied',
   expired: 'Pairing expired',
+  feed_offline: 'Feed offline',
+  unavailable: 'Temporarily unavailable',
   internal: 'Internal error',
 };
 

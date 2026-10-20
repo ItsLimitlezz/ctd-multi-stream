@@ -369,9 +369,10 @@ export interface AuditEntry {
  * ingest:read = a profile's OBS server URL + stream keys (lets the OBS plugin configure OBS)
  * apps:read   = connected apps, their resources (e.g. overlays per profile) and app messages
  * apps:write  = register this app + its resources, send messages to other apps
+ * obs:write   = send OBS events (feed/output/scene state) into the hub (the CTD OBS plugin; v1.4)
  */
-export type ApiScope = 'chat:read' | 'status:read' | 'ingest:read' | 'apps:read' | 'apps:write';
-export const API_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read', 'ingest:read', 'apps:read', 'apps:write'];
+export type ApiScope = 'chat:read' | 'status:read' | 'ingest:read' | 'apps:read' | 'apps:write' | 'obs:write';
+export const API_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read', 'ingest:read', 'apps:read', 'apps:write', 'obs:write'];
 
 // ---------------------------------------------------------------------------
 // Connected apps (the hub): other apps register themselves and what they offer, so apps can

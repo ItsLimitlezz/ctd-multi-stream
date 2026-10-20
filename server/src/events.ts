@@ -51,6 +51,20 @@ export interface AppEvents {
   'pairings-changed': [];
   /** A message from one connected app to another (or to all), relayed by the hub. */
   'app-message': [AppMessage];
+  /** An OBS event a connected app (the CTD OBS plugin) sent into the hub (POST /api/v1/apps/{id}/events). */
+  'obs-event': [ObsEvent];
+}
+
+/** OBS event relayed by the hub (docs/API.md §10). `data` is already size-checked. */
+export interface ObsEvent {
+  appId: string;
+  profileId: string;
+  type: string;
+  /** The app's own event id (deduped by the hub). */
+  id: string;
+  /** Epoch ms on the hub's clock. */
+  ts: number;
+  data: Record<string, unknown>;
 }
 
 /** App-to-app message relayed through the hub (external API `POST /api/v1/messages`). */
