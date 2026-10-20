@@ -812,9 +812,13 @@ the server's time.
 | `obs.feed.stats` | `{ source: { name }, fps, width, height, latenessMs, resyncs, reconnects, decoder }` | the source's `stats` (re-emitted at most every 5 s per source) |
 | `obs.output` | `{ output: "main" \| "vertical" \| "record" \| <name>, canvas?, state: starting \| live \| reconnecting \| stopped, error? }` | the output's state |
 | `obs.scene` | `{ canvas: "landscape" \| "vertical", scene }` | the canvas's program scene |
+| `obs.issue.raised` | `{ id: "<rule>\|<subject>", rule, severity: info \| warning \| critical, source, path?, title, cause?, firstSeen }` | an open issue, until cleared |
+| `obs.issue.cleared` | `{ id, rule? }` | removes the open issue |
 
-(`obs.issue.raised` / `obs.issue.cleared` and `obs.sync.status` will follow; until then they are
-ignored.) "obs.feed" is a source *inside OBS* (e.g. a remote camera), not CTD's own ingest feeds,
+Issue rules from the plugin so far: `camera-offline`, `upstream-loss`, `upstream-slow`,
+`bitrate-collapsed`, `frequent-snaps`, `av-drift`, `audio-rate`, `audio-missing` — raised after a
+hold time, cleared 10 s after the condition ends (low volume); show `title` to people. (`obs.sync.status`
+will follow; until then it is ignored.) "obs.feed" is a source *inside OBS* (e.g. a remote camera), not CTD's own ingest feeds,
 which are `feed.status`.
 
 **On `/events`** (`status:read`): the same types, `src` = `{ connection: <appId>, platform: "obs",
@@ -833,7 +837,9 @@ The latest OBS state of a profile, per connected app (apps that unregistered are
                "stats": { "fps": 59.94, "width": 1920, "height": 1080 },
                "info": { "name": "Club cam", "path": "live/club" }, "updatedAt": 1791830000123 } ],
   "outputs": [ { "output": "main", "canvas": "landscape", "state": "live", "updatedAt": 1791830000200 } ],
-  "scenes": [ { "canvas": "vertical", "scene": "Takeover", "updatedAt": 1791829990000 } ] } ] }
+  "scenes": [ { "canvas": "vertical", "scene": "Takeover", "updatedAt": 1791829990000 } ],
+  "issues": [ { "id": "camera-offline|Club cam", "rule": "camera-offline", "severity": "critical",
+                "source": "Club cam", "title": "Camera offline", "firstSeen": 1791829990000, "updatedAt": 1791829995000 } ] } ] }
 ```
 `online` follows the hub's presence rule (seen in the last 90 s); treat an offline app's state as
 stale. Kept in memory: after a server restart it is empty until the plugin sends again.
@@ -863,7 +869,7 @@ the revision in `info.version`.
 ### v1.4
 
 - **OBS events (§10):** new scope `obs:write`; `POST /apps/{appId}/events` (the CTD OBS plugin sends
-  `obs.feed.state`, `obs.feed.stats`, `obs.output`, `obs.scene`), re-emitted on `/events`
+  `obs.feed.state`, `obs.feed.stats`, `obs.output`, `obs.scene`, `obs.issue.raised` / `obs.issue.cleared`), re-emitted on `/events`
   (`status:read`, `src.platform: "obs"`), latest state at `GET /profiles/{id}/obs`.
 - **Feed previews (§10):** `GET /profiles/{id}/previews/landscape|vertical` → JPEG (also with
   `?access_token=`).

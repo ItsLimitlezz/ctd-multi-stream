@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { jsonBytes } from './json.js';
 
-export const OBS_EVENT_TYPES = ['obs.feed.state', 'obs.feed.stats', 'obs.output', 'obs.scene'] as const;
+export const OBS_EVENT_TYPES = ['obs.feed.state', 'obs.feed.stats', 'obs.output', 'obs.scene', 'obs.issue.raised', 'obs.issue.cleared'] as const;
 export type ObsEventType = (typeof OBS_EVENT_TYPES)[number];
 
 export const OBS_MAX_EVENTS = 50;
@@ -75,6 +75,10 @@ function keyOf(type: ObsEventType, data: Record<string, unknown>): string | null
       return str(data.output);
     case 'obs.scene':
       return str(data.canvas) ?? 'landscape';
+    case 'obs.issue.raised':
+    case 'obs.issue.cleared':
+      // "<rule>|<subject>", e.g. "camera-offline|Club cam".
+      return str(data.id);
   }
 }
 
@@ -95,6 +99,8 @@ export interface ObsAppState {
   feeds: ObsFeedState[];
   outputs: (Record<string, unknown> & { updatedAt: number })[];
   scenes: { canvas: string; scene: unknown; updatedAt: number }[];
+  /** Issues raised and not cleared yet (obs.issue.raised data, plus updatedAt). */
+  issues: (Record<string, unknown> & { updatedAt: number })[];
   updatedAt: number;
 }
 
@@ -102,6 +108,7 @@ interface AppTrack {
   feeds: Map<string, ObsFeedState>;
   outputs: Map<string, Record<string, unknown> & { updatedAt: number }>;
   scenes: Map<string, { canvas: string; scene: unknown; updatedAt: number }>;
+  issues: Map<string, Record<string, unknown> & { updatedAt: number }>;
   updatedAt: number;
   seen: Map<string, number>;
   statsEmitted: Map<string, number>;
@@ -204,6 +211,16 @@ export class ObsStateStore {
         bounded(track.scenes, key, { canvas: key, scene, updatedAt: ev.ts });
         return !prev || !sameJson(prev.scene, scene);
       }
+      case 'obs.issue.raised': {
+        const prev = track.issues.get(key);
+        const next = { ...ev.data, id: key };
+        bounded(track.issues, key, { ...next, updatedAt: ev.ts });
+        return !prev || !sameJson(withoutUpdatedAt(prev), next);
+      }
+      case 'obs.issue.cleared':
+        // Clearing an issue that isn't open (e.g. raised before a server restart) is still passed on.
+        track.issues.delete(key);
+        return true;
     }
   }
 
@@ -217,6 +234,7 @@ export class ObsStateStore {
         feeds: [...t.feeds.values()],
         outputs: [...t.outputs.values()],
         scenes: [...t.scenes.values()],
+        issues: [...t.issues.values()],
         updatedAt: t.updatedAt,
       }))
       .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -239,7 +257,7 @@ export class ObsStateStore {
     }
     let t = apps.get(appId);
     if (!t) {
-      t = { feeds: new Map(), outputs: new Map(), scenes: new Map(), updatedAt: 0, seen: new Map(), statsEmitted: new Map() };
+      t = { feeds: new Map(), outputs: new Map(), scenes: new Map(), issues: new Map(), updatedAt: 0, seen: new Map(), statsEmitted: new Map() };
       apps.set(appId, t);
     }
     return t;

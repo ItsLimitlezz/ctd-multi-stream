@@ -124,6 +124,22 @@ describe('POST /apps/{appId}/events', () => {
     expect(outputs).toEqual([{ ...vertical, state: 'reconnecting', updatedAt: expect.any(Number) }]);
   });
 
+  it('issues: raised ones are kept until cleared, both are re-emitted (a resent raise is not)', async () => {
+    await register();
+    const start = t.hub.cursor();
+    const post = (events: unknown[]) => call('POST', '/api/v1/apps/ctd-obs-plugin-studio/events', obs, { events });
+    const issue = { id: 'camera-offline|Club cam', rule: 'camera-offline', severity: 'critical', source: 'Club cam', title: 'Camera offline', firstSeen: 1 };
+    await post([ev('i1', 'obs.issue.raised', issue), ev('i2', 'obs.issue.raised', { ...issue, id: 'av-drift|Club cam', rule: 'av-drift', severity: 'warning' })]);
+    await post([ev('i3', 'obs.issue.raised', issue)]); // 60 s resend: unchanged
+    let issues = (await call('GET', `/api/v1/profiles/${DEFAULT_PROFILE_ID}/obs`, reader)).json().apps[0].issues;
+    expect(issues.map((i: { id: string }) => i.id).sort()).toEqual(['av-drift|Club cam', 'camera-offline|Club cam']);
+    await post([ev('i4', 'obs.issue.cleared', { id: 'camera-offline|Club cam', rule: 'camera-offline' })]);
+    issues = (await call('GET', `/api/v1/profiles/${DEFAULT_PROFILE_ID}/obs`, reader)).json().apps[0].issues;
+    expect(issues).toEqual([expect.objectContaining({ id: 'av-drift|Club cam', severity: 'warning' })]);
+    const types = (await call('GET', `/api/v1/events/poll?after=${start}&types=obs.issue.*`, reader)).json().items.map((e: Envelope) => e.type);
+    expect(types).toEqual(['obs.issue.raised', 'obs.issue.raised', 'obs.issue.cleared']);
+  });
+
   it('needs obs:write, a registered app owned by the token, and a valid body', async () => {
     await register();
     const noScope = t.token(['apps:write'], 'old plugin token');

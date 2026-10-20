@@ -718,6 +718,11 @@ export function openApiDocument(version: string): Record<string, unknown> {
                   },
                   outputs: { type: 'array', items: { type: 'object', description: 'Latest obs.output data per output, plus updatedAt' } },
                   scenes: { type: 'array', items: { type: 'object', properties: { canvas: str, scene: {}, updatedAt: num } } },
+                  issues: {
+                    type: 'array',
+                    description: 'Open issues (obs.issue.raised not cleared yet)',
+                    items: { type: 'object', properties: { id: str, rule: str, severity: { enum: ['info', 'warning', 'critical'] }, source: str, title: str, firstSeen: num, updatedAt: num } },
+                  },
                 },
               },
             },

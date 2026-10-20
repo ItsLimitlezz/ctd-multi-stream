@@ -41,6 +41,8 @@ export type ApiEventType =
   | 'obs.feed.stats'
   | 'obs.output'
   | 'obs.scene'
+  | 'obs.issue.raised'
+  | 'obs.issue.cleared'
   | 'system.reset';
 
 /** Scope each event type needs. system.reset is a control frame every stream may get. */
@@ -72,6 +74,8 @@ export const EVENT_SCOPES: Record<ApiEventType, ApiScope | null> = {
   'obs.feed.stats': 'status:read',
   'obs.output': 'status:read',
   'obs.scene': 'status:read',
+  'obs.issue.raised': 'status:read',
+  'obs.issue.cleared': 'status:read',
   'system.reset': null,
 };
 
