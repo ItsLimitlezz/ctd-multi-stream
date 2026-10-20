@@ -107,6 +107,29 @@ interface AppTrack {
   statsEmitted: Map<string, number>;
 }
 
+/** Deep equality of JSON values (key order ignored). */
+function sameJson(a: unknown, b: unknown): boolean {
+  return canonical(a) === canonical(b);
+}
+
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (v && typeof v === 'object') {
+    const rec = v as Record<string, unknown>;
+    return `{${Object.keys(rec)
+      .filter((k) => rec[k] !== undefined)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(rec[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v ?? null);
+}
+
+function withoutUpdatedAt<T extends { updatedAt: number }>(v: T): Omit<T, 'updatedAt'> {
+  const { updatedAt: _u, ...rest } = v;
+  return rest;
+}
+
 function bounded<V extends { updatedAt: number }>(map: Map<string, V>, key: string, value: V): void {
   map.delete(key);
   map.set(key, value);
@@ -141,20 +164,15 @@ export class ObsStateStore {
 
     const key = keyOf(ev.type, ev.data)!;
     track.updatedAt = ev.ts;
+    // The plugin resends its full state every 60 s: state is refreshed, but only a change is re-emitted.
     switch (ev.type) {
       case 'obs.feed.state': {
         const prev = track.feeds.get(key);
         const info = typeof ev.data.source === 'object' && ev.data.source !== null ? (ev.data.source as Record<string, unknown>) : null;
-        bounded(track.feeds, key, {
-          source: key,
-          state: ev.data.state ?? null,
-          previous: ev.data.previous ?? null,
-          gapMs: ev.data.gapMs ?? null,
-          stats: prev?.stats ?? null,
-          info,
-          updatedAt: ev.ts,
-        });
-        return true;
+        const next = { state: ev.data.state ?? null, previous: ev.data.previous ?? null, gapMs: ev.data.gapMs ?? null, info };
+        const changed = !prev || !sameJson({ state: prev.state, previous: prev.previous, gapMs: prev.gapMs, info: prev.info }, next);
+        bounded(track.feeds, key, { source: key, ...next, stats: prev?.stats ?? null, updatedAt: ev.ts });
+        return changed;
       }
       case 'obs.feed.stats': {
         const prev = track.feeds.get(key);
@@ -173,12 +191,19 @@ export class ObsStateStore {
         track.statsEmitted.set(key, now);
         return true;
       }
-      case 'obs.output':
-        bounded(track.outputs, key, { ...ev.data, output: key, updatedAt: ev.ts });
-        return true;
-      case 'obs.scene':
-        bounded(track.scenes, key, { canvas: key, scene: ev.data.scene ?? null, updatedAt: ev.ts });
-        return true;
+      case 'obs.output': {
+        const prev = track.outputs.get(key);
+        const next = { ...ev.data, output: key };
+        const changed = !prev || !sameJson(withoutUpdatedAt(prev), next);
+        bounded(track.outputs, key, { ...next, updatedAt: ev.ts });
+        return changed;
+      }
+      case 'obs.scene': {
+        const prev = track.scenes.get(key);
+        const scene = ev.data.scene ?? null;
+        bounded(track.scenes, key, { canvas: key, scene, updatedAt: ev.ts });
+        return !prev || !sameJson(prev.scene, scene);
+      }
     }
   }
 

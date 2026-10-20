@@ -110,6 +110,20 @@ describe('POST /apps/{appId}/events', () => {
     expect(feeds[0].stats).toEqual({ fps: 29 });
   });
 
+  it('the plugin\'s 60 s full-state resend refreshes the state but only changes are re-emitted', async () => {
+    await register();
+    const start = t.hub.cursor();
+    const post = (events: unknown[]) => call('POST', '/api/v1/apps/ctd-obs-plugin-studio/events', obs, { events });
+    const vertical = { output: 'Aitum Stream Suite Output Vertical Stream', canvas: 'vertical', state: 'live' };
+    await post([ev('b-1', 'obs.output', vertical), ev('b-2', 'obs.scene', { canvas: 'landscape', scene: 'Main' })]);
+    await post([ev('b-3', 'obs.output', { ...vertical }), ev('b-4', 'obs.scene', { canvas: 'landscape', scene: 'Main' })]); // resend: same
+    await post([ev('b-5', 'obs.output', { ...vertical, state: 'reconnecting' })]); // a change
+    const items = (await call('GET', `/api/v1/events/poll?after=${start}&types=obs.*`, reader)).json().items as Envelope<Body>[];
+    expect(items.map((e) => `${e.type}:${String(e.data.state ?? e.data.scene)}`)).toEqual(['obs.output:live', 'obs.scene:Main', 'obs.output:reconnecting']);
+    const outputs = (await call('GET', `/api/v1/profiles/${DEFAULT_PROFILE_ID}/obs`, reader)).json().apps[0].outputs;
+    expect(outputs).toEqual([{ ...vertical, state: 'reconnecting', updatedAt: expect.any(Number) }]);
+  });
+
   it('needs obs:write, a registered app owned by the token, and a valid body', async () => {
     await register();
     const noScope = t.token(['apps:write'], 'old plugin token');

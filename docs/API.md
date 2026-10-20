@@ -813,7 +813,11 @@ ignored.) "obs.feed" is a source *inside OBS* (e.g. a remote camera), not CTD's 
 which are `feed.status`.
 
 **On `/events`** (`status:read`): the same types, `src` = `{ connection: <appId>, platform: "obs",
-profile }`, `data` = what the app sent plus `appId`, `eventId` and `at` (its `ts`).
+profile }`, `data` = what the app sent plus `appId`, `eventId` and `at` (its `ts`). Only changes are
+re-emitted: the plugin resends its full state every 60 s, which refreshes the state below without
+repeating events (obs.feed.stats: at most every 5 s per source). The plugin polls OBS once a second,
+so `obs.output` states are `live` / `reconnecting` / `stopped` (no `starting`); Aitum Vertical's
+output arrives under its own name ("Aitum Stream Suite Output Vertical Stream", `canvas: "vertical"`).
 
 ### `GET /api/v1/profiles/{id}/obs` — `status:read`
 
