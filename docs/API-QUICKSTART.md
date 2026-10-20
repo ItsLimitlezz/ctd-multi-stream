@@ -1,4 +1,4 @@
-# CTD Multi-Stream API: quick start (for CTD Overlay and other apps)
+# CTD Relay API: quick start (for CTD Overlay and other apps)
 
 Full reference: [API.md](API.md). Everything below is JSON over HTTP.
 
@@ -12,7 +12,7 @@ Full reference: [API.md](API.md). Everything below is JSON over HTTP.
 Every request: `Authorization: Bearer ctd_pat_…`
 
 **Get a token**, either way:
-- **Manual:** in CTD Multi-Stream, go to **Settings → API → New token**, pick scopes (and a profile), and copy the secret. It is shown once.
+- **Manual:** in CTD Relay, go to **Settings → API → New token**, pick scopes (and a profile), and copy the secret. It is shown once.
 - **Pairing** (v1.2, no copying):
   1. Your app sends `POST /pairing` with `{ "appName": "CTD Overlay", "kind": "ctd-overlay", "scopes": ["status:read","chat:read","apps:read","apps:write"], "profileId": null }`. It gets back `{ pairingId, pollSecret, code, approveUrl, interval }`.
   2. Your app shows `code`; the user approves it in **Settings → API**.

@@ -9,7 +9,7 @@ export function AuthLayout({ title, subtitle, children }: { title: ReactNode; su
         <div className="auth-brand">
           <img src="/favicon.svg" alt="" width={40} height={40} />
           <div>
-            <div className="auth-brand-name">CTD Multi-Stream</div>
+            <div className="auth-brand-name">CTD Relay</div>
             <div className="muted small">Self-hosted multistreaming</div>
           </div>
         </div>

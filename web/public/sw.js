@@ -1,4 +1,4 @@
-// CTD Multi-Stream service worker: alert notifications only (web/src/state/alerts.ts).
+// CTD Relay service worker: alert notifications only (web/src/state/alerts.ts).
 //
 // Android browsers refuse `new Notification()` from a page; only a service worker's
 // registration.showNotification() works there. There is deliberately no fetch handler: nothing is

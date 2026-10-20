@@ -79,7 +79,7 @@ async function download(url, file) {
   const total = setTimeout(() => ctrl.abort(new Error('download timed out')), DOWNLOAD_TIMEOUT_MS);
   let idle = setTimeout(() => ctrl.abort(new Error('download stalled')), IDLE_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'ctd-multi-stream-setup' } });
+    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'ctd-relay-setup' } });
     if (!res.ok || !res.body) throw new Error(`GET ${url} -> HTTP ${res.status}`);
     const size = Number(res.headers.get('content-length')) || 0;
     const hash = createHash('sha256');
@@ -111,7 +111,7 @@ async function download(url, file) {
 }
 
 async function fetchText(url) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(60_000), headers: { 'user-agent': 'ctd-multi-stream-setup' } });
+  const res = await fetch(url, { signal: AbortSignal.timeout(60_000), headers: { 'user-agent': 'ctd-relay-setup' } });
   if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`);
   return res.text();
 }

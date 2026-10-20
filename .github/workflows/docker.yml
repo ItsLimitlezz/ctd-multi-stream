@@ -1,4 +1,5 @@
-# Multi-arch image -> ghcr.io/<repository owner>/ctd-multi-stream
+# Multi-arch image -> ghcr.io/<repository owner>/ctd-relay, and the same tags under the old name
+# ghcr.io/<repository owner>/ctd-multi-stream so installs from before the rename keep updating.
 #   push to main      -> :main, :sha-<commit>
 #   tag vX.Y.Z        -> :X.Y.Z, :X.Y, :latest
 #   pull request      -> build only (amd64, not pushed) when packaging files change
@@ -38,10 +39,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # GHCR image names must be lowercase; the repository owner may not be.
-      - name: Image name
+      # GHCR image names must be lowercase; the repository owner may not be. The old name
+      # (ctd-multi-stream, before the rename to CTD Relay) gets every tag too.
+      - name: Image names
         id: image
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ctd-multi-stream" >> "$GITHUB_OUTPUT"
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          {
+            echo "names<<EOF"
+            echo "ghcr.io/${owner}/ctd-relay"
+            echo "ghcr.io/${owner}/ctd-multi-stream"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU (arm64 emulation)
         uses: docker/setup-qemu-action@v4
@@ -61,7 +70,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ steps.image.outputs.name }}
+          images: ${{ steps.image.outputs.names }}
           # flavor latest=auto (default): `latest` comes from the semver (v* tag) rules, never from main.
           # https://github.com/docker/metadata-action#flavor-input
           tags: |
@@ -70,7 +79,7 @@ jobs:
             type=ref,event=branch
             type=sha
           labels: |
-            org.opencontainers.image.title=CTD Multi-Stream
+            org.opencontainers.image.title=CTD Relay
             org.opencontainers.image.licenses=AGPL-3.0-only
 
       - name: Build time

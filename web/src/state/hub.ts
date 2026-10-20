@@ -115,9 +115,9 @@ export function pairingBannerText(pending: readonly Pick<PairingRequest, 'appNam
   if (pending.length === 0) return '';
   if (pending.length === 1) {
     const p = pending[0] as Pick<PairingRequest, 'appName' | 'code'>;
-    return `${p.appName || 'An app'} wants to connect to CTD Multi-Stream (code ${p.code}).`;
+    return `${p.appName || 'An app'} wants to connect to CTD Relay (code ${p.code}).`;
   }
-  return `${pending.length} apps want to connect to CTD Multi-Stream.`;
+  return `${pending.length} apps want to connect to CTD Relay.`;
 }
 
 // ---------------------------------------------------------------------------

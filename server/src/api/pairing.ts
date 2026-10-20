@@ -1,4 +1,4 @@
-// Pairing ("connect to CTD Multi-Stream", docs/API.md §9.3): an app asks for a token without the
+// Pairing ("connect to CTD Relay", docs/API.md §9.3): an app asks for a token without the
 // user copying one. It shows a short code; an admin approves it in Settings → API (choosing the
 // profile and scopes); the app polls with its pollSecret and receives the token once.
 //

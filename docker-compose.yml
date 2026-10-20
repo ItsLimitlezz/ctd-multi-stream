@@ -1,5 +1,5 @@
-# CTD Multi-Stream on a generic Docker host (Linux server, mini PC, VPS, Docker Desktop).
-# TrueNAS: use deploy/truenas/ctd-multi-stream.yaml instead (docs/INSTALL-TRUENAS.md).
+# CTD Relay on a generic Docker host (Linux server, mini PC, VPS, Docker Desktop).
+# TrueNAS: use deploy/truenas/ctd-relay.yaml instead (docs/INSTALL-TRUENAS.md).
 #
 # First start:
 #   cp .env.example .env              # optional settings (image, Let's Encrypt e-mail, domain, ...)
@@ -12,12 +12,14 @@
 #   docker compose exec ctd-multi-stream node dist/server/src/cli.js list-users
 #   docker compose exec ctd-multi-stream node dist/server/src/cli.js reset-password <username>
 
+# Project and service keep their pre-rename name (ctd-multi-stream): renaming them would start a
+# second container next to an existing one.
 name: ctd-multi-stream
 
 services:
   ctd-multi-stream:
     # Prebuilt multi-arch image (amd64 + arm64) from GitHub Container Registry. To use it, set in .env:
-    #   CTD_IMAGE=ghcr.io/itslimitlezz/ctd-multi-stream:latest
+    #   CTD_IMAGE=ghcr.io/itslimitlezz/ctd-relay:latest
     # Without CTD_IMAGE, Compose builds the image from this checkout (`build: .`).
     image: ${CTD_IMAGE:-ctd-multi-stream:local}
     build: .

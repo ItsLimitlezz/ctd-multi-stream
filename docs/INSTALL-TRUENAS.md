@@ -1,6 +1,6 @@
 # Install on TrueNAS
 
-This guide installs CTD Multi-Stream as a custom app on **TrueNAS 24.10 (Electric Eel) or newer**, the releases where apps run on Docker. It covers TrueNAS SCALE and Community Edition (25.x, 26). The image runs on amd64 and arm64.
+This guide installs CTD Relay as a custom app on **TrueNAS 24.10 (Electric Eel) or newer**, the releases where apps run on Docker. It covers TrueNAS SCALE and Community Edition (25.x, 26). The image runs on amd64 and arm64.
 
 What you end up with:
 
@@ -18,17 +18,17 @@ What you end up with:
 ## 1. Create a dataset
 
 1. **Datasets** → select your pool → **Add Dataset**.
-2. Create `apps` first if it doesn't exist, then create `ctd-multi-stream` inside it. If TrueNAS offers a **Dataset Preset**, choose **Apps**.
+2. Create `apps` first if it doesn't exist, then create `ctd-relay` inside it. If TrueNAS offers a **Dataset Preset**, choose **Apps**.
 3. Make sure the built-in **apps** user (uid 568) can write to it: select the dataset → **Permissions** → **Edit**, and give user `apps` (or group `apps`) **Modify** access. The **Apps** preset does this for you.
 
-The full path will be `/mnt/<pool>/apps/ctd-multi-stream`.
+The full path will be `/mnt/<pool>/apps/ctd-relay`.
 
 ## 2. Install the app
 
-1. Open [`deploy/truenas/ctd-multi-stream.yaml`](../deploy/truenas/ctd-multi-stream.yaml) and copy it into a text editor.
-2. Replace `<pool>` with your pool name. (The image is `ghcr.io/itslimitlezz/ctd-multi-stream`; nothing to change there.)
+1. Open [`deploy/truenas/ctd-relay.yaml`](../deploy/truenas/ctd-relay.yaml) and copy it into a text editor.
+2. Replace `<pool>` with your pool name. (The image is `ghcr.io/itslimitlezz/ctd-relay`; nothing to change there. Installed before the rename? Your app, dataset and image keep the `ctd-multi-stream` names; that image keeps getting every update.)
 3. In TrueNAS: **Apps** → **Discover Apps** → the **⋮** menu → **Install via YAML**.
-4. **Name:** `ctd-multi-stream`. Paste the edited YAML into the editor and click **Save**.
+4. **Name:** `ctd-relay`. Paste the edited YAML into the editor and click **Save**.
 
 TrueNAS pulls the image (about 1 GB) and starts the container. Wait until the app shows **Running**.
 
@@ -51,7 +51,7 @@ If you can't use public port 443 (for example, your ISP blocks it), forward anot
 
 The first admin account is protected by a one-time **setup code** printed in the app's log, so a stranger who finds the port first can't claim your instance.
 
-1. **Apps** → **Installed** → **ctd-multi-stream** → **Workloads** → **View Logs**.
+1. **Apps** → **Installed** → **ctd-relay** → **Workloads** → **View Logs**.
 2. Find the line that contains `"setupCode"`, for example `"setupCode":"K7QM-2XRP-9WDH"`.
 3. Open `https://<NAS-IP>:30443`. In the first minutes the certificate is self-signed, so the browser shows a warning. Continue to the site.
 4. Enter the setup code, choose an admin username and a **long, unique password** (at least 10 characters; a passphrase is best).
@@ -77,7 +77,7 @@ On your LAN, `https://<NAS-IP>:30443` shows a name mismatch warning once the Let
 
 ### HTTPS options
 
-Change settings in **Apps** → **Installed** → **ctd-multi-stream** → **Edit**, under `environment:` in the YAML, then **Save**. The app restarts.
+Change settings in **Apps** → **Installed** → **ctd-relay** → **Edit**, under `environment:` in the YAML, then **Save**. The app restarts.
 
 | Setup | Environment |
 |---|---|
@@ -116,7 +116,7 @@ To restore: stop the app, roll back the snapshot or copy the files back into the
 
 Update when you're not streaming: the container restarts, which ends any running session.
 
-- **On `latest`:** if TrueNAS shows **Update** for the app, use it. Otherwise pull the new image under **Apps** → **Configuration** → **Manage Container Images** → **Pull Image** (`ghcr.io/itslimitlezz/ctd-multi-stream`, tag `latest`), then stop and start the app.
+- **On `latest`:** if TrueNAS shows **Update** for the app, use it. Otherwise pull the new image under **Apps** → **Configuration** → **Manage Container Images** → **Pull Image** (`ghcr.io/itslimitlezz/ctd-relay`, tag `latest`; `ctd-multi-stream` for installs from before the rename), then stop and start the app.
 - **On a pinned version:** **Edit** the app, change the tag in `image:`, and **Save**.
 
 The database schema migrates automatically on start. Downgrades are not supported, so snapshot the dataset before upgrading.
@@ -126,7 +126,7 @@ The database schema migrates automatically on start. Downgrades are not supporte
 Five wrong passwords from one address lock the account for that address for 15 minutes; the lockout clears on its own. For a forgotten password or a lost authenticator app:
 
 - **Another admin can still sign in:** they can set a new password or turn off 2FA for that user in **Settings → Users**.
-- **Nobody can sign in:** use the recovery command inside the container. Open **Apps** → **Installed** → **ctd-multi-stream** → **Workloads** → **Shell** (the shell starts in `/app`) and run:
+- **Nobody can sign in:** use the recovery command inside the container. Open **Apps** → **Installed** → **ctd-relay** → **Workloads** → **Shell** (the shell starts in `/app`) and run:
 
   ```sh
   node dist/server/src/cli.js list-users                  # usernames, roles, and who has 2FA on
@@ -147,5 +147,5 @@ Anyone with shell access to the container (or to the TrueNAS host) can do this f
 | Still self-signed after 15 minutes | Port 80 → 30080 forwarding, and the TLS status and last error in **Settings → HTTPS**. |
 | OBS can't connect | OBS and the NAS are on the same network; server `rtmp://<NAS-IP>:1935/live`; the stream key copied exactly from **Settings → OBS setup**. |
 | Lost the setup code | Restart the app: a new code is printed while no admin account exists. |
-| Forgot a password or lost the 2FA authenticator | If another admin can still sign in, they can set a new password or turn off 2FA in **Settings → Users**. Otherwise open **Apps** → **Installed** → **ctd-multi-stream** → **Workloads** → **Shell** and run `node dist/server/src/cli.js list-users` to see the usernames, then `node dist/server/src/cli.js reset-password <username>`. See [Account recovery](#account-recovery). |
+| Forgot a password or lost the 2FA authenticator | If another admin can still sign in, they can set a new password or turn off 2FA in **Settings → Users**. Otherwise open **Apps** → **Installed** → **ctd-relay** → **Workloads** → **Shell** and run `node dist/server/src/cli.js list-users` to see the usernames, then `node dist/server/src/cli.js reset-password <username>`. See [Account recovery](#account-recovery). |
 | `http://<NAS-IP>:30080` opens the TrueNAS login | Port 30080 redirects to the public HTTPS port (443), which on the LAN is TrueNAS itself. Use `https://<NAS-IP>:30443` on the LAN. |

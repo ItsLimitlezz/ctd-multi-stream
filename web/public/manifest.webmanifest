@@ -1,6 +1,6 @@
 {
-  "name": "CTD Multi-Stream",
-  "short_name": "Multi-Stream",
+  "name": "CTD Relay",
+  "short_name": "Relay",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

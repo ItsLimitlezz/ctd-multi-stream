@@ -1,5 +1,5 @@
 // The hub (docs/API.md §9.2): connected apps register themselves and what they offer (overlays…),
-// so other apps find them through CTD Multi-Stream. Registrations are persisted (ConnectedAppsRepo);
+// so other apps find them through CTD Relay. Registrations are persisted (ConnectedAppsRepo);
 // presence (`online` = seen in the last 90 s) is tracked here, and 'apps-changed' is emitted when an
 // app registers, changes, unregisters, or crosses online/offline.
 

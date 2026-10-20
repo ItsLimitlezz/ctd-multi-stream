@@ -3,7 +3,7 @@
 import crypto from 'node:crypto';
 import QRCode from 'qrcode';
 
-export const TOTP_ISSUER = 'CTD Multi-Stream';
+export const TOTP_ISSUER = 'CTD Relay';
 const STEP_SECONDS = 30;
 const DIGITS = 6;
 const WINDOW = 1;

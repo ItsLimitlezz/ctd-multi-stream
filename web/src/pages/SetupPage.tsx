@@ -62,7 +62,7 @@ export default function SetupPage() {
           </p>
           <ol className="auth-steps">
             <li>
-              TrueNAS: <strong>Apps → CTD Multi-Stream → Logs</strong>. Docker: <code>docker compose logs</code> (or <code>docker logs &lt;container&gt;</code>).
+              TrueNAS: <strong>Apps → CTD Relay → Logs</strong>. Docker: <code>docker compose logs</code> (or <code>docker logs &lt;container&gt;</code>).
             </li>
             <li>
               Find the line <code>Setup code: XXXX-XXXX-XXXX</code>. A new code is printed each time the app restarts.

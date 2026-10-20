@@ -1,4 +1,4 @@
-/* CTD Multi-Stream design system. Dark by default, light via prefers-color-scheme.
+/* CTD Relay design system. Dark by default, light via prefers-color-scheme.
    No external fonts or assets (CSP is 'self' only). */
 
 :root {

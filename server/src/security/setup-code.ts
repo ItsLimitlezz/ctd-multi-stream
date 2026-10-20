@@ -36,7 +36,7 @@ export function announceSetupCodeIfNeeded(repos: Repos, log: Logger): void {
   const banner = [
     '',
     line,
-    '  CTD Multi-Stream: first-run setup',
+    '  CTD Relay: first-run setup',
     '',
     `  Setup code:  ${current}`,
     '',

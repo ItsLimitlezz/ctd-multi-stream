@@ -1,6 +1,6 @@
 # OBS setup
 
-CTD Multi-Stream takes two feeds from OBS on your LAN:
+CTD Relay takes two feeds from OBS on your LAN:
 
 | Feed | Sent by | Goes to (defaults) |
 |---|---|---|
@@ -11,7 +11,7 @@ Each destination is bound to one feed, and you can change the routing per destin
 
 ## Get the server and stream keys
 
-In CTD Multi-Stream, open **Settings → OBS setup** (admins only). It shows:
+In CTD Relay, open **Settings → OBS setup** (admins only). It shows:
 
 - **Server:** `rtmp://<NAS-IP>:1935/live`. The host is the address you used to open the web UI. If you opened it through your public address, set **Settings → General → Ingest host** to the NAS's LAN IP so OBS uses the LAN address.
 - **Stream key (landscape):** `landscape?key=…`
@@ -109,7 +109,7 @@ To rehearse without going public, turn on **Test mode** on the dashboard (next t
 
 The app's status and the merged chat can live inside OBS as a dock:
 
-1. In CTD Multi-Stream, open **Settings → API** (admins) and use **OBS dock**. It creates a read-only API token (`status:read` + `chat:read`) named "OBS dock" and shows the dock URL, like `http://192.168.1.20:30080/dock#token=ctd_pat_…`. Copy it.
+1. In CTD Relay, open **Settings → API** (admins) and use **OBS dock**. It creates a read-only API token (`status:read` + `chat:read`) named "OBS dock" and shows the dock URL, like `http://192.168.1.20:30080/dock#token=ctd_pat_…`. Copy it.
 2. In OBS: **Docks → Custom Browser Docks…** (older OBS versions: **View → Docks → Custom Browser Docks…**). Enter a name (for example `CTD`), paste the URL and click **Apply**.
 3. Place the dock where you like. It shows the session (with a TEST badge in test mode), feed bitrates, every destination (red when it is down, with the reason; tick **Alert** to also flash and beep), viewers, and the chat from every platform.
 
@@ -127,7 +127,7 @@ The app relays this destination's feed (normally landscape) to Twitch as a regul
 
 ### OBS sends Dual Format directly (recommended for Dual Format)
 
-OBS sends Dual Format straight to Twitch. CTD Multi-Stream sends **no video** to Twitch: it only keeps the Twitch title in sync and reads Twitch chat, and relays your feeds to every other platform.
+OBS sends Dual Format straight to Twitch. CTD Relay sends **no video** to Twitch: it only keeps the Twitch title in sync and reads Twitch chat, and relays your feeds to every other platform.
 
 1. In OBS **Settings → Stream**, set **Service: Twitch**, connect your account, turn on **Enhanced Broadcasting**, and pick the Aitum Vertical canvas as the additional canvas. Follow Twitch's and Aitum's current Dual Format instructions for your OBS version.
 2. Your main output now goes to Twitch, so the app needs the landscape feed from an extra output. Add one with a multistream plugin, for example the free Aitum Multistream: Custom server `rtmp://<NAS-IP>:1935/live`, key `landscape?key=…`.

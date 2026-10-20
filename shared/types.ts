@@ -376,7 +376,7 @@ export const API_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read', 'ing
 
 // ---------------------------------------------------------------------------
 // Connected apps (the hub): other apps register themselves and what they offer, so apps can
-// find each other through CTD Multi-Stream (e.g. the OBS plugin lists CTD Overlay's overlays
+// find each other through CTD Relay (e.g. the OBS plugin lists CTD Overlay's overlays
 // assigned to a profile and adds them as browser sources).
 // ---------------------------------------------------------------------------
 

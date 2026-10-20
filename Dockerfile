@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 #
-# CTD Multi-Stream: one image with the web UI + API (Node), MediaMTX (RTMP ingest), FFmpeg (relay)
+# CTD Relay: one image with the web UI + API (Node), MediaMTX (RTMP ingest), FFmpeg (relay)
 # and Playwright Chromium (browser-driven platforms). Requires BuildKit (default since Docker 23).
 #
-#   docker build -t ctd-multi-stream .
-#   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/itslimitlezz/ctd-multi-stream .
+#   docker build -t ctd-relay .
+#   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/itslimitlezz/ctd-relay .
 #
 # Node >= 24.7 is required (node:sqlite, crypto.argon2). Bump the tag below for Node security releases:
 # https://hub.docker.com/_/node/tags?name=24-bookworm-slim
@@ -66,7 +66,7 @@ RUN set -eu; \
 # ---------------------------------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS runtime
 
-LABEL org.opencontainers.image.title="CTD Multi-Stream" \
+LABEL org.opencontainers.image.title="CTD Relay" \
       org.opencontainers.image.description="Self-hosted multistreaming: landscape + vertical from OBS to every platform, one title, one chat." \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 

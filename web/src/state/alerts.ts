@@ -308,7 +308,7 @@ function showWithConstructor(N: NotificationCtor, title: string, options: Notifi
 export function showAlertNotification(level: NoticeLevel, message: string, env: AlertEnv = browserEnv()): boolean {
   const N = env.Notification;
   if (notificationStatus(env) !== 'granted' || !N) return false;
-  const title = `${noticeTitle(level)} · CTD Multi-Stream`;
+  const title = `${noticeTitle(level)} · CTD Relay`;
   const options: NotificationOptions = {
     body: message,
     tag: `ctd-${level}-${hashText(message)}`,
@@ -556,7 +556,7 @@ export function disableAlerts(): void {
   setAlertPrefs({ enabled: false });
 }
 
-export const TEST_ALERT_MESSAGE = 'Test alert: this is how CTD Multi-Stream tells you a platform ended the live.';
+export const TEST_ALERT_MESSAGE = 'Test alert: this is how CTD Relay tells you a platform ended the live.';
 
 /** Play the takedown alert once (whatever the on/off setting). */
 export function testAlert(out: AlertOutputs = browserOutputs): AlertResult {

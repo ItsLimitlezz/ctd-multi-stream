@@ -1,4 +1,4 @@
-// Hub admin (Settings → API) [admin]: pending app pairings ("connect to CTD Multi-Stream", approved
+// Hub admin (Settings → API) [admin]: pending app pairings ("connect to CTD Relay", approved
 // here by choosing the profile + scopes) and the connected apps registry. The app side of pairing
 // and registration lives in the external API (server/src/api, docs/API.md §9).
 

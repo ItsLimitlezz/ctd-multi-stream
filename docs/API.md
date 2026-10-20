@@ -1,5 +1,10 @@
 # External API (v1)
 
+> **CTD Relay** was called **CTD Multi-Stream** until October 2026. Only the name changed: the API's
+> identifiers keep the old spelling so existing apps keep working — the envelope `src.connector`
+> and `GET /api/v1/` `name` are `"ctd-multi-stream"`, the `WWW-Authenticate` realm too, and tokens
+> start with `ctd_pat_`.
+
 API for other apps: **CTD Overlay** (merged chat, stream status, overlays per profile), the **CTD
 OBS plugin** (OBS settings per profile, bitrates, which streams are down, chat, overlays), bots and
 scripts. It is separate from the web UI's own session-cookie API.
@@ -604,10 +609,10 @@ Each profile needs its own OBS output: two OBS (or two outputs) can stream two p
 
 ### 9.2 Connected apps (the hub)
 
-Apps register themselves and what they offer so other apps can find them through CTD Multi-Stream
+Apps register themselves and what they offer so other apps can find them through CTD Relay
 instead of being configured with each other's addresses. Example: CTD Overlay registers its
 overlays with the profile each is assigned to; the CTD OBS plugin, connected only to CTD
-Multi-Stream, lists the overlays for its profile and adds them as browser sources.
+Relay, lists the overlays for its profile and adds them as browser sources.
 
 #### `PUT /api/v1/apps/{appId}` — `apps:write`
 Register or update this app; call again at least every 60 s as a heartbeat (or
@@ -716,7 +721,7 @@ its cursor like for any event.
   profile you read) whenever an app registers, updates its registration, unregisters, or goes
   online/offline (noticed within 15 s).
 
-### 9.3 Pairing ("connect to CTD Multi-Stream")
+### 9.3 Pairing ("connect to CTD Relay")
 
 So an app can connect without the user copying tokens: the app asks, the user approves in the web
 UI, the app receives its own token.
@@ -774,7 +779,7 @@ Settings → API).
 
 ## 10. OBS events and feed previews (v1.4)
 
-CTD Multi-Stream relays what OBS knows — sources losing or regaining signal, outputs starting and
+CTD Relay relays what OBS knows — sources losing or regaining signal, outputs starting and
 stopping, scene changes — and previews of the feeds, to apps that connect over the internet with a
 token (e.g. **CTD Live mobile**). Nothing here is public: every route needs a token, like the rest
 of the API (use the HTTPS address from outside your network).

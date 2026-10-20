@@ -52,7 +52,7 @@ export function isReusable(m: TlsMaterial, info: CertInfo, names: CertNames, now
 }
 
 export async function generateSelfSigned(names: CertNames, now = Date.now()): Promise<TlsMaterial> {
-  const pems = await generate([{ name: 'commonName', value: 'CTD Multi-Stream (self-signed)' }], {
+  const pems = await generate([{ name: 'commonName', value: 'CTD Relay (self-signed)' }], {
     keyType: 'ec',
     curve: 'P-256',
     algorithm: 'sha256',

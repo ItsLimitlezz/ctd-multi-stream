@@ -388,7 +388,7 @@ describe('TOTP', () => {
     const totpSetup = setupRes.json<TotpSetupResponse>();
     expect(totpSetup.secret).toMatch(/^[A-Z2-7]{32}$/);
     expect(totpSetup.otpauthUrl).toBe(
-      `otpauth://totp/CTD%20Multi-Stream:admin?secret=${totpSetup.secret}&issuer=CTD%20Multi-Stream`,
+      `otpauth://totp/CTD%20Relay:admin?secret=${totpSetup.secret}&issuer=CTD%20Relay`,
     );
     expect(totpSetup.qrSvg).toContain('<svg');
     const rec = t.repos.users.get(admin.user.id)!;

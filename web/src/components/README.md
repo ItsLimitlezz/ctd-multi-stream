@@ -1,6 +1,6 @@
 # Web UI design system
 
-React 19 components for the CTD Multi-Stream web UI. Import from the barrel (`import { Button, Card } from '../components'`) or from the individual files. Styling lives in `web/src/styles.css`: CSS variables, dark by default, light through `prefers-color-scheme`. There are no external fonts or CDNs, because the CSP is `'self'` only. Inline `style` attributes are allowed.
+React 19 components for the CTD Relay web UI. Import from the barrel (`import { Button, Card } from '../components'`) or from the individual files. Styling lives in `web/src/styles.css`: CSS variables, dark by default, light through `prefers-color-scheme`. There are no external fonts or CDNs, because the CSP is `'self'` only. Inline `style` attributes are allowed.
 
 Rules for pages:
 

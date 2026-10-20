@@ -1,8 +1,8 @@
-# CTD Multi-Stream: Architecture
+# CTD Relay: Architecture
 
 > Status: **draft**. Agreed in design discussion on 2026-10-11. Items marked _(verify)_ get confirmed during Phase 0.
 
-CTD Multi-Stream is a self-hosted, open-source alternative to Restream. It receives a landscape and a vertical feed from OBS and relays each one to the platforms that accept it. It also sets one shared stream title everywhere and combines every platform's chat into one view. It ships as a single Docker image that installs on TrueNAS.
+CTD Relay is a self-hosted, open-source alternative to Restream. It receives a landscape and a vertical feed from OBS and relays each one to the platforms that accept it. It also sets one shared stream title everywhere and combines every platform's chat into one view. It ships as a single Docker image that installs on TrueNAS.
 
 License: **AGPL-3.0**.
 
@@ -118,7 +118,7 @@ Destinations fail independently. One platform failing never blocks the others. T
 Twitch Dual Format uses **Enhanced Broadcasting**: several video tracks (landscape and vertical) inside one Enhanced-RTMP connection, negotiated through Twitch's client configuration endpoint. Restream does not appear to support it, so supporting it would set this project apart.
 
 - **Approach A (preferred):** the server merges the two OBS feeds into one multitrack E-RTMP stream and sends it to Twitch. Risk: Twitch may only accept this from its own config handshake or expected encoder settings.
-- **Approach B (fallback):** OBS + Aitum send Dual Format straight to Twitch. CTD Multi-Stream still manages Twitch's title and chat and relays to everything else. Bandwidth is not a concern at 300+ Mbps upload.
+- **Approach B (fallback):** OBS + Aitum send Dual Format straight to Twitch. CTD Relay still manages Twitch's title and chat and relays to everything else. Bandwidth is not a concern at 300+ Mbps upload.
 
 Phase 0 decides between them.
 
@@ -192,7 +192,7 @@ The web UI is port-forwarded to the internet, so security is a core requirement,
 
 ## 9. Deployment (TrueNAS)
 
-- Image: `ghcr.io/itslimitlezz/ctd-multi-stream:<version>`.
+- Image: `ghcr.io/itslimitlezz/ctd-relay:<version>` (also published as `ctd-multi-stream`, the pre-rename name).
 - Volume: `/data` (database, browser profiles, certificates, logs) on a TrueNAS dataset.
 - Ports: `443` web (forwarded), `80` optional for HTTP-01 (forwarded), `1935` RTMP (LAN only).
 - Install: TrueNAS → Apps → Discover → **Install via YAML** with the compose file from the repo. Later: submit to the TrueNAS community app catalog.

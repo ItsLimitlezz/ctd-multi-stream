@@ -1,22 +1,22 @@
-# CTD Multi-Stream for TrueNAS (24.10 "Electric Eel" or newer: Docker-based apps).
+# CTD Relay for TrueNAS (24.10 "Electric Eel" or newer: Docker-based apps).
 # Full guide: docs/INSTALL-TRUENAS.md
 #
 # Before installing:
-#   1. Datasets -> create  <pool>/apps/ctd-multi-stream  and give the "apps" user (uid 568) Modify
+#   1. Datasets -> create  <pool>/apps/ctd-relay  and give the "apps" user (uid 568) Modify
 #      permission on it (Edit Permissions -> ACL, or set owner user/group to apps).
 #   2. In this file, replace  <pool>  with your pool name.
-# Install: Apps -> Discover Apps -> (three-dot menu) -> Install via YAML -> Name: ctd-multi-stream ->
+# Install: Apps -> Discover Apps -> (three-dot menu) -> Install via YAML -> Name: ctd-relay ->
 #   paste this file -> Save.
-# Setup code for the first login: Apps -> Installed -> ctd-multi-stream -> Workloads -> View Logs,
+# Setup code for the first login: Apps -> Installed -> ctd-relay -> Workloads -> View Logs,
 #   look for "setupCode".
 #
 # Router: forward public TCP 443 -> NAS 30443 and public TCP 80 -> NAS 30080 (Let's Encrypt).
 #   Do NOT forward 1935, and never forward to the NAS's own 80/443 (that is the TrueNAS admin UI).
 
 services:
-  ctd-multi-stream:
+  ctd-relay:
     # latest = newest release. Pin a version (e.g. :0.1.0) to control upgrades.
-    image: ghcr.io/itslimitlezz/ctd-multi-stream:latest
+    image: ghcr.io/itslimitlezz/ctd-relay:latest
     # TrueNAS "apps" user. Must be able to write the dataset below.
     user: "568:568"
     restart: unless-stopped
@@ -42,7 +42,7 @@ services:
     volumes:
       # Database, master.key (decrypts your stored keys/tokens), certificates. Back up this dataset.
       - type: bind
-        source: /mnt/<pool>/apps/ctd-multi-stream
+        source: /mnt/<pool>/apps/ctd-relay
         target: /data
     security_opt:
       - no-new-privileges:true

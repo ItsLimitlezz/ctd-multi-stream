@@ -136,8 +136,8 @@ describe('pairing requests', () => {
 
   it('builds the banner text', () => {
     expect(pairingBannerText([])).toBe('');
-    expect(pairingBannerText([pairing('a')])).toBe('CTD OBS plugin (Studio PC) wants to connect to CTD Multi-Stream (code KQ7-2MX).');
-    expect(pairingBannerText([pairing('a'), pairing('b')])).toBe('2 apps want to connect to CTD Multi-Stream.');
+    expect(pairingBannerText([pairing('a')])).toBe('CTD OBS plugin (Studio PC) wants to connect to CTD Relay (code KQ7-2MX).');
+    expect(pairingBannerText([pairing('a'), pairing('b')])).toBe('2 apps want to connect to CTD Relay.');
   });
 });
 

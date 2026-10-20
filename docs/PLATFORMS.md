@@ -38,7 +38,7 @@ Only admins can manage developer apps, accounts and destinations. Operators can 
 
 1. Turn on two-factor authentication on your Twitch account. The developer console requires it.
 2. Go to [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps) → **Register Your Application**.
-3. **Name:** anything unique, e.g. `CTD Multi-Stream <your name>`.
+3. **Name:** anything unique, e.g. `CTD Relay <your name>`.
 4. **OAuth Redirect URLs:** `http://localhost`. It isn't used (the app signs in with the device code flow), but the form requires one.
 5. **Category:** Broadcaster Suite.
 6. **Client Type:** **Public**.
@@ -88,13 +88,13 @@ Only admins can manage developer apps, accounts and destinations. Operators can 
 
 1. Turn on two-factor authentication on your Kick account. The developer settings require it.
 2. Go to [kick.com/settings/developer](https://kick.com/settings/developer) and create an app.
-3. **Redirect URL:** copy it from **Settings → Developer apps → Kick** in CTD Multi-Stream. It looks like `https://<your-address>/oauth/callback/kick`.
+3. **Redirect URL:** copy it from **Settings → Developer apps → Kick** in CTD Relay. It looks like `https://<your-address>/oauth/callback/kick`.
 4. Enable the scopes the app lists there.
 5. Copy the **Client ID** and **Client Secret** into **Settings → Developer apps → Kick**.
 
 ### Connect
 
-**Accounts → Add account → Kick → Connect** opens Kick's authorization page. After you approve, the browser goes to the redirect URL. If CTD Multi-Stream is reachable at that address and you are logged in, it finishes on its own. If the page doesn't load (for example, you're on the LAN and your router doesn't support NAT loopback), copy the full URL from the address bar and paste it into the app.
+**Accounts → Add account → Kick → Connect** opens Kick's authorization page. After you approve, the browser goes to the redirect URL. If CTD Relay is reachable at that address and you are logged in, it finishes on its own. If the page doesn't load (for example, you're on the LAN and your router doesn't support NAT loopback), copy the full URL from the address bar and paste it into the app.
 
 ### Destination
 

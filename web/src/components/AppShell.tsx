@@ -53,9 +53,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             {navOpen ? <CloseIcon /> : <MenuIcon />}
           </button>
-          <Link to="/" className="brand" aria-label="CTD Multi-Stream home">
+          <Link to="/" className="brand" aria-label="CTD Relay home">
             <img src="/favicon.svg" alt="" width={26} height={26} />
-            <span className="brand-text">CTD Multi-Stream</span>
+            <span className="brand-text">CTD Relay</span>
           </Link>
           <ProfileSwitcher />
           <nav id="main-nav" className={cx('nav', navOpen && 'is-open')} aria-label="Main">
@@ -91,7 +91,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-const REPO_URL = 'https://github.com/ItsLimitlezz/ctd-multi-stream';
+const REPO_URL = 'https://github.com/ItsLimitlezz/ctd-relay';
 
 /** "v0.1.0 · build d6b0c9e (Oct 17, 01:30)" — which server build is running, so tests name it. */
 export function versionLabel(v: VersionResponse): { version: string; build: string } {
@@ -125,7 +125,7 @@ function AppFooter() {
   const label = versionLabel(info);
   return (
     <footer className="app-footer muted small">
-      CTD Multi-Stream {label.version} ·{' '}
+      CTD Relay {label.version} ·{' '}
       {info.commit ? (
         <a href={`${REPO_URL}/commit/${info.commit}`} target="_blank" rel="noreferrer">
           {label.build}

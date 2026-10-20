@@ -60,7 +60,7 @@ import {
   validateTokenForm,
 } from './settings-helpers';
 
-export const API_DOCS_URL = 'https://github.com/ItsLimitlezz/ctd-multi-stream/blob/main/docs/API.md';
+export const API_DOCS_URL = 'https://github.com/ItsLimitlezz/ctd-relay/blob/main/docs/API.md';
 
 type Profiles = readonly ProfileSummary[] | null;
 
@@ -786,7 +786,7 @@ export function ConnectedAppsCard({
   return (
     <Card
       title="Connected apps"
-      subtitle="Apps register here with what they offer, e.g. the overlays CTD Overlay assigned to each profile, so other apps (the CTD OBS plugin) find them through CTD Multi-Stream and can message each other."
+      subtitle="Apps register here with what they offer, e.g. the overlays CTD Overlay assigned to each profile, so other apps (the CTD OBS plugin) find them through CTD Relay and can message each other."
       flush
     >
       <div style={{ marginTop: 10 }}>{body}</div>
@@ -942,7 +942,7 @@ export function DockCard({
             In OBS: <strong>Docks → Custom Browser Docks…</strong> (older OBS: <strong>View → Docks → Custom Browser Docks</strong>).
           </li>
           <li>
-            Dock Name: <strong>CTD Multi-Stream</strong>. URL: paste the dock URL. Click <strong>Apply</strong>.
+            Dock Name: <strong>CTD Relay</strong>. URL: paste the dock URL. Click <strong>Apply</strong>.
           </li>
           <li>The dock opens as a panel; drag it next to your other docks.</li>
         </ol>
@@ -969,7 +969,7 @@ export function AccessCard({ access }: { access: ApiAccessInfo }) {
     <Card title="Connect an app" subtitle="Where other apps reach the API (v1). Every request needs a token from the list above.">
       <div className="stack">
         <p className="small">
-          Apps with a <strong>Connect to CTD Multi-Stream</strong> option (CTD Overlay, the CTD OBS plugin) only need the address
+          Apps with a <strong>Connect to CTD Relay</strong> option (CTD Overlay, the CTD OBS plugin) only need the address
           below: they ask to connect, and you approve them on this page with the profile and permissions of your choice. No token
           to copy.
         </p>

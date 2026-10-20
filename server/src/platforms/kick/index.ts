@@ -79,7 +79,7 @@ export const kickInfo: PlatformInfo = {
     ],
     instructions: [
       '1. Turn on two-factor authentication in your Kick account settings (Kick requires it for developer apps).',
-      '2. Open kick.com/settings/developer and create a new app (any name, e.g. "CTD Multi-Stream").',
+      '2. Open kick.com/settings/developer and create a new app (any name, e.g. "CTD Relay").',
       '3. Redirect URL: copy it from this page and paste it exactly.',
       `4. Enable these scopes: ${KICK_SCOPES.join(', ')} (read user, read channel, update channel title, read stream key). Leave webhooks off.`,
       '5. Create the app, then copy its Client ID and Client Secret into the fields here and save.',

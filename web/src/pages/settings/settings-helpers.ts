@@ -291,7 +291,7 @@ export const API_SCOPE_INFO: Readonly<Record<ApiScope, { label: string; help: st
   },
   'apps:write': {
     label: 'Register and message apps',
-    help: 'Register this app and what it offers so other apps can find it, and send messages to other apps through CTD Multi-Stream.',
+    help: 'Register this app and what it offers so other apps can find it, and send messages to other apps through CTD Relay.',
   },
   'obs:write': {
     label: 'Send OBS events',

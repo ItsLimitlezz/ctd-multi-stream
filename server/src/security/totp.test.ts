@@ -101,7 +101,7 @@ describe('HOTP/TOTP', () => {
 describe('provisioning', () => {
   it('builds the otpauth URL', () => {
     expect(otpauthUrl('juan.s', 'ABC234')).toBe(
-      'otpauth://totp/CTD%20Multi-Stream:juan.s?secret=ABC234&issuer=CTD%20Multi-Stream',
+      'otpauth://totp/CTD%20Relay:juan.s?secret=ABC234&issuer=CTD%20Relay',
     );
   });
 

@@ -1,6 +1,6 @@
 # Security
 
-CTD Multi-Stream is meant to be reachable from the internet through a port forward, and it holds the keys to your streaming accounts. This page explains what is exposed, how it is protected, and what to do if something goes wrong.
+CTD Relay is meant to be reachable from the internet through a port forward, and it holds the keys to your streaming accounts. This page explains what is exposed, how it is protected, and what to do if something goes wrong.
 
 ## Reporting a vulnerability
 

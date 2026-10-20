@@ -13,15 +13,15 @@ export const DOCK_HTML = `<!doctype html>
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="color-scheme" content="dark">
-<title>CTD Multi-Stream</title>
+<title>CTD Relay</title>
 <link rel="stylesheet" href="/dock/dock.css">
 </head>
 <body>
 <div id="setup" class="setup" hidden>
-  <h1>CTD Multi-Stream dock</h1>
+  <h1>CTD Relay dock</h1>
   <p id="setup-reason"></p>
   <ol>
-    <li>Open CTD Multi-Stream in your browser and go to <b>Settings → API</b>.</li>
+    <li>Open CTD Relay in your browser and go to <b>Settings → API</b>.</li>
     <li>Click <b>OBS dock</b> (or create a token with <b>status:read</b> and <b>chat:read</b>).</li>
     <li>Copy the dock URL (it ends with <code>/dock#token=ctd_pat_…</code>).</li>
     <li>In OBS: <b>Docks → Custom Browser Docks</b>, paste it as the URL.</li>
@@ -577,7 +577,7 @@ export const DOCK_JS = `(function () {
 
   function start() {
     if (!TOKEN_RE.test(token)) {
-      showSetup(token ? 'The token in the dock URL is not a CTD Multi-Stream API token.' : 'No API token in the dock URL.');
+      showSetup(token ? 'The token in the dock URL is not a CTD Relay API token.' : 'No API token in the dock URL.');
       return;
     }
     setConn('Connecting…');
@@ -607,7 +607,7 @@ export const DOCK_JS = `(function () {
         showSetup('This dock link names a profile this token can’t show (deleted, or another profile’s token). Copy the dock link again in Settings → API.');
         return;
       }
-      setConn('Cannot reach CTD Multi-Stream; retrying…', true);
+      setConn('Cannot reach CTD Relay; retrying…', true);
       setTimeout(start, Math.max(retryMs, err && err.retryAfter ? err.retryAfter * 1000 : 0));
       retryMs = Math.min(retryMs * 2, 30000);
     });

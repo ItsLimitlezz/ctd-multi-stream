@@ -70,7 +70,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
   return {
     openapi: '3.1.0',
     info: {
-      title: 'CTD Multi-Stream external API',
+      title: 'CTD Relay external API',
       version: `${API_REVISION} (server ${version})`,
       description:
         'API for other apps (CTD Overlay, the CTD OBS plugin, bots): status, chat and events per profile, OBS ingest settings, and the hub where apps register what they offer and message each other. Create a token in Settings → API (or pair with POST /pairing) and send it as `Authorization: Bearer ctd_pat_…`. Full guide: docs/API.md.',

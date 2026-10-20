@@ -118,7 +118,7 @@ export const twitchInfo: PlatformInfo = {
     instructions: [
       '1. Turn on two-factor authentication on your Twitch account (the developer console requires it).',
       '2. Open https://dev.twitch.tv/console/apps and click "Register Your Application".',
-      '3. Name: anything unique, e.g. "CTD Multi-Stream <your name>".',
+      '3. Name: anything unique, e.g. "CTD Relay <your name>".',
       '4. OAuth Redirect URLs: http://localhost (the form requires one; it is not used because the app signs in with a device code).',
       '5. Category: Broadcaster Suite.',
       '6. Client Type: Public.',

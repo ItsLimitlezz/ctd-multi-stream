@@ -27,7 +27,7 @@ export const DEFAULT_CHAT_TIMINGS: ChatTimings = { markMs: 1_500, pollMs: 1_000 
  * Posted once into a Practice test live's own comment box (only the account sees Practice lives,
  * and the Instagram app doesn't show your own live), so a rehearsal checks that comments reach the chat.
  */
-export const TEST_COMMENT = 'CTD Multi-Stream chat test ✅';
+export const TEST_COMMENT = 'CTD Relay chat test ✅';
 const TEST_COMMENT_DELAY_MS = 4_000;
 /** No comment read this long after the test comment: log what the reader sees. */
 const TEST_COMMENT_CHECK_MS = 20_000;

@@ -12,7 +12,7 @@ export const DOC_LINKS: { path: string; label: string }[] = [
 
 export function AboutTab({ version }: { version: string | null }) {
   return (
-    <Card title="CTD Multi-Stream" subtitle="Self-hosted multistreaming: one OBS, every platform.">
+    <Card title="CTD Relay" subtitle="Self-hosted multistreaming: one OBS, every platform.">
       <div className="stack">
         <dl className="kv kv-start">
           <dt>Version</dt>

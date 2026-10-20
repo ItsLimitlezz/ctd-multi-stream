@@ -81,7 +81,7 @@ function Root() {
   if (status === 'error') {
     return (
       <div className="full-center">
-        <h1>Can't reach CTD Multi-Stream</h1>
+        <h1>Can't reach CTD Relay</h1>
         <p>{auth.error}</p>
         <Button variant="primary" onClick={auth.retry}>
           Try again
@@ -141,15 +141,15 @@ function Root() {
 }
 
 /**
- * "Chat · CTD Multi-Stream", prefixed with "LIVE" while streaming; with several profiles, the
- * profile's name follows the page ("LIVE · Dashboard · DPRTMNT · CTD Multi-Stream").
+ * "Chat · CTD Relay", prefixed with "LIVE" while streaming; with several profiles, the
+ * profile's name follows the page ("LIVE · Dashboard · DPRTMNT · CTD Relay").
  */
 function DocumentTitle({ label }: { label: string }) {
   const live = useSession()?.status === 'live';
   const { profiles, current } = useProfileContext();
   const profileName = current && profiles && profiles.length > 1 ? current.name : null;
   useEffect(() => {
-    document.title = `${live ? 'LIVE · ' : ''}${label}${profileName ? ` · ${profileName}` : ''} · CTD Multi-Stream`;
+    document.title = `${live ? 'LIVE · ' : ''}${label}${profileName ? ` · ${profileName}` : ''} · CTD Relay`;
   }, [label, live, profileName]);
   return null;
 }

@@ -239,7 +239,7 @@ describe('dock script', () => {
     expect(none.byId['setup-reason']!.textContent).toMatch(/No API token/);
     expect(none.calls).toEqual([]);
     const bad = harness('#token=nope', {});
-    expect(bad.byId['setup-reason']!.textContent).toMatch(/not a CTD Multi-Stream API token/);
+    expect(bad.byId['setup-reason']!.textContent).toMatch(/not a CTD Relay API token/);
   });
 
   it('tells the user when the token is revoked', async () => {

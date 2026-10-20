@@ -1,4 +1,4 @@
-# CTD Multi-Stream
+# CTD Relay
 
 Self-hosted, open-source multistreaming, an alternative to Restream that you run yourself. OBS sends a **landscape** feed (its main output) and a **vertical** feed (the Aitum Vertical plugin) to your own server, which relays each one to the platforms that want it: Twitch, YouTube, Kick, Facebook, X, Instagram, TikTok and any custom RTMP server. One stream title is kept in sync everywhere, and every platform's chat lands in one combined view. It ships as a single Docker image that installs on TrueNAS in a few minutes, and no domain name is needed.
 
@@ -37,13 +37,13 @@ Self-hosted, open-source multistreaming, an alternative to Restream that you run
 
 ### TrueNAS
 
-Follow **[docs/INSTALL-TRUENAS.md](docs/INSTALL-TRUENAS.md)**. In short: create a dataset, then **Apps → Discover Apps → ⋮ → Install via YAML** with [`deploy/truenas/ctd-multi-stream.yaml`](deploy/truenas/ctd-multi-stream.yaml), and forward public ports 443 → 30443 and 80 → 30080 on your router.
+Follow **[docs/INSTALL-TRUENAS.md](docs/INSTALL-TRUENAS.md)**. In short: create a dataset, then **Apps → Discover Apps → ⋮ → Install via YAML** with [`deploy/truenas/ctd-relay.yaml`](deploy/truenas/ctd-relay.yaml), and forward public ports 443 → 30443 and 80 → 30080 on your router.
 
 ### Docker Compose (any Linux host)
 
 ```bash
-git clone https://github.com/ItsLimitlezz/ctd-multi-stream.git && cd ctd-multi-stream
-cp .env.example .env                           # set CTD_IMAGE=ghcr.io/itslimitlezz/ctd-multi-stream:latest,
+git clone https://github.com/ItsLimitlezz/ctd-relay.git && cd ctd-relay
+cp .env.example .env                           # set CTD_IMAGE=ghcr.io/itslimitlezz/ctd-relay:latest,
                                                # or leave it unset to build from source
 mkdir -p data && sudo chown 568:568 data       # the container runs as uid/gid 568
 docker compose up -d
