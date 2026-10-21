@@ -140,7 +140,10 @@ const authPlugin: FastifyPluginAsync<RouteOptions> = async (app, { services }) =
     const path = requestPath(req);
     const api = isApiRequest(req, path);
 
-    if (api && isWebSocketUpgrade(req) && !originMatchesHost(req.headers.origin, req.host)) {
+    // /api/v1 (CTD Live mobile's /api/v1/obs/socket) never uses the session cookie: apps sign in
+    // with a bearer header, which a cross-site page can't add to a WebSocket. Only the web UI's
+    // cookie-signed upgrades need the Origin check.
+    if (api && !path.startsWith('/api/v1/') && isWebSocketUpgrade(req) && !originMatchesHost(req.headers.origin, req.host)) {
       return sendError(reply, 403, 'WebSocket origin not allowed', 'origin');
     }
 

@@ -271,6 +271,8 @@ export interface MediaServer {
   profileRemoved(profileId: string): Promise<void>;
   /** Path under the RTMP server, e.g. 'live'. OBS server URL = rtmp://<host>:<port>/<appName>. */
   readonly appName: string;
+  /** The IP address OBS streams a profile's feeds from (null when it isn't streaming). */
+  publisherAddress?(profileId: string): Promise<string | null>;
 }
 
 /** Supervises one FFmpeg process per destination. Emits 'push' events on the EventBus. */

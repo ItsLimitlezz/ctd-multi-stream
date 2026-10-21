@@ -174,7 +174,8 @@ export function overlaysFor(apps: readonly Pick<ConnectedApp, 'id' | 'name' | 'o
 // ---------------------------------------------------------------------------
 
 export interface AppRegistryDeps {
-  repos: Pick<Repos, 'connectedApps' | 'profiles'>;
+  /** apiTokens: lets a re-paired app take its id back (see canTakeOver); without it ids stay with their token. */
+  repos: Pick<Repos, 'connectedApps' | 'profiles'> & Partial<Pick<Repos, 'apiTokens'>>;
   bus: EventBus;
   log: Pick<Logger, 'info' | 'warn'>;
   now?: () => number;
@@ -232,6 +233,20 @@ export function createAppRegistry(deps: AppRegistryDeps): AppRegistryHandle {
     return app;
   };
 
+  /**
+   * May `token` take over `existing`, registered by another token? Yes when that token was revoked,
+   * or when the app is offline, of the same kind, and `token` is newer than its owner: the same app
+   * paired again (a re-pair on the same machine keeps its fixed app id). A live app never moves.
+   */
+  const canTakeOver = (token: ApiTokenInfo, existing: ConnectedApp, kind: string): boolean => {
+    const tokens = repos.apiTokens?.list();
+    if (!tokens) return false;
+    const owner = tokens.find((t) => t.id === existing.tokenId);
+    if (!owner) return true;
+    if (isOnline(existing.id) || existing.kind !== kind) return false;
+    return Date.parse(token.createdAt) > Date.parse(owner.createdAt);
+  };
+
   const checkPresence = () => {
     let any = false;
     for (const id of lastSeen.keys()) {
@@ -287,10 +302,15 @@ export function createAppRegistry(deps: AppRegistryDeps): AppRegistryHandle {
         dropped.length === 0 ? parsed : { ...parsed, resources: parsed.resources.filter((r) => r.profileId === null || known?.has(r.profileId) === true) };
       if (dropped.length > 0) log.info({ appId: reg.id, resources: dropped.length }, 'hub: resources for unknown profiles left out');
 
-      const existing = repos.connectedApps.get(reg.id);
-      if (existing && existing.tokenId !== token.id) {
-        throw new ApiProblem(409, 'app_owned', `"${reg.id}" was registered by another token; pick another app id.`);
+      const found = repos.connectedApps.get(reg.id);
+      if (found && found.tokenId !== token.id) {
+        if (!canTakeOver(token, found, reg.kind)) {
+          throw new ApiProblem(409, 'app_owned', `"${reg.id}" was registered by another token; pick another app id.`);
+        }
+        log.info({ appId: reg.id, kind: reg.kind, from: found.tokenId, tokenId: token.id }, 'hub: app re-registered by a newer token');
       }
+      // Taken over: counts as a new registration for this token's limits.
+      const existing = found && found.tokenId === token.id ? found : null;
       if (!existing) {
         const all = repos.connectedApps.list();
         if (all.length >= MAX_APPS) throw new ApiProblem(409, 'limit', `At most ${MAX_APPS} apps can be registered; remove unused ones in Settings → API.`);

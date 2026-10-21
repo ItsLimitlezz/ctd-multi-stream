@@ -25,6 +25,8 @@ import type {
   IngestInfo,
   LoginRequest,
   MeResponse,
+  ObsRelayStatus,
+  ObsRelayTestResult,
   OverlayInfo,
   PlatformAppStatus,
   ProfilesResponse,
@@ -36,6 +38,7 @@ import type {
   TotpSetupResponse,
   UpdateAccountRequest,
   UpdateDestinationRequest,
+  UpdateObsRelayRequest,
   UpdateProfileRequest,
   UpdateUserRequest,
   VersionResponse,
@@ -226,6 +229,9 @@ export const api = {
   createConnectOffer: (body: CreateConnectOfferRequest) => post<ConnectOfferResponse>('/api/connect-offers', body),
   connectOfferStatus: (id: string) => get<ConnectOfferStatus>(`/api/connect-offers/${encodeURIComponent(id)}`),
   cancelConnectOffer: (id: string) => del<object>(`/api/connect-offers/${encodeURIComponent(id)}`),
+  obsRelay: () => get<ObsRelayStatus>('/api/obs-relay'),
+  updateObsRelay: (body: UpdateObsRelayRequest) => put<ObsRelayStatus>('/api/obs-relay', body),
+  testObsRelay: () => post<ObsRelayTestResult>('/api/obs-relay/test', {}),
 
   // app pairing + connected apps (Settings → API)
   /** Pending "connect this app" requests, newest first. */

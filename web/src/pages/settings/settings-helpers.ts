@@ -297,6 +297,10 @@ export const API_SCOPE_INFO: Readonly<Record<ApiScope, { label: string; help: st
     label: 'Send OBS events',
     help: "OBS's state — sources losing or regaining signal, outputs starting and stopping, scene changes — for apps like CTD Live mobile to show (the CTD OBS plugin).",
   },
+  'obs:control': {
+    label: 'Control OBS',
+    help: 'Full control of OBS through CTD Relay, from anywhere: scenes, previews, start/stop stream and recording (CTD Live mobile). OBS’s own password stays on this server.',
+  },
 };
 
 /** Permissions a new token starts with (read-only basics; the others are opt-in). */

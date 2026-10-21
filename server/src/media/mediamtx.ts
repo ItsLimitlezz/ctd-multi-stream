@@ -470,6 +470,21 @@ export function createMediaServer({ config, bus, log, repos }: MediaServerOption
   const server: MediaServer = {
     appName: APP_NAME,
 
+    async publisherAddress(profileId) {
+      const entry = findProfile(profileId);
+      if (!entry || !proc) return null;
+      for (const feed of FEEDS) {
+        if (!entry.feeds.get(feed)?.tracker.current().online) continue;
+        try {
+          const address = await api.publisherAddress(feedPath(feed, entry.slug));
+          if (address) return address;
+        } catch (err) {
+          log.debug({ profileId, feed, err: err instanceof Error ? err.message : String(err) }, 'Could not look up the publisher address');
+        }
+      }
+      return null;
+    },
+
     async start() {
       if (running) return;
       running = true;

@@ -374,9 +374,10 @@ export interface AuditEntry {
  * apps:read   = connected apps, their resources (e.g. overlays per profile) and app messages
  * apps:write  = register this app + its resources, send messages to other apps
  * obs:write   = send OBS events (feed/output/scene state) into the hub (the CTD OBS plugin; v1.4)
+ * obs:control = control OBS through Relay's OBS WebSocket relay, /obs/socket (CTD Live mobile; v1.6)
  */
-export type ApiScope = 'chat:read' | 'status:read' | 'ingest:read' | 'apps:read' | 'apps:write' | 'obs:write';
-export const API_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read', 'ingest:read', 'apps:read', 'apps:write', 'obs:write'];
+export type ApiScope = 'chat:read' | 'status:read' | 'ingest:read' | 'apps:read' | 'apps:write' | 'obs:write' | 'obs:control';
+export const API_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read', 'ingest:read', 'apps:read', 'apps:write', 'obs:write', 'obs:control'];
 
 // ---------------------------------------------------------------------------
 // Connected apps (the hub): other apps register themselves and what they offer, so apps can

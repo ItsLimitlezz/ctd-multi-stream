@@ -11,9 +11,10 @@ import { CLAIMS_PER_MINUTE_PER_IP, MESSAGE_DATA_MAX_BYTES, MESSAGE_TYPE_RE, MESS
 import { OBS_BODY_LIMIT, OBS_DATA_MAX_BYTES, OBS_EVENT_TYPES, OBS_MAX_EVENTS, OBS_POSTS_PER_MINUTE } from './obs.js';
 import { PREVIEW_MAX_AGE_MS } from './previews.js';
 import { CONNECT_OFFER_TTL_MS, DEVICE_NAME_MAX, MOBILE_SCOPES } from './connect.js';
+import { MAX_SOCKETS_PER_TOKEN, OBS_SUBPROTOCOL } from './obs-relay.js';
 
 /** Minor revision of the v1 contract (additive changes only; see the changelog in docs/API.md). */
-export const API_REVISION = '1.5';
+export const API_REVISION = '1.6';
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const nullable = (schema: object) => ({ oneOf: [schema, { type: 'null' }] });
@@ -258,6 +259,20 @@ export function openApiDocument(version: string): Record<string, unknown> {
           },
         },
       },
+      '/obs/socket': {
+        get: {
+          summary: 'OBS socket relay: obs-websocket 5 to OBS on the LAN, from anywhere (WebSocket, v1.6)',
+          operationId: 'obsSocket',
+          tags: ['status'],
+          description: `Needs \`obs:control\`. A WebSocket upgrade (subprotocol \`${OBS_SUBPROTOCOL}\`, \`Authorization: Bearer\`). Relay opens OBS's WebSocket with the OBS password saved in Settings → API and passes obs-websocket 5 through unchanged; the Hello has no \`authentication\` (the token signed the phone in). At most ${MAX_SOCKETS_PER_TOKEN} sockets per token. Close codes: 4100 OBS not set up in Relay, 4101 OBS unreachable, 4102 OBS rejected Relay's OBS password, 4103 OBS went away, 4011 token revoked, 1001 Relay restarting; OBS's own 40xx codes pass through. The close reason is a sentence to show. See docs/API.md §12.`,
+          responses: {
+            '101': { description: 'Switching protocols: obs-websocket 5 follows' },
+            '403': problemResponse('The token lacks `obs:control` (`missing_scope`)'),
+            '401': errors['401'],
+            '429': errors['429'],
+          },
+        },
+      },
       '/apps': {
         get: {
           summary: 'Connected apps and their resources',
@@ -356,7 +371,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
           operationId: 'claimConnect',
           tags: ['pairing'],
           security: [],
-          description: `No token. The QR code shown in Settings → API → Connect a phone holds \`ctdrelay://connect?v=1&api=<public API URL>&lan=<LAN API URL>&fp=<certificate SHA-256>&code=<one-time code>\`. Claim once within ${CONNECT_OFFER_TTL_MS / 60_000} minutes; the token is read-only (${MOBILE_SCOPES.join(', ')}). ${CLAIMS_PER_MINUTE_PER_IP} attempts/minute per address.`,
+          description: `No token. The QR code shown in Settings → API → Connect a phone holds \`ctdrelay://connect?v=1&api=<public API URL>&lan=<LAN API URL>&fp=<certificate SHA-256>&code=<one-time code>\`. Claim once within ${CONNECT_OFFER_TTL_MS / 60_000} minutes; the token gets ${MOBILE_SCOPES.join(', ')} (read status and chat, control OBS through GET /obs/socket). ${CLAIMS_PER_MINUTE_PER_IP} attempts/minute per address.`,
           requestBody: {
             required: true,
             content: json({

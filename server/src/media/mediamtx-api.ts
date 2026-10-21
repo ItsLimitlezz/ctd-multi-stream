@@ -17,10 +17,30 @@ const KICK_ROUTES: Record<string, string> = {
   webRTCSession: 'webrtc/sessions',
 };
 
+/** Source type -> connection lookup prefix (RTMP only: that's how OBS publishes). */
+const CONN_ROUTES: Record<string, string> = {
+  rtmpConn: 'rtmp/conns',
+  rtmpsConn: 'rtmps/conns',
+};
+
 export interface MediaMtxApi {
   listPaths(signal?: AbortSignal): Promise<MtxPath[]>;
   /** Disconnect whoever is publishing to `pathName`. Returns false when nobody was. */
   kickPublisher(pathName: string): Promise<boolean>;
+  /** The IP address publishing to `pathName` (OBS's machine), or null when nobody is. */
+  publisherAddress(pathName: string): Promise<string | null>;
+}
+
+/** "192.168.1.50:61234" / "[::ffff:192.168.1.50]:61234" / "[fe80::1]:5" -> the IP alone. */
+export function hostOfRemoteAddr(remoteAddr: unknown): string | null {
+  if (typeof remoteAddr !== 'string' || !remoteAddr) return null;
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(remoteAddr);
+  let host: string;
+  if (bracketed) host = bracketed[1]!;
+  else if (remoteAddr.split(':').length === 2) host = remoteAddr.slice(0, remoteAddr.indexOf(':')); // IPv4:port
+  else host = remoteAddr; // a bare address
+  host = host.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/i, '');
+  return host || null;
 }
 
 export function createMediaMtxApi(port: number, fetchImpl: FetchFn = fetch): MediaMtxApi {
@@ -56,6 +76,15 @@ export function createMediaMtxApi(port: number, fetchImpl: FetchFn = fetch): Med
       const res = await call('POST', `${route}/kick/${encodeURIComponent(source.id)}`);
       await res.body?.cancel().catch(() => {});
       return true;
+    },
+    async publisherAddress(pathName) {
+      const item = (await listPaths()).find((p) => p.name === pathName);
+      const source = item?.source;
+      const route = source?.type ? CONN_ROUTES[source.type] : undefined;
+      if (!source?.id || !route) return null;
+      const res = await call('GET', `${route}/get/${encodeURIComponent(source.id)}`);
+      const conn = (await res.json()) as { remoteAddr?: unknown };
+      return hostOfRemoteAddr(conn.remoteAddr);
     },
   };
 }

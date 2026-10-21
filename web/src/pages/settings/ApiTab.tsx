@@ -1,5 +1,12 @@
 import { useEffect, useId, useReducer, useState, type FormEvent } from 'react';
-import type { ApiAccessInfo, ApprovePairingRequest, ConnectOfferResponse, CreateApiTokenResponse } from '@shared/api';
+import type {
+  ApiAccessInfo,
+  ApprovePairingRequest,
+  ConnectOfferResponse,
+  CreateApiTokenResponse,
+  ObsRelayTestResult,
+  UpdateObsRelayRequest,
+} from '@shared/api';
 import type { ApiScope, ApiTokenInfo, ConnectedApp, PairingRequest, ProfileSummary } from '@shared/types';
 import { API_SCOPES, DEFAULT_PROFILE_ID } from '@shared/types';
 import { api } from '../../api';
@@ -52,6 +59,7 @@ import {
   dockUrl,
   hasErrors,
   orderedScopes,
+  parseWholeNumber,
   relativeTime,
   TOKEN_NAME_MAX,
   tokenModalDismissible,
@@ -178,6 +186,7 @@ export function ApiTab() {
         onDeny={deny}
       />
       <PhoneConnectCard profiles={profiles} defaultProfileId={currentId} onConnected={res.reload} />
+      <ObsRelayCard />
       {!res.data ? (
         <Card>
           {res.error ? (
@@ -1076,8 +1085,9 @@ export function PhoneConnectCard({
         )}
         {offer && state === 'expired' && <div className="alert">That code expired or was replaced. Show a new one.</div>}
         <p className="muted small">
-          The phone gets read-only access{several ? ' to the profile you pick' : ''}: live status, viewers, chat, OBS state and the
-          feed previews. Never your stream keys or settings.
+          The phone can control OBS through CTD Relay (scenes, previews, starting and stopping the stream; set up OBS below) and
+          read{several ? ' the profile you pick' : ''}: live status, viewers, chat and the feed previews. Never your stream keys or
+          settings.
         </p>
         <div className="row" style={{ flexWrap: 'wrap' }}>
           {offer && state === 'waiting' ? (
@@ -1091,6 +1101,153 @@ export function PhoneConnectCard({
           )}
         </div>
       </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OBS on your computer (the phone's OBS socket relay)
+// ---------------------------------------------------------------------------
+
+/** "Connected to OBS 31.1.2 (WebSocket 5.6.2) at 192.168.1.50:4455." */
+export function obsTestText(r: Extract<ObsRelayTestResult, { ok: true }>): string {
+  const what = [r.obsVersion ? `OBS ${r.obsVersion}` : 'OBS', r.obsWebSocketVersion ? `(WebSocket ${r.obsWebSocketVersion})` : null].filter(Boolean).join(' ');
+  return `Connected to ${what} at ${r.host}:${r.port}.`;
+}
+
+/** Where CTD Relay finds OBS's WebSocket server, so phones can control OBS from anywhere. [admin] */
+export function ObsRelayCard() {
+  const res = useApi(() => api.obsRelay(), []);
+  const s = res.data;
+  const [host, setHost] = useState('');
+  const [port, setPort] = useState('');
+  const [password, setPassword] = useState('');
+  const [portError, setPortError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<'save' | 'test' | 'clear' | null>(null);
+  const [test, setTest] = useState<ObsRelayTestResult | null>(null);
+
+  useEffect(() => {
+    if (!s) return;
+    setHost(s.host ?? '');
+    setPort(String(s.port));
+  }, [s?.host, s?.port]);
+
+  const update = async (body: UpdateObsRelayRequest, what: 'save' | 'clear') => {
+    setBusy(what);
+    try {
+      res.setData(await api.updateObsRelay(body));
+      setPassword('');
+      setTest(null);
+      toast.success(what === 'clear' ? 'OBS password removed.' : 'OBS settings saved. Use Test connection to check them.');
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    const p = parseWholeNumber(port);
+    if (p === null || !Number.isInteger(p) || p < 1 || p > 65535) {
+      setPortError("A port from 1 to 65535 (OBS's default is 4455).");
+      return;
+    }
+    setPortError(null);
+    void update({ host: host.trim() || null, port: p, ...(password ? { password } : {}) }, 'save');
+  };
+
+  const runTest = async () => {
+    setBusy('test');
+    setTest(null);
+    try {
+      setTest(await api.testObsRelay());
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card title="OBS on your computer" subtitle="CTD Live mobile controls OBS through CTD Relay, from anywhere: Relay connects to OBS on your network.">
+      {!s ? (
+        res.error ? (
+          <EmptyState
+            title="Couldn't load the OBS settings"
+            description={res.error}
+            action={
+              <Button onClick={res.reload} loading={res.loading}>
+                Try again
+              </Button>
+            }
+          />
+        ) : (
+          <div className="row muted">
+            <Spinner size="sm" /> Loading…
+          </div>
+        )
+      ) : (
+        <form className="stack" onSubmit={save}>
+          <p className="small">
+            In OBS: <strong>Tools → WebSocket Server Settings</strong>, tick <strong>Enable WebSocket server</strong>, then copy the
+            port and password here (<strong>Show Connect Info</strong> shows both). The password stays on this server: phones never
+            see it.
+          </p>
+          <Field
+            label="OBS address"
+            help={
+              s.detectedHost
+                ? `Leave empty to use ${s.detectedHost}, the address OBS streams to Relay from. Enter an address only if OBS runs on another computer.`
+                : 'Leave empty to use the address OBS streams to Relay from (stream once first), or enter the IP of the computer running OBS.'
+            }
+          >
+            <TextInput value={host} placeholder={s.detectedHost ?? '192.168.1.50'} autoComplete="off" spellCheck={false} mono maxLength={253} onValueChange={setHost} />
+          </Field>
+          <Field label="Port" error={portError}>
+            <TextInput value={port} inputMode="numeric" autoComplete="off" mono maxLength={5} invalid={!!portError} onValueChange={setPort} />
+          </Field>
+          <Field
+            label="Password"
+            help={s.hasPassword ? 'Saved. Leave empty to keep it, or type a new one.' : "Leave empty if OBS's Enable Authentication is off."}
+          >
+            <TextInput type="password" value={password} autoComplete="new-password" maxLength={256} onValueChange={setPassword} />
+          </Field>
+          {test &&
+            (test.ok ? (
+              <div className="alert alert-success" role="status">
+                {obsTestText(test)}
+              </div>
+            ) : (
+              <div className="alert alert-danger" role="alert">
+                {test.error}
+              </div>
+            ))}
+          {s.sessions > 0 && (
+            <p className="muted small" role="status">
+              {s.sessions === 1 ? 'A phone is' : `${s.sessions} phones are`} controlling OBS through Relay right now.
+            </p>
+          )}
+          <div className="row" style={{ flexWrap: 'wrap' }}>
+            <Button type="submit" variant="primary" loading={busy === 'save'} disabled={busy !== null && busy !== 'save'}>
+              Save
+            </Button>
+            <Button variant="secondary" loading={busy === 'test'} disabled={busy !== null && busy !== 'test'} onClick={() => void runTest()}>
+              Test connection
+            </Button>
+            {s.hasPassword && (
+              <Button
+                variant="ghost"
+                loading={busy === 'clear'}
+                disabled={busy !== null && busy !== 'clear'}
+                onClick={() => void update({ host: s.host, port: s.port, password: null }, 'clear')}
+              >
+                Remove password
+              </Button>
+            )}
+          </div>
+        </form>
+      )}
     </Card>
   );
 }

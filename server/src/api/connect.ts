@@ -1,6 +1,7 @@
 // "Connect a phone" (docs/API.md §11): an admin shows a QR code in Settings → API; CTD Live mobile
-// scans it — over the LAN or mobile data — and claims a read-only token with the one-time code in
-// it. Offers live in memory only, expire after CONNECT_OFFER_TTL_MS and work once.
+// scans it — over the LAN or mobile data — and claims a token with the one-time code in it (read
+// status and chat, control OBS through /obs/socket). Offers live in memory only, expire after
+// CONNECT_OFFER_TTL_MS and work once.
 
 import crypto from 'node:crypto';
 import QRCode from 'qrcode';
@@ -10,8 +11,11 @@ import type { Repos } from '../services.js';
 export const CONNECT_OFFER_TTL_MS = 5 * 60_000;
 /** Offers open at once (several phones, or a code shown twice). */
 export const MAX_CONNECT_OFFERS = 5;
-/** What a phone may do: read status (incl. OBS state, previews) and chat. Never stream keys or the hub. */
-export const MOBILE_SCOPES: readonly ApiScope[] = ['status:read', 'chat:read'];
+/**
+ * What a phone may do: read status (incl. OBS state, previews) and chat, and control OBS through
+ * the OBS socket relay (obs-relay.ts). Never stream keys, settings or the hub.
+ */
+export const MOBILE_SCOPES: readonly ApiScope[] = ['chat:read', 'status:read', 'obs:control'];
 export const DEVICE_NAME_MAX = 60;
 /** URI scheme in the QR code (CTD Live mobile registers it, so a camera app can open it too). */
 export const CONNECT_URI_SCHEME = 'ctdrelay';

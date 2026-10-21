@@ -411,6 +411,32 @@ export interface ConnectOfferResponse extends ConnectOfferStatus {
   apiUrlIsPrivate: boolean;
 }
 
+/**
+ * "OBS on your computer" [admin]: where the OBS socket relay (/api/v1/obs/socket, CTD Live mobile)
+ * finds OBS's WebSocket server.
+ * GET /api/obs-relay -> ObsRelayStatus ; PUT /api/obs-relay body UpdateObsRelayRequest -> ObsRelayStatus
+ * POST /api/obs-relay/test -> ObsRelayTestResult
+ */
+export interface ObsRelayStatus {
+  /** OBS's address set by hand; null = automatic (the address OBS streams to Relay from). */
+  host: string | null;
+  port: number;
+  hasPassword: boolean;
+  /** Where OBS streams from right now, else where it last did (null = never seen). */
+  detectedHost: string | null;
+  /** Phones connected through the relay right now. */
+  sessions: number;
+}
+export interface UpdateObsRelayRequest {
+  host: string | null;
+  port: number;
+  /** Omitted = keep the saved one; '' or null = none (OBS's "Enable Authentication" is off). */
+  password?: string | null;
+}
+export type ObsRelayTestResult =
+  | { ok: true; host: string; port: number; obsVersion: string | null; obsWebSocketVersion: string | null }
+  | { ok: false; host: string | null; port: number; error: string };
+
 /** GET /api/pairings [admin] -> PairingRequest[] (pending app connections, newest first) */
 /** POST /api/pairings/:id/approve [admin] -> CreateApiTokenResponse (the app receives the token itself; the secret is not shown) */
 export interface ApprovePairingRequest {

@@ -63,6 +63,7 @@ Authorization: Bearer ctd_pat_3fK9wQ1v…
 | `apps:read` | `GET /apps`, `GET /profiles/{id}/overlays`, `apps.changed` and `app.message` events |
 | `apps:write` | `PUT`/`DELETE /apps/{id}`, `POST /apps/{id}/heartbeat`, `POST /messages` |
 | `obs:write` | `POST /apps/{id}/events`: OBS events into the hub (the CTD OBS plugin; v1.4, §10) |
+| `obs:control` | `GET /obs/socket`: control OBS through Relay's OBS socket relay (CTD Live mobile; v1.6, §12) |
 
 A token may also be **limited to one profile** (§9.1). `/`, `/events` and `/events/poll` return
 whatever the token's scopes allow. Browser-only fallback: `GET /events` also accepts
@@ -102,7 +103,7 @@ counts as none).
 | 400 | `invalid` | Bad query parameter or body (`413` when the body is too large) |
 | 404 | `not_found` | Unknown `/api/v1` path, or no app registered under that id |
 | 404 | `unknown_profile` | No profile with that id |
-| 409 | `app_owned` | The app id was registered by another token |
+| 409 | `app_owned` | The app id was registered by another token (that token is revoked, or its app is offline and yours is newer and of the same kind: `PUT /apps/{id}` takes the id over, v1.6) |
 | 409 | `limit` | Too many apps registered (100 in all, 20 per token) |
 | 403 / 410 | `denied` / `expired` | Pairing poll: denied by the admin / expired, collected or unknown (§9.3) |
 | 429 | `rate_limited` | Over the limit (`Retry-After` seconds) |
@@ -888,21 +889,73 @@ The app then calls (no token):
 ```json
 { "code": "<code from the QR>", "deviceName": "Juan's iPhone" }
 ```
-→ `200 { "token": "ctd_pat_…", "tokenId", "name", "scopes": ["chat:read", "status:read"],
+→ `200 { "token": "ctd_pat_…", "tokenId", "name", "scopes": ["chat:read", "status:read", "obs:control"],
 "profileId": "6f1d…" | null, "server": { "name": "CTD Relay", "version", "apiRevision" } }`.
 Store the token securely (Keychain / Keystore); it never expires until revoked in Settings → API,
 where the phone shows up under its `deviceName`. A used, expired or unknown code is `410 expired`
-(show a new QR code); 10 attempts/minute per address. The token is read-only — status, viewers,
-chat, OBS state, previews — never stream keys or settings.
+(show a new QR code); 10 attempts/minute per address. The token reads status, viewers, chat, OBS
+state and previews, and controls OBS through the OBS socket relay (§12, since v1.6; phones
+connected with v1.5 lack `obs:control` and need a new code) — never stream keys or settings.
 
 Use `api` from anywhere; when `lan` answers (same Wi-Fi), prefer it. Both reach the same server,
 so the same token works on both.
+
+## 12. Control OBS from anywhere: the OBS socket relay (v1.6)
+
+CTD Live mobile drives OBS with obs-websocket 5. On mobile data it can't reach OBS on your LAN (and
+OBS's WebSocket port should never be forwarded to the internet), so it connects to Relay instead and
+Relay relays the session to OBS:
+
+```
+phone ──wss://<public address>/api/v1/obs/socket + token──▶ CTD Relay ──ws + OBS's password──▶ OBS :4455 (LAN)
+```
+
+**Set up once:** Settings → API → **OBS on your computer**: OBS's address (empty = the address OBS
+streams to Relay from, detected automatically), port (4455) and the password from OBS → Tools →
+WebSocket Server Settings. **Test connection** checks them. The password stays on the server.
+
+### `GET /api/v1/obs/socket` — `obs:control` (WebSocket)
+
+Upgrade with `Authorization: Bearer ctd_pat_…` and subprotocol `obswebsocket.json` (on the LAN,
+`ws://<NAS-IP>:30080/api/v1/obs/socket` works too, §1). Refused before the upgrade with `401
+unauthenticated`, `403 missing_scope` or `429 rate_limited` (at most 4 sockets per token).
+
+Then it is obs-websocket 5, exactly as OBS speaks it, with one difference: the **`Hello` has no
+`authentication`** (the token signed the phone in), so send `Identify` without it. Relay answers
+OBS's challenge with the saved password and passes your `rpcVersion` and `eventSubscriptions` on.
+After `Identified`, every message goes through unchanged both ways — requests, batches, events,
+`GetSourceScreenshot` previews, `Reidentify`. Frames to Relay are at most 1 MB.
+
+Relay's own close codes (the reason is a sentence to show people):
+
+| Code | Meaning |
+|---|---|
+| 4100 | OBS's address isn't known yet (no address set, OBS never streamed to Relay) |
+| 4101 | Relay can't reach OBS (closed, WebSocket server off, PC asleep) or OBS didn't answer in time; retry with backoff |
+| 4102 | OBS rejected the OBS password saved in Relay (or asks for one and none is saved) |
+| 4103 | OBS went away mid-session; reconnect with backoff |
+| 4011 | The token was revoked: connect again with a new QR code |
+| 4007 | Something other than `Identify` was sent after `Hello` |
+| 1001 | Relay is restarting |
+
+OBS's own `40xx` close codes pass through as they are. Relay pings every 15 s and drops a socket
+silent for 60 s. One OBS per Relay: a token limited to a profile reaches the same OBS. Integration
+guide for the app: [`LIVE-MOBILE-INTEGRATION.md`](LIVE-MOBILE-INTEGRATION.md).
 
 ## Changelog
 
 `apiVersion` stays `1`: every change below is additive, so clients written for an earlier v1
 keep working (ignore event types and fields you don't know). `GET /api/v1/openapi.json` reports
 the revision in `info.version`.
+
+### v1.6
+
+- **OBS socket relay (§12):** new scope `obs:control`; `GET /obs/socket` relays obs-websocket 5 to
+  OBS on the LAN, so CTD Live mobile controls OBS (scenes, multiview previews, outputs) from
+  anywhere. QR-connected phones get `obs:control` (`POST /connect/claim`).
+- **Re-paired apps keep their id:** `PUT /apps/{id}` takes over an id whose token was revoked, or
+  whose app is offline when the new token is newer and the app is of the same `kind` (instead of
+  `409 app_owned`).
 
 ### v1.5
 

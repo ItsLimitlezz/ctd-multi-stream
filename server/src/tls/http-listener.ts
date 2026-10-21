@@ -189,9 +189,10 @@ export function isLanPath(url: string | undefined): boolean {
   return path === '/api/v1' || path.startsWith('/api/v1/') || path === '/dock' || path.startsWith('/dock/') || path.startsWith('/overlay/');
 }
 
-/** WebSocket upgrades LAN clients may make over plain HTTP: the chat overlay feed. */
+/** WebSocket upgrades LAN clients may make over plain HTTP: the chat overlay feed and the OBS socket relay. */
 export function isLanUpgradePath(url: string | undefined): boolean {
-  return lanPath(url) === '/overlay/ws';
+  const path = lanPath(url);
+  return path === '/overlay/ws' || path === '/api/v1/obs/socket';
 }
 
 export interface HttpListener {

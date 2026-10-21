@@ -19,6 +19,7 @@ import type { PreviewService } from './previews.js';
 import type { ApiEventType, Envelope } from './types.js';
 import { parseUlid } from './ulid.js';
 import { registerHubRoutes } from './v1-hub.js';
+import { registerObsSocketRoute } from './v1-obs-socket.js';
 
 export const API_PREFIX = '/api/v1';
 export const RATE_LIMIT_PER_MINUTE = 600;
@@ -473,6 +474,7 @@ const v1Plugin: FastifyPluginAsync<V1Options> = async (app, opts) => {
   });
 
   registerHubRoutes(app, ctx);
+  registerObsSocketRoute(app, ctx);
 };
 
 export default v1Plugin;

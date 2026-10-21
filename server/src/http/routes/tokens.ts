@@ -1,14 +1,17 @@
 // External API tokens (Settings → API) [admin]. The API itself lives under /api/v1 (server/src/api).
 // Tokens are shared by every profile but may be limited to one (`profileId`; null = every profile).
-// Also "Connect a phone": the one-time QR code CTD Live mobile scans (the claim is POST /api/v1/connect/claim).
+// Also "Connect a phone": the one-time QR code CTD Live mobile scans (the claim is POST /api/v1/connect/claim),
+// and "OBS on your computer": where the phone's OBS socket relay (/api/v1/obs/socket) finds OBS.
 
 import fs from 'node:fs';
+import net from 'node:net';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ApiTokensResponse, ConnectOfferResponse, ConnectOfferStatus, CreateApiTokenResponse } from '../../../../shared/api.js';
 import { API_SCOPES, type ApiScope } from '../../../../shared/types.js';
 import { LAN_HTTP_HOST_ENV, LAN_HTTP_PORT_ENV, LAN_HTTP_PORT_SETTING, accessInfo, localIPv4Addresses, parsePortOverride } from '../../api/access.js';
 import { connectOffersFor, connectUri, qrSvg } from '../../api/connect.js';
+import { obsRelayFor } from '../../api/obs-relay.js';
 import { classifyIp } from '../../tls/public-ip.js';
 import type { AppServices } from '../../services.js';
 import { lanClientPolicy } from '../../tls/http-listener.js';
@@ -37,6 +40,20 @@ const CreateBody = z.strictObject({
 });
 const IdParams = z.object({ id: z.string().min(1).max(64) });
 const ConnectOfferBody = z.object({ profileId: tokenProfileSchema });
+
+const HOSTNAME_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+const ObsRelayBody = z.strictObject({
+  /** null or '' = automatic (the address OBS streams to Relay from). */
+  host: z
+    .string()
+    .trim()
+    .max(253)
+    .nullable()
+    .transform((v) => (v ? v.replace(/^\[(.*)\]$/, '$1') : null))
+    .refine((v) => v === null || net.isIP(v) !== 0 || HOSTNAME_RE.test(v), 'an IP address or host name, without http:// or a port'),
+  port: z.number().int().min(1).max(65535),
+  password: z.string().max(256).nullable().optional(),
+});
 
 /** A URL whose host is a private, loopback or link-local address (or a .local / localhost name). */
 export function urlIsPrivate(url: string): boolean {
@@ -175,6 +192,31 @@ const tokenRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) 
     return {};
   });
 
+  // ---- "OBS on your computer": where the OBS socket relay finds OBS (docs/API.md §12) ----
+
+  const relay = obsRelayFor(services);
+
+  app.get('/api/obs-relay', { preHandler: requireAdmin }, async (_req, reply) => {
+    return reply.header('cache-control', 'no-store').send(await relay.status());
+  });
+
+  app.put('/api/obs-relay', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = ObsRelayBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return sendError(reply, 400, parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; '), 'invalid');
+    }
+    const { host, port, password } = parsed.data;
+    await relay.configure({ host, port, ...(password !== undefined ? { password } : {}) });
+    // Never log or audit the password itself.
+    const pw = password === undefined ? '' : password ? ', password changed' : ', password removed';
+    audit(services, req, 'obs_relay.update', `OBS at ${host ?? 'the address OBS streams from'}:${port}${pw}`);
+    return reply.header('cache-control', 'no-store').send(await relay.status());
+  });
+
+  app.post('/api/obs-relay/test', { preHandler: requireAdmin }, async (_req, reply) => {
+    return reply.header('cache-control', 'no-store').send(await relay.test());
+  });
+
   app.delete('/api/tokens/:id', { preHandler: requireAdmin }, async (req, reply) => {
     const parsed = IdParams.safeParse(req.params);
     if (!parsed.success) return sendError(reply, 400, 'Invalid token id', 'invalid');
@@ -182,6 +224,8 @@ const tokenRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) 
     if (!token) return sendError(reply, 404, 'Token not found', 'not_found');
     // Requests with it fail from now on; its open event streams close at their next heartbeat (≤ 15 s).
     repos.apiTokens.delete(token.id);
+    // Phones controlling OBS with it are cut off now, not at the next check.
+    obsRelayFor(services).disconnectToken(token.id);
     // The apps it registered in the hub go with it (best effort: the token is already revoked).
     try {
       services.apps.removeByToken(token.id);

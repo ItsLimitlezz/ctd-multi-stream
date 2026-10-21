@@ -58,7 +58,7 @@ CTD Relay sits in the middle: OBS streams to it, it streams to every platform, a
 
 - **[CTD Overlay](https://github.com/ItsLimitlezz/ctd-overlay)** reads chat, alerts and viewers from Relay and registers its overlays per profile; overlays can follow the OBS scene.
 - **CTD OBS plugin** sets up OBS from Relay (stream keys per profile), adds overlays as browser sources and reports OBS's state back.
-- **CTD Live mobile** watches status, chat, OBS issues and feed previews from your phone.
+- **CTD Live mobile** controls OBS from your phone from anywhere (Relay relays its OBS connection, so OBS is never exposed to the internet), and shows status, chat, OBS issues and feed previews.
 
 All of them use the same documented API: [docs/API.md](docs/API.md) ([quick start](docs/API-QUICKSTART.md)).
 

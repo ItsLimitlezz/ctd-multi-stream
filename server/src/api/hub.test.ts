@@ -106,6 +106,41 @@ describe('register', () => {
     expect(problem(() => registry.heartbeat(token('t1'), 'nope'))).toMatchObject({ statusCode: 404, code: 'not_found' });
   });
 
+  it('a re-paired app takes its id back: owner revoked, or offline + same kind + newer token', () => {
+    const tokens: ApiTokenInfo[] = [];
+    const tk = (id: string, createdAt: string) => {
+      const t = { ...token(id), createdAt };
+      tokens.push(t);
+      return t;
+    };
+    registry.close();
+    registry = createAppRegistry({
+      repos: { profiles, connectedApps: memoryConnectedAppsRepo(now), apiTokens: { list: () => tokens } as never },
+      bus,
+      log: silentLog,
+      now,
+    });
+    const old = tk('old', '2026-10-01T00:00:00.000Z');
+    const plugin = reg('ctd-obs-plugin-studio', { kind: 'ctd-obs-plugin', name: 'CTD OBS plugin' });
+    registry.register(old, plugin);
+
+    // While the old one is online, a newer token can't take the id.
+    const fresh = tk('fresh', '2026-10-17T00:00:00.000Z');
+    expect(problem(() => registry.register(fresh, plugin))).toMatchObject({ code: 'app_owned' });
+    clock += ONLINE_WINDOW_MS + 1;
+    // Offline: an older token, or another kind of app, still can't.
+    const older = tk('older', '2026-09-01T00:00:00.000Z');
+    expect(problem(() => registry.register(older, plugin))).toMatchObject({ code: 'app_owned' });
+    expect(problem(() => registry.register(fresh, { ...plugin, kind: 'ctd-overlay' }))).toMatchObject({ code: 'app_owned' });
+    // The fresh pairing of the same app can.
+    expect(registry.register(fresh, plugin)).toMatchObject({ tokenId: 'fresh', online: true });
+    expect(problem(() => registry.heartbeat(old, 'ctd-obs-plugin-studio'))).toMatchObject({ code: 'app_owned' });
+
+    // Owner revoked: any token may register the id at once, even while it looked online.
+    tokens.splice(tokens.indexOf(fresh), 1);
+    expect(registry.register(older, plugin)).toMatchObject({ tokenId: 'older' });
+  });
+
   it('validates ids, kinds, limits, overlay URLs and unique resource ids', () => {
     const t = token('t1');
     expect(problem(() => registry.register(t, reg('Bad Id')))).toMatchObject({ statusCode: 400, code: 'invalid' });
