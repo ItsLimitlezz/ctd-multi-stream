@@ -812,7 +812,7 @@ the server's time.
 | `obs.feed.state` | `{ source: { name, path?, server? }, state: CONNECTING \| LIVE \| STALLED \| RECONNECTING \| NO_SIGNAL, previous?, gapMs? }` | the source's state |
 | `obs.feed.stats` | `{ source: { name }, fps, width, height, latenessMs, resyncs, reconnects, decoder }` | the source's `stats` (re-emitted at most every 5 s per source) |
 | `obs.output` | `{ output: "main" \| "vertical" \| "record" \| <name>, canvas?, state: starting \| live \| reconnecting \| stopped, error? }` | the output's state |
-| `obs.scene` | `{ canvas: "landscape" \| "vertical", scene, sceneUuid?, previous?, atMs? }` — `previous` only on a real change; `atMs` = the OBS host's clock, for ordering | the canvas's program scene |
+| `obs.scene` | `{ canvas: "landscape" \| "vertical", scene, sceneUuid?, previous?, atMs?, scenes?: [{ name, uuid }] }` — `previous` only on a real change; `atMs` = the OBS host's clock, for ordering; `scenes` = the canvas's full scene list in OBS order | the canvas's program scene, and its scene list (a list-only change updates it without a re-emit; kept when an event leaves it out) |
 | `obs.sync.status` | `{ group, sourceName, state, previous?, lost?, offsetMs?, delayMs? }` | the sync group member's status |
 | `obs.issue.raised` | `{ id: "<rule>\|<subject>", rule, severity: info \| warning \| critical, source, path?, title, cause?, firstSeen }` | an open issue, until cleared |
 | `obs.issue.cleared` | `{ id, rule? }` | removes the open issue |
@@ -956,6 +956,8 @@ the revision in `info.version`.
 - **Re-paired apps keep their id:** `PUT /apps/{id}` takes over an id whose token was revoked, or
   whose app is offline when the new token is newer and the app is of the same `kind` (instead of
   `409 app_owned`).
+- `obs.scene` may carry `scenes: [{name, uuid}]` (the canvas's scene list); `GET /profiles/{id}/obs`
+  keeps it per canvas in `scenes[].scenes`.
 
 ### v1.5
 

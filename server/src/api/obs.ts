@@ -125,6 +125,8 @@ export interface ObsSceneState {
   sceneUuid: unknown;
   /** The OBS host's clock at the change (for ordering), when sent. */
   atMs: unknown;
+  /** The canvas's full scene list ([{name, uuid}], OBS order), when the plugin sends it (v1.6). */
+  scenes?: unknown[];
   updatedAt: number;
 }
 
@@ -235,7 +237,10 @@ export class ObsStateStore {
         const prev = track.scenes.get(key);
         const scene = ev.data.scene ?? null;
         const sceneUuid = ev.data.sceneUuid ?? null;
-        bounded(track.scenes, key, { canvas: key, scene, sceneUuid, atMs: ev.data.atMs ?? null, updatedAt: ev.ts });
+        // The scene list is stored whenever sent (a list-only change updates it without a re-emit) and
+        // kept when an event leaves it out.
+        const list = Array.isArray(ev.data.scenes) ? ev.data.scenes : prev?.scenes;
+        bounded(track.scenes, key, { canvas: key, scene, sceneUuid, atMs: ev.data.atMs ?? null, ...(list ? { scenes: list } : {}), updatedAt: ev.ts });
         return !prev || !sameJson([prev.scene, prev.sceneUuid], [scene, sceneUuid]);
       }
       case 'obs.sync.status': {

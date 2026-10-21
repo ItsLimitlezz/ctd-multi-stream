@@ -157,6 +157,22 @@ describe('POST /apps/{appId}/events', () => {
     expect(state.sync).toEqual([expect.objectContaining({ group: 'cams', sourceName: 'Cam A', state: 'LOCKED' })]);
   });
 
+  it('keeps each canvas’s scene list: a list-only change updates it without a re-emit, an event without one keeps it', async () => {
+    await register();
+    const start = t.hub.cursor();
+    const post = (events: unknown[]) => call('POST', '/api/v1/apps/ctd-obs-plugin-studio/events', obs, { events });
+    const two = [{ name: 'Intro', uuid: 'u-1' }, { name: 'Main', uuid: 'u-2' }];
+    const three = [...two, { name: 'Outro', uuid: 'u-3' }];
+    await post([ev('s1', 'obs.scene', { canvas: 'landscape', scene: 'Main', sceneUuid: 'u-2', scenes: two })]);
+    await post([ev('s2', 'obs.scene', { canvas: 'landscape', scene: 'Main', sceneUuid: 'u-2', scenes: three })]); // a scene added
+    const items = (await call('GET', `/api/v1/events/poll?after=${start}&types=obs.scene`, reader)).json().items as Envelope<Body>[];
+    expect(items).toHaveLength(1);
+    const scenes = async () => (await call('GET', `/api/v1/profiles/${DEFAULT_PROFILE_ID}/obs`, reader)).json().apps[0].scenes;
+    expect(await scenes()).toEqual([expect.objectContaining({ canvas: 'landscape', scene: 'Main', scenes: three })]);
+    await post([ev('s3', 'obs.scene', { canvas: 'landscape', scene: 'Outro', sceneUuid: 'u-3', previous: 'Main' })]); // older plugin
+    expect(await scenes()).toEqual([expect.objectContaining({ scene: 'Outro', scenes: three })]);
+  });
+
   it('needs obs:write, a registered app owned by the token, and a valid body', async () => {
     await register();
     const noScope = t.token(['apps:write'], 'old plugin token');
