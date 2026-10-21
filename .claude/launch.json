@@ -7,7 +7,7 @@
       "runtimeArgs": [
         "-NoProfile",
         "-Command",
-        "$env:TLS_MODE='off'; $env:DATA_DIR='./data-dev'; $env:WEB_PORT='8443'; node dist/server/src/index.js"
+        "$env:TLS_MODE='off'; $env:DATA_DIR='./data-dev'; $env:WEB_PORT='8443'; $env:PUBLIC_IP='203.0.113.7'; $env:RTMP_PORT='19350'; $env:MEDIAMTX_API_PORT='19997'; node dist/server/src/index.js"
       ],
       "port": 8443
     }

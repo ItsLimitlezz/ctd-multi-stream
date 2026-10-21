@@ -1,8 +1,23 @@
-<img src="web/public/favicon.svg" alt="CTD Relay icon" width="96" height="96">
+<p align="center">
+  <img src="web/public/favicon.svg" alt="CTD Relay icon" width="112" height="112">
+</p>
 
-# CTD Relay
+<h1 align="center">CTD Relay</h1>
 
-Self-hosted, open-source multistreaming, an alternative to Restream that you run yourself. OBS sends a **landscape** feed (its main output) and a **vertical** feed (the Aitum Vertical plugin) to your own server, which relays each one to the platforms that want it: Twitch, YouTube, Kick, Facebook, X, Instagram, TikTok and any custom RTMP server. One stream title is kept in sync everywhere, and every platform's chat lands in one combined view. It ships as a single Docker image that installs on TrueNAS in a few minutes, and no domain name is needed.
+<p align="center"><strong>One OBS in, every platform out — self-hosted multistreaming you run on your own server.</strong></p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="docs/INSTALL-TRUENAS.md">Install on TrueNAS</a> ·
+  <a href="docs/API.md">API</a> ·
+  <a href="LICENSE">AGPL-3.0</a>
+</p>
+
+<p align="center">
+  <img src="docs/images/dashboard.png" alt="CTD Relay dashboard while live: both OBS feeds online with bitrates, the shared stream title and the combined chat" width="900">
+</p>
+
+An open-source alternative to Restream that you run yourself. OBS sends a **landscape** feed (its main output) and a **vertical** feed (the Aitum Vertical plugin) to your own server, which relays each one to the platforms that want it: Twitch, YouTube, Kick, Facebook, X, Instagram, TikTok and any custom RTMP server. One stream title is kept in sync everywhere, and every platform's chat lands in one combined view. It ships as a single Docker image that installs on TrueNAS in a few minutes, and no domain name is needed.
 
 > [!NOTE]
 > **Status: early.** The core relay, the API-based platforms and the web UI are the focus of the first releases. Browser-automated platforms (Instagram, TikTok, X, Facebook profile) are **experimental** and may break when those sites change. Relaying both feeds to Twitch as Dual Format is experimental too, and Twitch currently refuses it. Feedback and testers are very welcome.
@@ -16,8 +31,36 @@ Self-hosted, open-source multistreaming, an alternative to Restream that you run
 - **Combined chat** (read-only) from all platforms, plus a chat overlay for an OBS browser source.
 - **Twitch Dual Format**: relay one feed, or let OBS send Dual Format directly while the app manages title and chat (the recommended way to get Dual Format). Relaying both feeds as Dual Format is experimental: Twitch currently refuses it, so use OBS direct.
 - **Built-in browser automation** for platforms without an API: you log in by hand in a live view of the app's browser, and the app creates the live, reads the per-stream key and clicks "Go live".
+- **Profiles.** Independent set-ups (your own channel, a club night…), each with its own accounts, destinations, title and OBS keys, and several can be live at once.
+- **Stream Guard** for Instagram: notices when a live is taken down, starts a fresh one automatically and rotates the link you attach to each live.
+- **A hub for your other apps.** An API with live events, chat, viewers, OBS state and feed previews, plus a shared timecode clock, so [CTD Overlay](https://github.com/ItsLimitlezz/ctd-overlay), the CTD OBS plugin and CTD Live mobile work together through Relay. Phones connect by scanning a QR code, on Wi-Fi or mobile data.
+- **OBS dock**: status, bitrates, destinations and chat in a panel inside OBS.
 - **Secure by default** for a web UI on the internet: automatic HTTPS (Let's Encrypt certificate for your IP, no domain needed), first-run setup code, Argon2id passwords, lockout, CSRF protection, encrypted secrets, roles, audit log, optional 2FA.
 - **Easy to host**: one multi-arch image (amd64 and arm64), TrueNAS "Install via YAML", or Docker Compose anywhere.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/profiles.png" alt="Profiles: independent streaming set-ups that can be live at the same time"><br><sub><b>Profiles</b>: separate set-ups, live at the same time</sub></td>
+    <td width="50%"><img src="docs/images/destinations.png" alt="Destinations grouped by the OBS feed they use"><br><sub><b>Destinations</b>: each one bound to the landscape or vertical feed</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/images/connect-phone.png" alt="Connect a phone: a one-time QR code for CTD Live mobile" width="760"><br><sub><b>Connect a phone</b>: CTD Live mobile scans a one-time QR code and connects over Wi-Fi or mobile data</sub></td>
+  </tr>
+</table>
+
+## How it fits
+
+<p align="center"><img src="docs/images/ctd-family.png" alt="The CTD app family" width="900"></p>
+
+CTD Relay sits in the middle: OBS streams to it, it streams to every platform, and the other CTD apps connect to it instead of to each other.
+
+- **[CTD Overlay](https://github.com/ItsLimitlezz/ctd-overlay)** reads chat, alerts and viewers from Relay and registers its overlays per profile; overlays can follow the OBS scene.
+- **CTD OBS plugin** sets up OBS from Relay (stream keys per profile), adds overlays as browser sources and reports OBS's state back.
+- **CTD Live mobile** watches status, chat, OBS issues and feed previews from your phone.
+
+All of them use the same documented API: [docs/API.md](docs/API.md) ([quick start](docs/API-QUICKSTART.md)).
 
 ## Platforms
 
@@ -81,6 +124,7 @@ TrueNAS: see [Account recovery](docs/INSTALL-TRUENAS.md#account-recovery).
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Running from source, tests, releasing, adding a platform |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design and roadmap |
 | [CONTRACTS.md](docs/CONTRACTS.md) | Module contracts and conventions for contributors |
+| [API.md](docs/API.md) · [API-QUICKSTART.md](docs/API-QUICKSTART.md) | The external API for other apps: events, chat, status, OBS state, previews, pairing, phones |
 
 ## Third-party software
 
