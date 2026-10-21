@@ -20,6 +20,7 @@ import {
   formatDuration,
   formatFps,
   formatResolution,
+  keyframeStatus,
   plural,
 } from '../components/format';
 import { BroadcastIcon, ExternalIcon, EyeIcon, FlaskIcon, LandscapeIcon, RetryIcon, ShieldIcon, VerticalIcon } from '../components/icons';
@@ -373,9 +374,16 @@ function FeedsRow({ feeds }: { feeds: FeedState[] | null }) {
   );
 }
 
-function FeedCard({ feed, state, loading }: { feed: Feed; state: FeedState | null; loading: boolean }) {
+const KEYFRAME_HINT = 'Platforms expect a keyframe every 2 s (Kick reports anything else as misconfigured).';
+const KEYFRAME_FIX: Record<Feed, string> = {
+  landscape: 'In OBS: Settings → Output → Streaming (Advanced mode) → Keyframe Interval: 2 s, then restart the stream.',
+  vertical: 'In the Aitum Vertical dock: settings → Keyframe Interval: 2 s, then restart the vertical stream.',
+};
+
+export function FeedCard({ feed, state, loading }: { feed: Feed; state: FeedState | null; loading: boolean }) {
   const online = !!state?.online;
   const Icon = feed === 'landscape' ? LandscapeIcon : VerticalIcon;
+  const keyframes = keyframeStatus(state?.video);
   return (
     <Card>
       <div className="feed-head">
@@ -398,6 +406,10 @@ function FeedCard({ feed, state, loading }: { feed: Feed; state: FeedState | nul
           <dd>{formatResolution(state.video?.width, state.video?.height)}</dd>
           <dt>Frame rate</dt>
           <dd>{formatFps(state.video?.fps)}</dd>
+          <dt>Keyframes</dt>
+          <dd className={cx(keyframes.warn && 'text-warn')} title={keyframes.warn ? KEYFRAME_HINT : undefined}>
+            {keyframes.text}
+          </dd>
           <dt>Video</dt>
           <dd>{state.video?.codec?.toUpperCase() || '—'}</dd>
           <dt>Audio</dt>
@@ -411,7 +423,13 @@ function FeedCard({ feed, state, loading }: { feed: Feed; state: FeedState | nul
             </>
           )}
         </dl>
-      ) : (
+      ) : null}
+      {online && state && keyframes.warn && (
+        <p className="alert alert-warn small" style={{ marginTop: 10 }}>
+          Keyframes {keyframes.text}: set them to 2 s. {KEYFRAME_FIX[feed]}
+        </p>
+      )}
+      {online && state ? null : (
         !loading && <p className="muted small" style={{ marginTop: 10 }}>{FEED_HINT[feed]}</p>
       )}
     </Card>

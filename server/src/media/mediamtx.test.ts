@@ -192,6 +192,27 @@ describe('MediaServer (default profile)', () => {
     expect(feedEvents.filter((e) => e.feed === 'vertical')).toHaveLength(0); // never changed
   });
 
+  it('measures frame rate and keyframe interval once per OBS connection and publishes them', async () => {
+    const probed: string[] = [];
+    const { server, api, feedEvents } = await setup({
+      deps: {
+        probeDelayMs: 10,
+        probe: async (url: string) => {
+          probed.push(url);
+          return { fps: 59.94, keyframeSec: 8.3, keyframeSecIsMinimum: false };
+        },
+      },
+    });
+    await server.start();
+    api.set('live/landscape', { online: true, onlineTime: '2026-10-11T17:00:00Z', inboundBytes: 1000, tracks2: [{ codec: 'H264', codecProps: { width: 1920, height: 1080 } }] });
+    await waitFor(() => feedEvents.some((e) => e.video?.keyframeSec === 8.3));
+    expect(server.feed('default', 'landscape').video).toMatchObject({ fps: 59.94, keyframeSec: 8.3 });
+    expect(probed).toHaveLength(1);
+    expect(probed[0]).toMatch(/^rtmp:\/\/127\.0\.0\.1:\d+\/live\/landscape\?user=/); // the internal reader
+    await new Promise((r) => setTimeout(r, 60));
+    expect(probed).toHaveLength(1); // not again for the same connection
+  });
+
   it('restarts MediaMTX with backoff after an unexpected exit and keeps feeds offline meanwhile', async () => {
     vi.useFakeTimers();
     const { server, sp, child, logs } = await setup({ deps: { pollIntervalMs: 1000 } });

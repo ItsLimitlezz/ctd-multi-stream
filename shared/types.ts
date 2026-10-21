@@ -187,7 +187,11 @@ export interface FeedState {
   feed: Feed;
   online: boolean;
   since: string | null;
-  video: { codec: string; width?: number; height?: number; fps?: number } | null;
+  /**
+   * fps and keyframeSec are measured a few seconds after OBS connects (once per connection);
+   * keyframeSecIsMinimum: fewer than two keyframes in the window, so the interval is at least that.
+   */
+  video: { codec: string; width?: number; height?: number; fps?: number; keyframeSec?: number; keyframeSecIsMinimum?: boolean } | null;
   audio: { codec: string; sampleRate?: number; channels?: number } | null;
   bitrateKbps: number | null;
 }

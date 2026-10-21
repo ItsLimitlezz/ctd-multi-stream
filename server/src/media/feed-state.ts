@@ -89,10 +89,19 @@ export function describeTracks(tracks: MtxTrack[] | undefined): Pick<FeedState, 
   return { video, audio };
 }
 
+/** Frame rate and keyframe interval measured from the feed (feed-probe.ts). */
+export interface FeedMeasurements {
+  fps: number | null;
+  keyframeSec: number | null;
+  keyframeSecIsMinimum: boolean;
+}
+
 /** Tracks one feed of one profile across polls; computes bitrate from inbound byte deltas over a short window. */
 export class FeedTracker {
   private samples: { t: number; bytes: number }[] = [];
   private state: FeedState;
+  /** Measurements of one publish session (keyed by its `since`): dropped when OBS reconnects. */
+  private measured: { since: string; m: FeedMeasurements } | null = null;
 
   constructor(
     readonly feed: Feed,
@@ -125,8 +134,31 @@ export class FeedTracker {
 
     const reported = toIso(item.onlineTime ?? item.readyTime);
     const since = reported ?? (this.state.online ? this.state.since : new Date(nowMs).toISOString());
-    this.state = { profileId: this.profileId, feed: this.feed, online: true, since, ...describeTracks(item.tracks2), bitrateKbps };
+    this.state = this.withMeasurements({ profileId: this.profileId, feed: this.feed, online: true, since, ...describeTracks(item.tracks2), bitrateKbps });
     return this.state;
+  }
+
+  /** Store the measurements of the publish session that started at `since` (ignored once it ended). */
+  setMeasurements(since: string, m: FeedMeasurements): FeedState {
+    if (this.state.online && this.state.since === since) {
+      this.measured = { since, m };
+      this.state = this.withMeasurements(this.state);
+    }
+    return this.state;
+  }
+
+  private withMeasurements(state: FeedState): FeedState {
+    if (!this.measured || this.measured.since !== state.since || !state.video) return state;
+    const { fps, keyframeSec, keyframeSecIsMinimum } = this.measured.m;
+    return {
+      ...state,
+      video: compact({
+        ...state.video,
+        fps: state.video.fps ?? fps ?? undefined,
+        keyframeSec: keyframeSec ?? undefined,
+        keyframeSecIsMinimum: keyframeSec !== null && keyframeSecIsMinimum ? true : undefined,
+      }),
+    };
   }
 
   /** Force offline (MediaMTX stopped). */

@@ -26,7 +26,8 @@ import {
   type IngestAuthState,
   type ProfileIngestKeys,
 } from './authorize.js';
-import { FeedTracker, offlineFeedState, shouldEmitFeed, type MtxPath } from './feed-state.js';
+import { ffprobePath, probeFeed } from './feed-probe.js';
+import { FeedTracker, offlineFeedState, shouldEmitFeed, type FeedMeasurements, type MtxPath } from './feed-state.js';
 import { createMediaMtxApi, type FetchFn } from './mediamtx-api.js';
 import { buildMediaMtxConfig } from './mediamtx-config.js';
 import { APP_NAME, feedPath, INTERNAL_READER_USER, streamKeyPath, type IngestRoute } from './paths.js';
@@ -40,6 +41,12 @@ export interface MediaServerDeps {
   pollIntervalMs?: number;
   /** How long start() waits for the control API to answer (0 = don't wait). */
   readyTimeoutMs?: number;
+  /**
+   * Measures a feed (frame rate, keyframe interval) from its read URL. Default: ffprobe next to
+   * FFMPEG_BIN; null turns measuring off (tests that don't care).
+   */
+  probe?: ((readUrl: string) => Promise<FeedMeasurements>) | null;
+  probeDelayMs?: number;
 }
 
 export interface MediaServerOptions {
@@ -80,7 +87,12 @@ interface FeedSlot {
   path: string;
   tracker: FeedTracker;
   emitted: { state: FeedState; at: number };
+  /** The publish session (its `since`) already measured or being measured. */
+  probedSince: string | null;
 }
+
+/** Wait after OBS connects before measuring (the encoder settles, the first keyframe arrives). */
+const PROBE_DELAY_MS = 3_000;
 
 interface ProfileIngest {
   profileId: string;
@@ -96,6 +108,9 @@ export function createMediaServer({ config, bus, log, repos }: MediaServerOption
   const now = deps.now ?? Date.now;
   const pollIntervalMs = deps.pollIntervalMs ?? 1_000;
   const readyTimeoutMs = deps.readyTimeoutMs ?? 5_000;
+  // ffprobe ships next to ffmpeg (Docker image, `npm run setup-tools`); no FFMPEG_BIN, no measuring.
+  const ffprobe = config.ffmpegBin ? ffprobePath(config.ffmpegBin) : null;
+  const probe = deps.probe !== undefined ? deps.probe : ffprobe ? (url: string) => probeFeed(ffprobe, url) : null;
   const api = createMediaMtxApi(config.mediamtxApiPort, deps.fetch);
   const workDir = path.join(config.dataDir, 'mediamtx');
   const configPath = path.join(workDir, 'mediamtx.yml');
@@ -137,7 +152,13 @@ export function createMediaServer({ config, bus, log, repos }: MediaServerOption
       feeds: new Map(
         FEEDS.map((feed) => [
           feed,
-          { feed, path: feedPath(feed, s), tracker: new FeedTracker(feed, profileId), emitted: { state: offlineFeedState(feed, profileId), at: 0 } },
+          {
+            feed,
+            path: feedPath(feed, s),
+            tracker: new FeedTracker(feed, profileId),
+            emitted: { state: offlineFeedState(feed, profileId), at: 0 },
+            probedSince: null,
+          },
         ]),
       ),
     };
@@ -258,8 +279,35 @@ export function createMediaServer({ config, bus, log, repos }: MediaServerOption
     const t = now();
     const byName = new Map(items.map((p) => [p.name, p]));
     for (const entry of profiles.values()) {
-      for (const slot of entry.feeds.values()) publish(slot, slot.tracker.update(byName.get(slot.path), t));
+      for (const slot of entry.feeds.values()) {
+        const state = slot.tracker.update(byName.get(slot.path), t);
+        publish(slot, state);
+        if (state.online && state.since && state.video && slot.probedSince !== state.since) scheduleProbe(entry, slot, state.since);
+      }
     }
+  }
+
+  /** Measure frame rate and keyframe interval once per OBS connection (MediaMTX doesn't report them). */
+  function scheduleProbe(entry: ProfileIngest, slot: FeedSlot, since: string): void {
+    if (!probe) return;
+    slot.probedSince = since;
+    setTimeout(() => {
+      if (!running || slot.tracker.current().since !== since || !readerPassword) return;
+      probe(readUrlFor(entry, slot.feed)).then(
+        (m) => {
+          const state = slot.tracker.setMeasurements(since, m);
+          publish(slot, state);
+          log.info({ profileId: entry.profileId, feed: slot.feed, fps: m.fps, keyframeSec: m.keyframeSec }, 'feed measured');
+        },
+        (err: unknown) => log.warn({ profileId: entry.profileId, feed: slot.feed, error: err instanceof Error ? err.message : String(err) }, 'measuring the feed failed'),
+      );
+    }, deps.probeDelayMs ?? PROBE_DELAY_MS).unref?.();
+  }
+
+  function readUrlFor(entry: ProfileIngest, feed: Feed): string {
+    if (!readerPassword) throw new Error('Media server not started');
+    const pass = encodeURIComponent(readerPassword);
+    return `rtmp://127.0.0.1:${config.rtmpPort}/${feedPath(feed, entry.slug)}?user=${INTERNAL_READER_USER}&pass=${pass}`;
   }
 
   function markOffline(entry: ProfileIngest): void {
@@ -481,9 +529,7 @@ export function createMediaServer({ config, bus, log, repos }: MediaServerOption
 
     readUrl(profileId, feed) {
       if (!readerPassword) throw new Error('Media server not started');
-      const entry = requireProfile(profileId);
-      const pass = encodeURIComponent(readerPassword);
-      return `rtmp://127.0.0.1:${config.rtmpPort}/${feedPath(feed, entry.slug)}?user=${INTERNAL_READER_USER}&pass=${pass}`;
+      return readUrlFor(requireProfile(profileId), feed);
     },
 
     authorize(req: MediaMtxAuthRequest) {

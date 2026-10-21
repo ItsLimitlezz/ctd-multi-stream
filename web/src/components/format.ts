@@ -36,6 +36,21 @@ export function formatFps(fps: number | null | undefined): string {
   return `${Number(fps.toFixed(2))} fps`;
 }
 
+// Keyframe check on the dashboard's feed cards (measured by the server once per OBS connection).
+/** Keyframe interval platforms expect (Twitch, YouTube, Kick, Instagram); OBS "0" (auto) is longer. */
+export const RECOMMENDED_KEYFRAME_SEC = 2;
+
+/**
+ * "every 2 s" / "every 8.3 s" / "over 10 s"; `warn` when it isn't about 2 s (null = not measured).
+ */
+export function keyframeStatus(video: { keyframeSec?: number; keyframeSecIsMinimum?: boolean } | null | undefined): { text: string; warn: boolean | null } {
+  const sec = video?.keyframeSec;
+  if (sec === undefined || !Number.isFinite(sec) || sec <= 0) return { text: '—', warn: null };
+  const n = Number(sec.toFixed(1));
+  if (video?.keyframeSecIsMinimum) return { text: `over ${n} s`, warn: true };
+  return { text: `every ${n} s`, warn: Math.abs(sec - RECOMMENDED_KEYFRAME_SEC) > 0.5 };
+}
+
 export function formatResolution(width?: number, height?: number): string {
   return width && height ? `${width}×${height}` : '—';
 }
