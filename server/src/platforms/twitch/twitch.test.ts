@@ -190,7 +190,7 @@ describe('info', () => {
     expect(dual?.options?.map((o) => o.value)).toEqual(['off', 'obs-direct', 'relay-multitrack']);
     expect(dual?.default).toBe('off');
     expect(info.destinationFields.every((f) => f.target === 'option')).toBe(true);
-    expect(info.notes).toMatch(/experimental/);
+    expect(info.notes).toMatch(/encodes what it asks for on this server/);
     expect(info.testMode).toEqual({ supported: true, description: expect.stringMatching(/^Bandwidth test — .*OBS/) });
     expect(info.testMode?.description).toMatch(/title is left unchanged/);
     expect(info.testMode?.description).toMatch(/Not private with "OBS sends Dual Format directly".*publicly/);
@@ -565,10 +565,10 @@ describe('prepare', () => {
             status: { result: 'success' },
             ingest_endpoints: [{ protocol: 'RTMPS', url_template: 'rtmps://x.contribute.live-video.net/app/{stream_key}', authentication: 'v1_auth' }],
             encoder_configurations: [
-              { type: 'obs_x264', width: 1920, height: 1080, framerate: { numerator: 60, denominator: 1 }, canvas_index: 0 },
-              { type: 'obs_x264', width: 1080, height: 1920, framerate: { numerator: 60, denominator: 1 }, canvas_index: 1 },
+              { type: 'obs_x264', width: 1920, height: 1080, framerate: { numerator: 60, denominator: 1 }, canvas_index: 0, settings: { bitrate: 6000 } },
+              { type: 'obs_x264', width: 1080, height: 1920, framerate: { numerator: 60, denominator: 1 }, canvas_index: 1, settings: { bitrate: 5000 } },
             ],
-            audio_configurations: { live: [{ codec: 'ffmpeg_aac' }] },
+            audio_configurations: { live: [{ codec: 'aac' }] },
           }),
       }),
     );
@@ -719,22 +719,25 @@ describe('prepare', () => {
     await expect(twitchDriver.prepare(dest(), account, 'x', made.ctx)).rejects.toMatchObject({ name: 'AbortError' });
   });
 
-  it('relay Dual Format asks Twitch for a two-canvas configuration', async () => {
+  it('relay Dual Format asks Twitch for a two-canvas configuration and encodes what it returns', async () => {
     const calls = stubFetch(
       liveRoutes({
         [routes.config]: (c) => {
-          const body = JSON.parse(c.body) as { authentication: string; preferences: { canvases: unknown[] } };
+          const body = JSON.parse(c.body) as { authentication: string; preferences: { canvases: unknown[]; maximum_video_tracks: number } };
           expect(body.authentication).toBe('live_141981764_SECRET');
           expect(body.preferences.canvases).toHaveLength(2);
+          expect(body.preferences.maximum_video_tracks).toBe(4);
           return json(200, {
             meta: { config_id: 'cfg-9' },
             status: { result: 'success' },
             ingest_endpoints: [{ protocol: 'RTMPS', url_template: 'rtmps://x.contribute.live-video.net/app/{stream_key}', authentication: 'v1_auth' }],
             encoder_configurations: [
-              { type: 'obs_x264', width: 1280, height: 720, framerate: { numerator: 30, denominator: 1 }, canvas_index: 0 },
-              { type: 'obs_x264', width: 720, height: 1280, framerate: { numerator: 30, denominator: 1 }, canvas_index: 1 },
+              { type: 'obs_x264', width: 1280, height: 720, framerate: { numerator: 30, denominator: 1 }, canvas_index: 0, settings: { bitrate: 3000 } },
+              { type: 'obs_x264', width: 640, height: 360, framerate: { numerator: 30, denominator: 1 }, canvas_index: 0, settings: { bitrate: 500 } },
+              { type: 'obs_x264', width: 720, height: 1280, framerate: { numerator: 30, denominator: 1 }, canvas_index: 1, settings: { bitrate: 3000 } },
+              { type: 'obs_x264', width: 360, height: 640, framerate: { numerator: 30, denominator: 1 }, canvas_index: 1, settings: { bitrate: 500 } },
             ],
-            audio_configurations: { live: [{ codec: 'ffmpeg_aac', track_id: 1, channels: 2 }] },
+            audio_configurations: { live: [{ codec: 'aac', track_id: 0, channels: 2, settings: { bitrate: 160 } }] },
           });
         },
       }),
@@ -746,11 +749,17 @@ describe('prepare', () => {
       'T',
       ctx,
     );
-    expect(live.push).toEqual({
+    expect(live.push).toMatchObject({
       url: 'rtmps://x.contribute.live-video.net/app/v1_auth?clientConfigId=cfg-9',
-      mode: 'multitrack',
+      mode: 'ivs',
       feeds: ['landscape', 'vertical'],
     });
+    expect(live.push?.ivs?.tracks.map((t) => `${t.feed} ${t.width}x${t.height} ${t.bitrateKbps}k`)).toEqual([
+      'landscape 1280x720 3000k',
+      'landscape 640x360 500k',
+      'vertical 720x1280 3000k',
+      'vertical 360x640 500k',
+    ]);
     expect(byRoute(calls, routes.config)).toHaveLength(1);
   });
 
@@ -770,7 +779,7 @@ describe('prepare', () => {
     expect(first.value).toEqual({
       type: 'warning',
       message:
-        'Streaming landscape only: Twitch refused relay Dual Format (Your GPU is not supported). For Dual Format use "OBS sends Dual Format directly".',
+        'Streaming landscape only: Twitch refused relay Dual Format (Your GPU is not supported). Dual Format is tried again on the next live.',
     });
     ctl.abort();
   });
@@ -781,7 +790,7 @@ describe('prepare', () => {
         'Twitch rejected relay Dual Format: Your broadcast software (ctd-multi-stream) did not send GPU Information. Use "OBS sends Dual Format directly" instead.',
       ),
     ).toBe(
-      'Streaming landscape only: Twitch refused relay Dual Format (Your broadcast software (ctd-multi-stream) did not send GPU Information). For Dual Format use "OBS sends Dual Format directly".',
+      'Streaming landscape only: Twitch refused relay Dual Format (Your broadcast software (ctd-multi-stream) did not send GPU Information). Dual Format is tried again on the next live.',
     );
   });
 });

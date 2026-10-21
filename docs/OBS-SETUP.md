@@ -119,13 +119,13 @@ The app's status and the merged chat can live inside OBS as a dock:
 
 ## Twitch Dual Format
 
-Twitch can show viewers a landscape and a vertical version of the same stream ("Dual Format"). It uses Enhanced Broadcasting: several video tracks in one connection. Check your Twitch dashboard's stream settings to see whether Dual Format is available for your channel. Each Twitch destination has a **Dual Format** option with three modes. If you want Dual Format, use **OBS sends Dual Format directly**.
+Twitch can show viewers a landscape and a vertical version of the same stream ("Dual Format"). It uses Enhanced Broadcasting: several video tracks in one connection. Check your Twitch dashboard's stream settings to see whether Dual Format is available for your channel. Each Twitch destination has a **Dual Format** option with three modes. For Dual Format, either OBS sends it directly, or the app encodes it from your two feeds ("Relay both feeds").
 
 ### Relay one feed (default)
 
 The app relays this destination's feed (normally landscape) to Twitch as a regular stream. Nothing special to set up in OBS.
 
-### OBS sends Dual Format directly (recommended for Dual Format)
+### OBS sends Dual Format directly
 
 OBS sends Dual Format straight to Twitch. CTD Relay sends **no video** to Twitch: it only keeps the Twitch title in sync and reads Twitch chat, and relays your feeds to every other platform.
 
@@ -136,12 +136,18 @@ OBS sends Dual Format straight to Twitch. CTD Relay sends **no video** to Twitch
 
 Your PC uploads the Twitch stream itself. The extra outputs to the app stay on your LAN.
 
-### Relay both feeds as Dual Format (experimental)
+### Relay both feeds as Dual Format (Relay encodes them)
 
-The app combines the landscape and vertical feeds into one Enhanced RTMP multitrack connection to Twitch, so OBS only sends to the app. Both feeds must be online, and the destination's **Landscape feed format** and **Vertical feed format** fields must match exactly what OBS sends (for example `1920x1080@60` and `1080x1920@60`).
+OBS only sends its two feeds to the app, and the app does what OBS's Enhanced Broadcasting would do:
 
-> [!WARNING]
-> As of October 2026, Twitch currently refuses this mode. Twitch's Enhanced Broadcasting config check asks for the encoding GPU, and a relay has none, so Twitch answers with errors such as "did not send GPU Information" or "Your GPU is not supported". Twitch may also drop the stream because the relay can't re-encode or add OBS's performance metrics. Use this mode only to experiment, and use **OBS sends Dual Format directly** for real streams.
+1. It asks Twitch's Enhanced Broadcasting service for a configuration. Twitch insists on a supported encoding GPU, so the app describes one, as noted in the code.
+2. It encodes the tracks Twitch asks for on the server with x264. Twitch requires at least two tracks per feed; the app asks for that minimum, typically 1080p60 + 360p30 for each feed.
+3. It keeps the keyframes aligned across all tracks and adds the broadcast performance metrics Twitch requires before every keyframe.
+4. It publishes the result to Twitch itself.
+
+Expect about 12 Mbps of upload and a good share of the server's CPU while live. Both feeds must be online. Set the destination's **Landscape feed format** and **Vertical feed format** fields to what OBS sends (for example `1920x1080@60` and `1080x1920@60`); Twitch picks the tracks from them.
+
+If Twitch refuses the configuration, the destination streams the landscape feed alone, with a warning on its card, and tries Dual Format again on the next live. Session test mode (a bandwidth test) is the safe way to try it first.
 
 ## Troubleshooting
 

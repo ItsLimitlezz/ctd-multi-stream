@@ -4,13 +4,15 @@
 // (bad plan, FFmpeg missing). plan.url embeds the stream key and is never logged.
 
 import { execFile, type ChildProcess } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import type { Logger } from 'pino';
 import { DEFAULT_PROFILE_ID, type Feed, type PushStats } from '../../../shared/types.js';
 import type { AppConfig } from '../config.js';
 import type { EventBus, PushStatus } from '../events.js';
 import type { PushPlan } from '../platforms/types.js';
 import type { DestinationsRepo, MediaServer, PushSupervisor } from '../services.js';
-import { buildPushArgs, capabilitiesFromVersion, type FfmpegCapabilities } from './ffmpeg-args.js';
+import { buildPushArgs, capabilitiesFromVersion, IVS_PROGRESS_FD, MULTITRACK_UNSUPPORTED, type FfmpegCapabilities } from './ffmpeg-args.js';
+import { IvsForwarder } from './ivs-forwarder.js';
 import { ProgressParser, type ProgressBlock } from './ffmpeg-progress.js';
 import { defaultSpawn, onLines, terminate, type SpawnFn } from './process-utils.js';
 import { redactFragments, redactSecretsInText, redactUrl, urlSecretFragments } from './redact.js';
@@ -107,6 +109,13 @@ export function explainFfmpegError(line: string): string | null {
   return null;
 }
 
+/** A failed Twitch Dual Format connection (RtmpPublisher) in plain words. */
+export function publishErrorMessage(detail: string): string {
+  const friendly = explainFfmpegError(detail);
+  if (/BadName|Rejected|Denied|Authentication/i.test(detail)) return `Twitch refused the Dual Format stream (${detail}).`;
+  return friendly ? `${friendly} (${detail})` : `Twitch Dual Format connection: ${detail}`;
+}
+
 interface Push {
   id: string;
   plan: PushPlan;
@@ -122,6 +131,9 @@ interface Push {
   retryTimer: NodeJS.Timeout | null;
   stallTimer: NodeJS.Timeout | null;
   stallMessage: string | null;
+  /** 'ivs' mode: Relay publishes FFmpeg's output itself (IvsForwarder); why that connection failed. */
+  forwarder: IvsForwarder | null;
+  forwardMessage: string | null;
   runningSince: number | null;
   lastStatsAt: number;
   lines: string[];
@@ -232,9 +244,10 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
       fail(p, `FFmpeg not found at ${config.ffmpegBin}; run \`npm run setup-tools\` (or set FFMPEG_BIN)`);
       return;
     }
-    const raw = p.stallMessage ? null : pickMessage(p.lines);
+    const raw = p.stallMessage || p.forwardMessage ? null : pickMessage(p.lines);
     const message =
       p.stallMessage ??
+      p.forwardMessage ??
       (raw !== null ? (explainFfmpegError(raw) ?? raw) : null) ??
       (spawnError ? `FFmpeg could not start: ${spawnError.message}` : signal ? `FFmpeg was killed (${signal})` : `FFmpeg exited with code ${code}`);
     if (p.runningSince !== null && now() - p.runningSince >= HEALTHY_RESET_MS) p.attempt = 0;
@@ -256,11 +269,14 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
     p.announced = true;
     p.lines = [];
     p.stallMessage = null;
+    p.forwardMessage = null;
     p.runningSince = null;
 
+    // 'ivs': stdout carries the FLV stream Relay publishes; progress goes to fd 3.
+    const ivs = p.plan.mode === 'ivs';
     let child: ChildProcess;
     try {
-      child = spawn(config.ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      child = spawn(config.ffmpegBin, args, { stdio: ivs ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], windowsHide: true });
     } catch (err) {
       onExit(p, null, null, err as NodeJS.ErrnoException);
       return;
@@ -271,8 +287,24 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
       resolveExited = resolve;
     });
 
+    let forwarder: IvsForwarder | null = null;
+    if (ivs && child.stdout) {
+      forwarder = new IvsForwarder(p.plan.url, { log: p.log });
+      p.forwarder = forwarder;
+      forwarder.start(child.stdout, (err) => {
+        if (p.proc !== child) return;
+        p.forwardMessage = publishErrorMessage(redactFragments(redactSecretsInText(err.message), p.secrets));
+        p.log.warn(`twitch dual format: ${p.forwardMessage}`);
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // already gone
+        }
+      });
+    }
+
     const parser = new ProgressParser();
-    onLines(child.stdout, (line) => {
+    onLines(ivs ? (child.stdio[IVS_PROGRESS_FD] as Readable | null) : child.stdout, (line) => {
       const result = parser.push(line);
       if (!result) return;
       armStallTimer(p, child);
@@ -285,6 +317,10 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
     const end = (code: number | null, signal: NodeJS.Signals | null, err?: NodeJS.ErrnoException) => {
       if (ended) return;
       ended = true;
+      if (forwarder) {
+        if (p.forwarder === forwarder) p.forwarder = null;
+        void forwarder.close();
+      }
       resolveExited();
       if (p.proc === child) onExit(p, code, signal, err);
     };
@@ -302,7 +338,8 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
     try {
       // Never fall back to another profile's feed: that would send the wrong OBS to this platform.
       if (p.profileId === null) throw new Error('Unknown destination: no profile to read the feed from');
-      const c = p.plan.mode === 'multitrack' ? await capabilities() : { multitrack: true };
+      const c = p.plan.mode !== 'copy' ? await capabilities() : { multitrack: true };
+      if (p.plan.mode === 'ivs' && !c.multitrack) throw new Error(MULTITRACK_UNSUPPORTED);
       if (p.stopped || pushes.get(p.id) !== p) return;
       const inputs: Partial<Record<Feed, string>> = {};
       for (const feed of p.plan.feeds) inputs[feed] = media.readUrl(p.profileId, feed);
@@ -319,6 +356,8 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
     p.stopped = true;
     clearTimers(p);
     const child = p.proc;
+    // End the Twitch stream properly (FCUnpublish) before FFmpeg goes.
+    await p.forwarder?.close();
     if (child) await terminate(child, STOP_GRACE_MS);
     await p.exited;
   }
@@ -341,6 +380,8 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
         retryTimer: null,
         stallTimer: null,
         stallMessage: null,
+        forwarder: null,
+        forwardMessage: null,
         runningSince: null,
         lastStatsAt: 0,
         lines: [],

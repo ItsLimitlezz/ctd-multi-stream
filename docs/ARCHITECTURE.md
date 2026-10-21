@@ -117,10 +117,13 @@ Destinations fail independently. One platform failing never blocks the others. T
 ### 5.3 Twitch Dual Format
 Twitch Dual Format uses **Enhanced Broadcasting**: several video tracks (landscape and vertical) inside one Enhanced-RTMP connection, negotiated through Twitch's client configuration endpoint. Restream does not appear to support it, so supporting it would set this project apart.
 
-- **Approach A (preferred):** the server merges the two OBS feeds into one multitrack E-RTMP stream and sends it to Twitch. Risk: Twitch may only accept this from its own config handshake or expected encoder settings.
-- **Approach B (fallback):** OBS + Aitum send Dual Format straight to Twitch. CTD Relay still manages Twitch's title and chat and relays to everything else. Bandwidth is not a concern at 300+ Mbps upload.
+- **Approach A (built, Oct 2026):** the server does what OBS's Enhanced Broadcasting does:
+  1. It calls GetClientConfiguration, describing a supported GPU (Twitch refuses clients without one).
+  2. It encodes the returned tracks from the two feeds with x264 (constant bitrate, IDRs aligned on a shared clock). That is at least two per canvas, Twitch's minimum.
+  3. It publishes the Enhanced FLV with its own RTMP client (`media/rtmp-publisher.ts`), inserting the broadcast performance metrics SEI that IVS requires before every IDR (`media/bpm.ts`, `media/ivs-forwarder.ts`).
 
-Phase 0 decides between them.
+  Twitch's requirements and the probes behind them are in `platforms/twitch/multitrack.ts`.
+- **Approach B:** OBS + Aitum send Dual Format straight to Twitch. CTD Relay still manages Twitch's title and chat and relays to everything else.
 
 ---
 
@@ -224,7 +227,7 @@ Twitch Dual Format through the relay (if Phase 0 succeeds), GPU transcoding, SRT
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Twitch won't accept multitrack from a relay | No server-side Dual Format | Approach B (OBS sends to Twitch directly). |
+| Twitch refuses Relay's configuration request or drops its multitrack stream | No server-side Dual Format | The destination falls back to the landscape feed alone; Approach B (OBS sends to Twitch directly). |
 | Instagram/TikTok/X UI changes | Browser drivers break | Contained selectors per driver, clear error states, fast patch releases. |
 | Bot detection on browser platforms | Session flagged | Manual login only, persistent profiles, human-paced actions. |
 | YouTube chat quota | Chat stops mid-stream | Evaluate streaming chat endpoint; adaptive polling. |

@@ -322,6 +322,76 @@ describe('PushSupervisor', () => {
     await sup.stop('d1');
   });
 
+  describe("'ivs' pushes (Twitch Dual Format through Relay)", () => {
+    const flvHeader = Buffer.from('FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00', 'latin1');
+    const videoTag = (body: Buffer) => {
+      const h = Buffer.alloc(11);
+      h[0] = 9;
+      h.writeUIntBE(body.length, 1, 3);
+      return Buffer.concat([h, body, Buffer.alloc(4)]);
+    };
+    const keyframe = Buffer.from([0x17, 1, 0, 0, 0, 0, 0, 0, 3, 0x65, 0x88, 0x80]);
+    const ivsPlan = (port: number): PushPlan => ({
+      url: `rtmp://127.0.0.1:${port}/app/${SECRET}`,
+      mode: 'ivs',
+      feeds: ['landscape', 'vertical'],
+      ivs: {
+        tracks: [
+          { feed: 'landscape', width: 1920, height: 1080, fps: { numerator: 60, denominator: 1 }, bitrateKbps: 6000, keyintSec: 2, profile: 'high', bframes: 3 },
+          { feed: 'vertical', width: 1080, height: 1920, fps: { numerator: 60, denominator: 1 }, bitrateKbps: 5000, keyintSec: 2, profile: 'high', bframes: 3 },
+        ],
+        audioBitrateKbps: 160,
+        audioChannels: 2,
+        preset: 'veryfast',
+      },
+    });
+    const until = async (cond: () => boolean) => {
+      for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+      expect(cond()).toBe(true);
+    };
+
+    it('publishes FFmpeg’s stdout itself (progress on fd 3) and unpublishes on stop', async () => {
+      vi.useRealTimers();
+      const { startFakeIngest } = await import('./rtmp-test-server.js');
+      const ingest = await startFakeIngest();
+      try {
+        const { sup, sp, events } = setup();
+        sup.start('d1', ivsPlan(ingest.port));
+        await until(() => sp.calls.length === 1);
+        const call = sp.calls[0]!;
+        expect(call.options.stdio).toEqual(['ignore', 'pipe', 'pipe', 'pipe']);
+        expect(call.args.at(-1)).toBe('pipe:1');
+        expect(call.args.join(' ')).not.toContain(SECRET); // FFmpeg never sees the stream key
+        call.child.stdout.write(Buffer.concat([flvHeader, videoTag(keyframe)]));
+        call.child.fd3.write('out_time_us=2000000\ntotal_size=1000\nprogress=continue\n');
+        await until(() => ingest.messages.length === 1 && events.some((e) => e.status === 'running'));
+        expect(ingest.messages[0]!.payload.length).toBeGreaterThan(keyframe.length); // BPM added
+        await sup.stop('d1');
+        await ingest.unpublished;
+        expect(events.at(-1)?.status).toBe('stopped');
+      } finally {
+        await ingest.close();
+      }
+    });
+
+    it('stops FFmpeg and retries when Twitch refuses the stream, saying why', async () => {
+      vi.useRealTimers();
+      const { startFakeIngest } = await import('./rtmp-test-server.js');
+      const ingest = await startFakeIngest({ refusePublish: 'NetStream.Publish.BadName' });
+      try {
+        const { sup, sp, events, logs } = setup();
+        sup.start('d1', ivsPlan(ingest.port));
+        await until(() => events.some((e) => e.status === 'retrying'));
+        expect(sp.calls[0]!.child.signals).toContain('SIGKILL');
+        expect(events.find((e) => e.status === 'retrying')?.message).toMatch(/^Twitch refused the Dual Format stream \(NetStream\.Publish\.BadName/);
+        expect(logs()).not.toContain(SECRET);
+        await sup.stop('d1');
+      } finally {
+        await ingest.close();
+      }
+    });
+  });
+
   it("reads the feed of the destination's own profile, so two profiles stream at once", async () => {
     const { sup, sp } = setup();
     sup.start('d1', plan);

@@ -85,5 +85,72 @@ export function buildPushArgs(
     ];
   }
 
+  if (plan.mode === 'ivs') return buildIvsArgs(plan, inputUrls);
+
   throw new Error(`Unknown push mode: ${String((plan as { mode: unknown }).mode)}`);
+}
+
+/** FFmpeg's progress goes to this file descriptor in 'ivs' mode: stdout carries the FLV stream. */
+export const IVS_PROGRESS_FD = 3;
+
+/**
+ * Amazon IVS multitrack (Twitch Dual Format through Relay): encode every track IVS asked for and
+ * write Enhanced FLV to stdout (Relay publishes it, ivs-forwarder.ts).
+ *
+ * IDRs must share their PTS on every track. Each feed's timeline starts at 0 (setpts=PTS-STARTPTS),
+ * the fps filter puts every track on a constant-rate grid from 0, and every encoder makes a keyframe
+ * exactly every keyintSec (scene cuts off, forced keyframes on the same clock), so IDRs land on the
+ * same timestamps across tracks and feeds. Constant bitrate (nal-hrd=cbr) at exactly the bitrate IVS
+ * asked for: IVS drops streams whose bitrate doesn't match. Audio comes from the primary feed.
+ */
+export function buildIvsArgs(plan: PushPlan, inputUrls: Partial<Record<Feed, string>>): string[] {
+  const ivs = plan.ivs;
+  if (!ivs || ivs.tracks.length === 0) throw new Error('IVS plan has no tracks');
+  const feeds: Feed[] = [];
+  for (const t of ivs.tracks) if (!feeds.includes(t.feed)) feeds.push(t.feed);
+  const primary = ivs.tracks[0]!.feed;
+
+  const args = ['-hide_banner', '-nostdin', '-loglevel', 'warning', '-progress', `pipe:${IVS_PROGRESS_FD}`, '-stats_period', '2'];
+  for (const feed of feeds) args.push(...inputArgs(inputFor(feed, inputUrls)));
+
+  const filters: string[] = [];
+  feeds.forEach((feed, input) => {
+    const tracks = ivs.tracks.map((t, i) => ({ t, i })).filter(({ t }) => t.feed === feed);
+    filters.push(`[${input}:v]setpts=PTS-STARTPTS,split=${tracks.length}${tracks.map(({ i }) => `[s${i}]`).join('')}`);
+    for (const { t, i } of tracks) {
+      const fps = `${t.fps.numerator}/${t.fps.denominator}`;
+      // Letterbox rather than stretch if the feed's shape differs from what IVS asked for.
+      filters.push(
+        `[s${i}]fps=${fps},scale=${t.width}:${t.height}:flags=bicubic:force_original_aspect_ratio=decrease,` +
+          `pad=${t.width}:${t.height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v${i}]`,
+      );
+    }
+  });
+  filters.push(`[${feeds.indexOf(primary)}:a]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0[a]`);
+  args.push('-filter_complex', filters.join(';'));
+
+  ivs.tracks.forEach((t, i) => {
+    const fpsValue = t.fps.numerator / t.fps.denominator;
+    const gop = String(Math.max(1, Math.round(fpsValue * t.keyintSec)));
+    const rate = `${t.bitrateKbps}k`;
+    args.push(
+      '-map', `[v${i}]`,
+      `-c:v:${i}`, 'libx264',
+      `-preset:v:${i}`, ivs.preset,
+      `-profile:v:${i}`, t.profile,
+      `-b:v:${i}`, rate,
+      `-minrate:v:${i}`, rate,
+      `-maxrate:v:${i}`, rate,
+      `-bufsize:v:${i}`, rate,
+      `-g:v:${i}`, gop,
+      `-keyint_min:v:${i}`, gop,
+      `-sc_threshold:v:${i}`, '0',
+      `-bf:v:${i}`, String(t.profile === 'baseline' ? 0 : t.bframes),
+      `-force_key_frames:v:${i}`, `expr:gte(t,n_forced*${t.keyintSec})`,
+      `-x264-params:v:${i}`, 'nal-hrd=cbr:force-cfr=1',
+    );
+  });
+  args.push('-map', '[a]', '-c:a', 'aac', '-b:a', `${ivs.audioBitrateKbps}k`, '-ar', '48000', '-ac', String(ivs.audioChannels));
+  args.push('-f', 'flv', '-flvflags', 'no_duration_filesize', ...(plan.extraOutputArgs ?? []), 'pipe:1');
+  return args;
 }

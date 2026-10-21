@@ -71,14 +71,40 @@ export interface DriverContext {
  * - 'copy': exactly one feed, passthrough (`-c copy`).
  * - 'multitrack': EXPERIMENTAL Enhanced-RTMP multitrack with several feeds in one connection
  *   (Twitch Dual Format). feeds[0] is the primary (landscape) track.
+ * - 'ivs': Amazon IVS multitrack (Twitch Dual Format through Relay): FFmpeg encodes `ivs.tracks`
+ *   from the feeds with aligned IDRs, Relay adds the broadcast performance metrics and publishes the
+ *   Enhanced RTMP stream itself (media/ivs-forwarder.ts).
  */
 export interface PushPlan {
   /** Full RTMP(S) URL including the stream key. Never log it. */
   url: string;
-  mode: 'copy' | 'multitrack';
+  mode: 'copy' | 'multitrack' | 'ivs';
   feeds: Feed[];
   /** Extra FFmpeg output args (rarely needed). */
   extraOutputArgs?: string[];
+  /** 'ivs' only: what to encode. */
+  ivs?: IvsEncodePlan;
+}
+
+/** One video track Amazon IVS asked for (GetClientConfiguration encoder_configurations[i] = track i). */
+export interface IvsTrack {
+  feed: Feed;
+  width: number;
+  height: number;
+  fps: { numerator: number; denominator: number };
+  bitrateKbps: number;
+  keyintSec: number;
+  profile: 'baseline' | 'main' | 'high';
+  bframes: number;
+}
+
+export interface IvsEncodePlan {
+  /** Track 0 first (the primary, highest quality track). */
+  tracks: IvsTrack[];
+  audioBitrateKbps: number;
+  audioChannels: number;
+  /** x264 preset: faster presets use less CPU at slightly lower quality. */
+  preset: string;
 }
 
 /** Result of preparing a destination for one session. */

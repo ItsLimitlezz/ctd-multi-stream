@@ -1,6 +1,6 @@
 // Twitch driver: device-code login (public client), title + stream key + viewer count over Helix,
 // anonymous IRC chat (with moderation and alerts), and three Dual Format modes (relay one feed / OBS
-// direct / experimental multitrack relay). Session test mode streams as a bandwidth test and leaves
+// direct / Relay encodes both feeds as Enhanced Broadcasting tracks, multitrack.ts). Session test mode streams as a bandwidth test and leaves
 // the (public) channel title alone; it can't reach OBS's own output in "OBS direct" mode, so that
 // destination carries a warning on its card instead.
 
@@ -66,7 +66,7 @@ export const twitchInfo: PlatformInfo = {
       options: [
         { value: 'off', label: "Relay one feed (this destination's feed)" },
         { value: 'obs-direct', label: 'OBS sends Dual Format directly (app manages title + chat only)' },
-        { value: 'relay-multitrack', label: 'Relay both feeds as Dual Format (experimental)' },
+        { value: 'relay-multitrack', label: 'Relay both feeds as Dual Format (Relay encodes them)' },
       ],
       help: 'Dual Format shows viewers a landscape and a vertical version of your stream. See the notes below.',
     },
@@ -92,7 +92,7 @@ export const twitchInfo: PlatformInfo = {
       type: 'text',
       target: 'option',
       placeholder: DEFAULT_LANDSCAPE_FORMAT,
-      help: 'Only used by "Relay both feeds": the resolution and frame rate OBS sends on the landscape feed, e.g. 1920x1080@60. Twitch must accept exactly this.',
+      help: 'Only used by "Relay both feeds": the resolution and frame rate OBS sends on the landscape feed, e.g. 1920x1080@60. Twitch picks the tracks from it; Relay scales the feed to them.',
     },
     {
       key: 'verticalFormat',
@@ -132,7 +132,7 @@ export const twitchInfo: PlatformInfo = {
   notes: [
     'Dual Format: "Relay one feed" sends this destination\'s feed as a normal Twitch stream.',
     '"OBS sends Dual Format directly": OBS streams to Twitch itself with Enhanced Broadcasting and the Aitum Vertical canvas; this app sends no video to Twitch and only keeps the title in sync and reads chat.',
-    '"Relay both feeds" (experimental) combines both feeds into one Enhanced RTMP multitrack connection (FFmpeg 8 or newer, bundled). Twitch must accept one pass-through track per feed (set the feed formats). As of October 2026 Twitch\'s Enhanced Broadcasting service also asks for the encoding GPU, which a relay does not have, so it usually refuses this mode; Twitch may also drop the stream because the relay cannot re-encode or add OBS\'s performance metrics. When Twitch refuses it, the destination streams the landscape feed alone (with a warning on its card) instead of staying down; for real Dual Format use OBS direct.',
+    '"Relay both feeds": Relay asks Twitch\'s Enhanced Broadcasting service for a configuration and encodes what it asks for on this server: two tracks per feed (e.g. 1080p60 and 360p30 of each), Twitch\'s minimum for Dual Format, about 12 Mbps of upload and a good share of the CPU. When Twitch refuses, the destination streams the landscape feed alone (with a warning on its card) instead of staying down.',
     'Bandwidth test streams without going live. Sign-ins expire after about 30 days without use.',
   ].join(' '),
   testMode: {
@@ -232,7 +232,7 @@ async function* warnFirst(
 /** The card warning while "Relay both feeds" falls back to the landscape feed alone. */
 export function dualFormatFallbackWarning(reason: string): string {
   const why = reason.replace(/^Twitch rejected relay Dual Format:\s*/, '').replace(/\s*Use "OBS sends Dual Format directly" instead\.?$/, '');
-  return `Streaming landscape only: Twitch refused relay Dual Format (${why.replace(/[\s.]+$/, '')}). For Dual Format use "OBS sends Dual Format directly".`;
+  return `Streaming landscape only: Twitch refused relay Dual Format (${why.replace(/[\s.]+$/, '')}). Dual Format is tried again on the next live.`;
 }
 
 async function pushPlan(

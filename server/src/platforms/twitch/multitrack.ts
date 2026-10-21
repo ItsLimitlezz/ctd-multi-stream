@@ -1,46 +1,58 @@
-// EXPERIMENTAL: relay both feeds to Twitch as Dual Format (Enhanced Broadcasting / multitrack E-RTMP).
+// Twitch Dual Format through Relay (Enhanced Broadcasting = Amazon IVS multitrack video).
 //
 // What was learned (Oct 2026):
 // - OBS asks Twitch's config service before every Enhanced Broadcasting stream:
-//   POST https://ingest.twitch.tv/api/v3/GetClientConfiguration (OBS plugins/rtmp-services/data/services.json,
-//   "multitrack_video_configuration_url"), JSON body, only `Content-Type: application/json`, 5 s timeout
-//   (obs-studio frontend/utility/GoLiveAPI_Network.cpp). Twitch runs on Amazon IVS; the same API is documented at
-//   https://docs.aws.amazon.com/ivs/latest/BroadcastSWIntegAPIReference/actions-GetClientConfiguration.html
-// - Request (frontend/utility/models/multitrack-video.hpp, GoLiveAPI_PostData.cpp): service "IVS",
-//   schema_version "2025-01-25", authentication = the channel's stream key, client {name, version,
-//   supported_codecs}, capabilities {cpu, memory, system, gpu?}, preferences {maximum_video_tracks,
-//   vod_track_audio, audio_*, canvases: [{width, height, canvas_width, canvas_height, framerate}]}.
-//   Canvas 0 is OBS's main canvas; Dual Format adds the vertical canvas (Aitum Vertical) as canvas 1.
-// - Response: meta.config_id; status {result: success|warning|error, html_en_us}; ingest_endpoints
-//   [{protocol: RTMP|RTMPS, url_template ".../app/{stream_key}", authentication}];
-//   encoder_configurations [{type, width, height, framerate, settings{bitrate, keyint_sec...}, canvas_index}]
-//   (index in the array = video track id); audio_configurations {live: [...], vod?: [...]}.
-// - Connect (OBS MultitrackVideoOutput.cpp + IVS integration guide): url_template with {stream_key} replaced by
-//   `authentication`, then the template's query, the user's key query (e.g. bandwidthtest), then
-//   `clientConfigId=<config_id>`. Track 0 is sent as single-track E-RTMP, the others as Multitrack/OneTrack
-//   packets (FFmpeg >= 8 flvenc does exactly this; see server/src/media/ffmpeg-args.ts).
-// - IVS disconnects multitrack streams whose track count, codec, resolution, frame rate or BITRATE don't match
-//   the returned configuration, whose IDRs aren't aligned across tracks, or that lack the "broadcast
-//   performance metrics" SEI before every IDR. We pass the OBS feeds through untouched, so we can only check
-//   count/codec/resolution/fps here; bitrate, IDR alignment and BPM SEI are up to OBS and may still get the
-//   relay disconnected. That is why this mode is experimental and "OBS direct" is the safe choice.
-// - Probed live on 2026-10-11 with this exact request (and a fake key): HTTP 200 with
-//   status {result: "error", html_en_us: "Your broadcast software (ctd-multi-stream) did not send GPU Information
-//   which is required by GetClientConfiguration ..."}, empty encoder_configurations, and ingest endpoints whose
-//   `authentication` is the plain key. The GPU check comes before the key check. We describe this machine
-//   honestly (the relay never encodes, so there is no encoder GPU to report), so Twitch currently rejects the
-//   relay at this step; the driver (index.ts pushPlan) then streams the landscape feed alone and
-//   shows Twitch's message plus the "OBS direct" hint as a warning on the card.
+//   POST https://ingest.twitch.tv/api/v3/GetClientConfiguration, JSON body (OBS
+//   frontend/utility/GoLiveAPI_*.cpp). Twitch runs on Amazon IVS; the API and the rules below are
+//   documented at https://docs.aws.amazon.com/ivs/latest/LowLatencyUserGuide/multitrack-video-sw-integration.html
+// - Request: service "IVS", schema_version "2025-01-25", authentication = the stream key, client
+//   {name, version, supported_codecs}, capabilities {cpu, memory, system, gpu: [...]}, preferences
+//   {maximum_video_tracks, vod_track_audio, audio_*, canvases: [{width, height, canvas_width,
+//   canvas_height, framerate}]}. Canvas 0 is the landscape feed, canvas 1 the vertical one.
+// - Probed live on 2026-10-21 (fake key): without a GPU it refuses ("did not send GPU Information");
+//   an old GPU (Radeon HD 7870) is "not currently supported"; a current NVIDIA GPU passes, and then
+//   Dual Format "requires at least 2 tracks per canvas" (2 or 3 tracks refused). With 4 tracks it
+//   returns 1920x1080@60 6000k + 640x360@30 500k (landscape), 1080x1920@60 5000k + 360x640@30 500k
+//   (vertical), keyframes every 2 s, AAC 160k: about 12 Mbps up.
+// - IVS disconnects streams whose tracks don't match the configuration (count, codec, resolution,
+//   frame rate, bitrate), whose IDRs aren't aligned across tracks, or that lack the broadcast
+//   performance metrics before every IDR. So Relay encodes every track itself (x264, constant
+//   bitrate, aligned keyframes: media/ffmpeg-args.ts buildIvsArgs) and publishes the stream itself
+//   with the metrics added (media/ivs-forwarder.ts).
+// - Connect: url_template with {stream_key} replaced by `authentication`, then the user's query
+//   (bandwidthtest), then clientConfigId=<config_id>. Track 0 goes as single-track packets, the
+//   others as Multitrack/OneTrack packets (FFmpeg 8 flvenc does exactly this).
 
 import os from 'node:os';
+import { FEEDS, type Feed } from '../../../../shared/types.js';
 import { fetchJson, PlatformHttpError } from '../common/http.js';
-import { DriverError, type PushPlan } from '../types.js';
-import { appendQuery, formatToString, type VideoFormat } from './options.js';
+import { DriverError, type IvsTrack, type PushPlan } from '../types.js';
+import { appendQuery, type VideoFormat } from './options.js';
 
 export const CLIENT_CONFIG_URL = 'https://ingest.twitch.tv/api/v3/GetClientConfiguration';
 const SCHEMA_VERSION = '2025-01-25';
 const CONFIG_TIMEOUT_MS = 10_000;
 const FALLBACK = 'Use "OBS sends Dual Format directly" instead.';
+/** Twitch Dual Format's minimum: two tracks per canvas (the full-size one and a small one). */
+export const MIN_DUAL_FORMAT_TRACKS = 4;
+/** x264 preset for the tracks Relay encodes (override with CTD_X264_PRESET). */
+export const DEFAULT_X264_PRESET = 'veryfast';
+const X264_PRESETS = ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow'];
+
+/**
+ * The GPU Relay describes to Twitch. Twitch's config service only hands a configuration to a client
+ * with a supported encoding GPU; Relay encodes on the CPU (x264), so it describes a current NVIDIA
+ * card and maps the settings Twitch returns for it (NVENC) to x264. If Twitch stops accepting it,
+ * change it here.
+ */
+export const REPORTED_GPU = {
+  model: 'NVIDIA GeForce RTX 5090',
+  vendor_id: 0x10de,
+  device_id: 0x2b85,
+  dedicated_video_memory: 32 * 1024 ** 3,
+  shared_system_memory: 16 * 1024 ** 3,
+  driver_version: '32.0.15.7270',
+};
 
 interface Framerate {
   numerator?: number;
@@ -52,9 +64,19 @@ export interface ClientConfigResponse {
   status?: { result?: string | null; html_en_us?: string | null } | null;
   ingest_endpoints?: { protocol?: string; url_template?: string; authentication?: string | null }[] | null;
   encoder_configurations?:
-    | { type?: string; width?: number; height?: number; framerate?: Framerate | null; canvas_index?: number }[]
+    | {
+        type?: string;
+        width?: number;
+        height?: number;
+        framerate?: Framerate | null;
+        canvas_index?: number;
+        settings?: { bitrate?: number; keyint_sec?: number; profile?: string; bf?: number } | null;
+      }[]
     | null;
-  audio_configurations?: { live?: unknown[] | null; vod?: unknown[] | null } | null;
+  audio_configurations?: {
+    live?: { codec?: string; track_id?: number; channels?: number; settings?: { bitrate?: number } | null }[] | null;
+    vod?: unknown[] | null;
+  } | null;
 }
 
 export interface MultitrackInput {
@@ -65,6 +87,8 @@ export interface MultitrackInput {
   /** Ingest server override (rtmp/rtmps base URL), or null to use the endpoint Twitch returns. */
   ingestServer: string | null;
   bandwidthTest: boolean;
+  /** Most video tracks Twitch may ask for (at least 4: two per canvas). */
+  maxTracks?: number;
   clientVersion?: string;
   now?: Date;
 }
@@ -94,7 +118,7 @@ function canvas(f: VideoFormat): Record<string, unknown> {
   return { width: f.width, height: f.height, canvas_width: f.width, canvas_height: f.height, framerate: f.fps };
 }
 
-/** Honest description of this machine (no GPU encoder: the relay never encodes). */
+/** This machine's CPU, memory and OS, plus the reported GPU. */
 function capabilities(): Record<string, unknown> {
   const cpus = os.cpus();
   const arch = os.arch();
@@ -116,6 +140,7 @@ function capabilities(): Record<string, unknown> {
       arm: arch.startsWith('arm'),
       armEmulation: false,
     },
+    gpu: [REPORTED_GPU],
   };
 }
 
@@ -127,14 +152,14 @@ export function buildConfigRequest(input: MultitrackInput): Record<string, unkno
     authentication: input.streamKey,
     stream_attempt_start_time: (input.now ?? new Date()).toISOString(),
     client: {
-      name: 'ctd-multi-stream',
+      name: 'ctd-relay',
       version: input.clientVersion ?? process.env.npm_package_version ?? '0',
       supported_codecs: ['h264'],
     },
     capabilities: capabilities(),
     preferences: {
-      // One rendition per canvas: the relay passes each OBS feed through as-is.
-      maximum_video_tracks: 2,
+      // Every track costs CPU on this server: ask for Dual Format's minimum unless told otherwise.
+      maximum_video_tracks: Math.max(MIN_DUAL_FORMAT_TRACKS, Math.floor(input.maxTracks ?? MIN_DUAL_FORMAT_TRACKS)),
       vod_track_audio: false,
       audio_samples_per_sec: 48_000,
       audio_channels: 2,
@@ -194,17 +219,19 @@ function codecOf(encoderType: string): 'h264' | 'hevc' | 'av1' {
   return 'h264';
 }
 
-function sameFps(a: Framerate | null | undefined, b: VideoFormat['fps']): boolean {
-  if (!a?.numerator || !a.denominator) return true; // not specified -> canvas rate
-  return Math.abs(a.numerator / a.denominator - b.numerator / b.denominator) < 0.01;
+function profileOf(value: unknown): IvsTrack['profile'] {
+  return value === 'main' || value === 'baseline' ? value : 'high';
 }
 
-const CANVAS_LABEL = ['landscape', 'vertical'] as const;
+function x264Preset(): string {
+  const p = process.env.CTD_X264_PRESET?.trim().toLowerCase();
+  return p && X264_PRESETS.includes(p) ? p : DEFAULT_X264_PRESET;
+}
 
 /**
- * Check that the configuration only asks for what a pass-through relay can send (one H.264 track
- * per feed at the feed's own size and rate, one audio track), then build the push plan.
- * `warn` receives non-fatal status warnings.
+ * Turn Twitch's configuration into what Relay encodes: one H.264 track per encoder configuration
+ * (array index = track id, canvas 0 = landscape, 1 = vertical), at exactly the size, frame rate and
+ * bitrate Twitch asked for. `warn` receives non-fatal status warnings.
  */
 export function planFromConfig(config: ClientConfigResponse, input: MultitrackInput, warn: (msg: string) => void = () => {}): PushPlan {
   const status = config.status ?? null;
@@ -217,37 +244,48 @@ export function planFromConfig(config: ClientConfigResponse, input: MultitrackIn
   }
   if (encoders.length === 0) throw rejected('no encoder configuration returned');
 
-  // Track layout first: exactly one track on canvas 0 (landscape) and one on canvas 1 (vertical).
-  const formats = [input.landscape, input.vertical];
-  const perCanvas: number[] = [0, 0];
-  for (const enc of encoders) {
+  const tracks: IvsTrack[] = encoders.map((enc, i) => {
     const idx = enc.canvas_index ?? 0;
-    if (!formats[idx]) throw rejected(`it asked for an unknown canvas (${idx})`);
-    perCanvas[idx] = (perCanvas[idx] ?? 0) + 1;
-  }
-  if (perCanvas.some((n) => n > 1)) {
-    throw rejected(`it asks for an encoding ladder (${encoders.length} video tracks) but the relay can only pass one track per feed through`);
-  }
-  if (perCanvas[0] === 0) throw rejected('it returned no track for the landscape feed');
-  if (perCanvas[1] === 0) throw rejected('it returned no track for the vertical feed (is Dual Format enabled for this channel?)');
-
-  // Then each track must match its feed as OBS sends it (we cannot re-encode).
-  for (const enc of encoders) {
-    const idx = (enc.canvas_index ?? 0) as 0 | 1;
-    const format = formats[idx]!;
-    const label = CANVAS_LABEL[idx];
+    const feed: Feed | undefined = FEEDS[idx];
+    if (!feed) throw rejected(`it asked for an unknown canvas (${idx})`);
     const codec = codecOf(enc.type ?? '');
-    if (codec !== 'h264') throw rejected(`it asked for ${codec.toUpperCase()} video; the feeds are H.264`);
-    if (enc.width !== format.width || enc.height !== format.height || !sameFps(enc.framerate, format.fps)) {
-      const fps = enc.framerate?.numerator && enc.framerate.denominator ? enc.framerate.numerator / enc.framerate.denominator : null;
-      const wanted = `${enc.width ?? '?'}x${enc.height ?? '?'}${fps ? `@${Math.round(fps * 100) / 100}` : ''}`;
-      throw rejected(`it wants ${wanted} for the ${label} track but the ${label} feed is set to ${formatToString(format)} (check the feed formats in this destination)`);
-    }
-  }
-  const liveAudio = config.audio_configurations?.live ?? [];
-  if (liveAudio.length !== 1) throw rejected(`it asks for ${liveAudio.length} audio tracks; the relay sends exactly one`);
+    if (codec !== 'h264') throw rejected(`it asked for ${codec.toUpperCase()} video; Relay encodes H.264`);
+    const width = enc.width ?? 0;
+    const height = enc.height ?? 0;
+    const bitrate = enc.settings?.bitrate ?? 0;
+    if (!(width >= 16 && height >= 16 && width <= 8192 && height <= 8192)) throw rejected(`track ${i} has no usable size`);
+    if (!(bitrate > 0)) throw rejected(`track ${i} has no bitrate`);
+    const fps = enc.framerate?.numerator && enc.framerate.denominator ? { numerator: enc.framerate.numerator, denominator: enc.framerate.denominator } : (idx === 0 ? input.landscape : input.vertical).fps;
+    return {
+      feed,
+      width,
+      height,
+      fps,
+      bitrateKbps: Math.round(bitrate),
+      keyintSec: enc.settings?.keyint_sec && enc.settings.keyint_sec > 0 ? enc.settings.keyint_sec : 2,
+      profile: profileOf(enc.settings?.profile),
+      bframes: Math.max(0, Math.min(4, Math.round(enc.settings?.bf ?? 2))),
+    };
+  });
+  if (tracks[0]!.feed !== 'landscape') throw rejected('its first track is not the landscape feed');
+  if (!tracks.some((t) => t.feed === 'vertical')) throw rejected('it returned no track for the vertical feed (is Dual Format enabled for this channel?)');
 
-  return { url: ingestUrl(config, input), mode: 'multitrack', feeds: ['landscape', 'vertical'] };
+  const liveAudio = config.audio_configurations?.live ?? [];
+  if (liveAudio.length !== 1) throw rejected(`it asks for ${liveAudio.length} audio tracks; Relay sends exactly one`);
+  const audio = liveAudio[0]!;
+  if (audio.codec && audio.codec.toLowerCase() !== 'aac') throw rejected(`it asks for ${audio.codec} audio; Relay sends AAC`);
+
+  return {
+    url: ingestUrl(config, input),
+    mode: 'ivs',
+    feeds: ['landscape', 'vertical'],
+    ivs: {
+      tracks,
+      audioBitrateKbps: audio.settings?.bitrate && audio.settings.bitrate > 0 ? Math.round(audio.settings.bitrate) : 160,
+      audioChannels: audio.channels && audio.channels > 0 ? audio.channels : 2,
+      preset: x264Preset(),
+    },
+  };
 }
 
 /** Pick an endpoint (RTMPS preferred) and build `<server>/<authentication>?...&clientConfigId=<id>`. */

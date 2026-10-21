@@ -10,6 +10,9 @@ import type { ScopedSecrets } from '../services.js';
 export class FakeChild extends EventEmitter {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
+  /** fd 3 (FFmpeg's progress in 'ivs' pushes, where stdout carries the FLV stream). */
+  readonly fd3 = new PassThrough();
+  readonly stdio = [null, this.stdout, this.stderr, this.fd3];
   pid: number | undefined = 4242;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
@@ -32,6 +35,7 @@ export class FakeChild extends EventEmitter {
     this.emit('exit', code, signal);
     this.stdout.end();
     this.stderr.end();
+    this.fd3.end();
     this.emit('close', code, signal);
   }
 

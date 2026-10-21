@@ -50,7 +50,7 @@ Only admins can manage developer apps, accounts and destinations. Operators can 
 
 ### Notes
 
-- **Dual Format** modes per destination: "Relay one feed" (default), "OBS sends Dual Format directly" (the recommended way to get Dual Format), or "Relay both feeds as Dual Format" (**experimental**; Twitch currently refuses it, so use OBS direct). See [OBS setup](OBS-SETUP.md#twitch-dual-format).
+- **Dual Format** modes per destination: "Relay one feed" (default), "OBS sends Dual Format directly", or "Relay both feeds as Dual Format": the app encodes the tracks Twitch's Enhanced Broadcasting asks for (two per feed) on the server and publishes them with the required performance metrics. See [OBS setup](OBS-SETUP.md#twitch-dual-format).
 - **Bandwidth test** (destination option) streams to Twitch without going live publicly, which is handy for testing.
 - Twitch expires the sign-in of a public-client app after about 30 days without use. If you haven't streamed for a month, the account may ask you to connect again.
 
