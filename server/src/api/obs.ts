@@ -237,11 +237,11 @@ export class ObsStateStore {
         const prev = track.scenes.get(key);
         const scene = ev.data.scene ?? null;
         const sceneUuid = ev.data.sceneUuid ?? null;
-        // The scene list is stored whenever sent (a list-only change updates it without a re-emit) and
-        // kept when an event leaves it out.
+        // The scene list is kept when an event leaves it out; a changed list is re-emitted too (a scene
+        // added, renamed or removed), the 60 s resend of the same list is not.
         const list = Array.isArray(ev.data.scenes) ? ev.data.scenes : prev?.scenes;
         bounded(track.scenes, key, { canvas: key, scene, sceneUuid, atMs: ev.data.atMs ?? null, ...(list ? { scenes: list } : {}), updatedAt: ev.ts });
-        return !prev || !sameJson([prev.scene, prev.sceneUuid], [scene, sceneUuid]);
+        return !prev || !sameJson([prev.scene, prev.sceneUuid, prev.scenes ?? null], [scene, sceneUuid, list ?? null]);
       }
       case 'obs.sync.status': {
         const prev = track.sync.get(key);

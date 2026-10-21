@@ -812,7 +812,7 @@ the server's time.
 | `obs.feed.state` | `{ source: { name, path?, server? }, state: CONNECTING \| LIVE \| STALLED \| RECONNECTING \| NO_SIGNAL, previous?, gapMs? }` | the source's state |
 | `obs.feed.stats` | `{ source: { name }, fps, width, height, latenessMs, resyncs, reconnects, decoder }` | the source's `stats` (re-emitted at most every 5 s per source) |
 | `obs.output` | `{ output: "main" \| "vertical" \| "record" \| <name>, canvas?, state: starting \| live \| reconnecting \| stopped, error? }` | the output's state |
-| `obs.scene` | `{ canvas: "landscape" \| "vertical", scene, sceneUuid?, previous?, atMs?, scenes?: [{ name, uuid }] }` — `previous` only on a real change; `atMs` = the OBS host's clock, for ordering; `scenes` = the canvas's full scene list in OBS order | the canvas's program scene, and its scene list (a list-only change updates it without a re-emit; kept when an event leaves it out) |
+| `obs.scene` | `{ canvas: "landscape" \| "vertical", scene, sceneUuid?, previous?, atMs?, scenes?: [{ name, uuid }] }` — `previous` only on a real change; `atMs` = the OBS host's clock, for ordering; `scenes` = the canvas's full scene list in OBS order | the canvas's program scene, and its scene list (kept when an event leaves it out) |
 | `obs.sync.status` | `{ group, sourceName, state, previous?, lost?, offsetMs?, delayMs? }` | the sync group member's status |
 | `obs.issue.raised` | `{ id: "<rule>\|<subject>", rule, severity: info \| warning \| critical, source, path?, title, cause?, firstSeen }` | an open issue, until cleared |
 | `obs.issue.cleared` | `{ id, rule? }` | removes the open issue |
@@ -823,8 +823,9 @@ hold time, cleared 10 s after the condition ends (low volume); show `title` to p
 
 **Overlays that follow the OBS scene** (CTD Overlay): subscribe to `/events?types=obs.scene`
 (`status:read`). The plugin sends a scene change within ~100 ms (a transition counts from its
-start) and Relay re-emits it at once, per canvas, whenever the scene (name or `sceneUuid`)
-changed — use `previous` / `atMs` to order changes from several OBS machines. "obs.feed" is a source *inside OBS* (e.g. a remote camera), not CTD's own ingest feeds,
+start) and Relay re-emits it at once, per canvas, whenever the scene (name or `sceneUuid`) or
+the scene list changed (a list-only change has the same scene and no `previous`) — use
+`previous` / `atMs` to order changes from several OBS machines. "obs.feed" is a source *inside OBS* (e.g. a remote camera), not CTD's own ingest feeds,
 which are `feed.status`.
 
 **On `/events`** (`status:read`): the same types, `src` = `{ connection: <appId>, platform: "obs",
@@ -957,7 +958,7 @@ the revision in `info.version`.
   whose app is offline when the new token is newer and the app is of the same `kind` (instead of
   `409 app_owned`).
 - `obs.scene` may carry `scenes: [{name, uuid}]` (the canvas's scene list); `GET /profiles/{id}/obs`
-  keeps it per canvas in `scenes[].scenes`.
+  keeps it per canvas in `scenes[].scenes`, and a changed list is re-emitted on `/events`.
 
 ### v1.5
 
