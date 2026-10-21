@@ -1,5 +1,5 @@
 import { useEffect, useId, useReducer, useState, type FormEvent } from 'react';
-import type { ApiAccessInfo, ApprovePairingRequest, CreateApiTokenResponse } from '@shared/api';
+import type { ApiAccessInfo, ApprovePairingRequest, ConnectOfferResponse, CreateApiTokenResponse } from '@shared/api';
 import type { ApiScope, ApiTokenInfo, ConnectedApp, PairingRequest, ProfileSummary } from '@shared/types';
 import { API_SCOPES, DEFAULT_PROFILE_ID } from '@shared/types';
 import { api } from '../../api';
@@ -177,6 +177,7 @@ export function ApiTab() {
         onApprove={approve}
         onDeny={deny}
       />
+      <PhoneConnectCard profiles={profiles} defaultProfileId={currentId} onConnected={res.reload} />
       {!res.data ? (
         <Card>
           {res.error ? (
@@ -954,6 +955,141 @@ export function DockCard({
         {created && (
           <p className="muted small">Each link has its own token. When you replace a link, revoke the old "{created.token.name}" token above.</p>
         )}
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Connect a phone (QR code for CTD Live mobile)
+// ---------------------------------------------------------------------------
+
+/** "4:59" until `iso`, or null once it's past. */
+export function countdown(iso: string, now: number): string | null {
+  const left = Math.ceil((Date.parse(iso) - now) / 1000);
+  if (!Number.isFinite(left) || left <= 0) return null;
+  return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+}
+
+export function PhoneConnectCard({
+  profiles = null,
+  defaultProfileId = DEFAULT_PROFILE_ID,
+  onConnected,
+}: {
+  profiles?: Profiles;
+  defaultProfileId?: string;
+  /** A phone claimed the code (a token was created): reload the token list. */
+  onConnected?: () => void;
+}) {
+  const [profileValue, setProfileValue] = useState<string>(() => profileToSelect(defaultProfileId));
+  const [offer, setOffer] = useState<ConnectOfferResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const now = useNow(offer?.state === 'waiting' ? 1000 : null);
+  const several = (profiles?.length ?? 0) > 1;
+  const left = offer ? countdown(offer.expiresAt, now) : null;
+  const state = offer?.state === 'waiting' && left === null ? 'expired' : offer?.state;
+
+  // While the code is on screen, check every 2 s whether a phone used it.
+  useEffect(() => {
+    if (!offer || offer.state !== 'waiting') return;
+    let stop = false;
+    const timer = setInterval(() => {
+      api.connectOfferStatus(offer.id).then(
+        (s) => {
+          if (stop || s.state === 'waiting') return;
+          setOffer((o) => (o && o.id === s.id ? { ...o, state: s.state, deviceName: s.deviceName } : o));
+          if (s.state === 'connected') {
+            toast.success(`${s.deviceName ?? 'The phone'} is connected.`);
+            onConnected?.();
+          }
+        },
+        () => {},
+      );
+    }, 2000);
+    return () => {
+      stop = true;
+      clearInterval(timer);
+    };
+  }, [offer?.id, offer?.state]);
+
+  // An unused code is withdrawn when it's hidden or the page is left.
+  useEffect(() => {
+    const id = offer?.state === 'waiting' ? offer.id : null;
+    return () => {
+      if (id) void api.cancelConnectOffer(id).catch(() => {});
+    };
+  }, [offer?.id, offer?.state]);
+
+  const show = async () => {
+    setBusy(true);
+    try {
+      setOffer(await api.createConnectOffer({ profileId: profileFromSelect(profileValue) }));
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Connect a phone" subtitle="CTD Live mobile: scan once and it connects, on your Wi-Fi or on mobile data.">
+      <div className="stack">
+        {several && !offer && (
+          <Field label="Profile" help="What the phone sees: one profile, or every profile.">
+            <Select options={withSelectedOption(profileSelectOptions(profiles), profileValue, profiles)} value={profileValue} onValueChange={setProfileValue} disabled={busy} />
+          </Field>
+        )}
+        {offer && state === 'waiting' && (
+          <div className="stack" style={{ alignItems: 'center' }}>
+            <img
+              className="qr-code"
+              src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(offer.qrSvg)}`}
+              alt="QR code to connect CTD Live mobile"
+              width={240}
+              height={240}
+            />
+            <p className="small" role="status">
+              In <strong>CTD Live mobile</strong>, tap <strong>Scan</strong> and point the camera here. Works once, for {left}.
+            </p>
+            {offer.apiUrlIsPrivate && (
+              <div className="alert alert-warn">
+                This server only knows its LAN address ({offer.apiUrl}), so the phone can connect on your Wi-Fi but not on mobile
+                data. Check that your router forwards port 443 and that Settings → Network shows your public address.
+              </div>
+            )}
+            <p className="muted small">
+              The phone connects to <code>{offer.apiUrl}</code>
+              {offer.lanApiUrl ? (
+                <>
+                  {' '}
+                  (on your Wi-Fi: <code>{offer.lanApiUrl}</code>)
+                </>
+              ) : null}
+              . Don't show this code on stream: until it's used it lets a phone in.
+            </p>
+          </div>
+        )}
+        {offer && state === 'connected' && (
+          <div className="alert alert-success" role="status">
+            <strong>{offer.deviceName ?? 'The phone'}</strong> is connected. It's in the token list above, where you can revoke it any time.
+          </div>
+        )}
+        {offer && state === 'expired' && <div className="alert">That code expired or was replaced. Show a new one.</div>}
+        <p className="muted small">
+          The phone gets read-only access{several ? ' to the profile you pick' : ''}: live status, viewers, chat, OBS state and the
+          feed previews. Never your stream keys or settings.
+        </p>
+        <div className="row" style={{ flexWrap: 'wrap' }}>
+          {offer && state === 'waiting' ? (
+            <Button variant="secondary" onClick={() => setOffer(null)}>
+              Hide code
+            </Button>
+          ) : (
+            <Button variant="primary" loading={busy} onClick={() => void show()}>
+              {offer ? 'Connect another phone' : 'Show QR code'}
+            </Button>
+          )}
+        </div>
       </div>
     </Card>
   );

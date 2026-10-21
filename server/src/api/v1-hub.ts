@@ -6,6 +6,8 @@ import { z } from 'zod';
 import { API_SCOPES, DEFAULT_PROFILE_ID, type ApiScope } from '../../../shared/types.js';
 import { OBS_BODY_LIMIT, OBS_POSTS_PER_MINUTE, ObsEventsBody, obsStoreFor, parseObsEvents } from './obs.js';
 import { grabWithFfmpeg, previewServiceFor } from './previews.js';
+import { connectOffersFor, DEVICE_NAME_MAX } from './connect.js';
+import { API_REVISION } from './openapi.js';
 import type { AppMessage } from '../events.js';
 import type { AppServices } from '../services.js';
 import { APP_ID_RE, APP_KIND_RE, issuesText, overlaysFor, parseAppRegistration, publicApp } from './hub.js';
@@ -59,6 +61,17 @@ const PairingBody = z.object({
 
 const PollBody = z.object({ pollSecret: z.string().min(1).max(200) });
 
+const ClaimBody = z.object({
+  code: z.string().min(1).max(200),
+  deviceName: z
+    .string()
+    .max(DEVICE_NAME_MAX, `at most ${DEVICE_NAME_MAX} characters`)
+    .refine((s) => !CONTROL_RE.test(s), 'control characters are not allowed')
+    .optional(),
+});
+/** Claims per address per minute: a phone needs one; guessing a 256-bit code is hopeless anyway. */
+export const CLAIMS_PER_MINUTE_PER_IP = 10;
+
 /**
  * The web UI address the admin approves pairings at, as seen by the app that asked: same host it
  * used. A request over the LAN's plain-HTTP port maps back to HTTPS with the same port shift the
@@ -91,6 +104,7 @@ export function registerHubRoutes(app: FastifyInstance, ctx: V1Context): void {
   const messageLimiter = new SlidingWindowLimiter(MESSAGES_PER_MINUTE, 60_000, ctx.now);
   const pairingLimiter = new SlidingWindowLimiter(PAIRINGS_PER_MINUTE_PER_IP, 60_000, ctx.now);
   const pollLimiter = new SlidingWindowLimiter(PAIRING_POLLS_PER_MINUTE_PER_IP, 60_000, ctx.now);
+  const claimLimiter = new SlidingWindowLimiter(CLAIMS_PER_MINUTE_PER_IP, 60_000, ctx.now);
   const messageId = createUlidGenerator(ctx.now);
   const obsLimiter = new SlidingWindowLimiter(OBS_POSTS_PER_MINUTE, 60_000, ctx.now);
   const obsStore = obsStoreFor(services);
@@ -322,6 +336,28 @@ export function registerHubRoutes(app: FastifyInstance, ctx: V1Context): void {
     };
     services.bus.emit('app-message', message);
     return reply.code(201).header('cache-control', 'no-store').send({ id: message.id });
+  });
+
+  // ---- "Connect a phone" claim (no token yet: rate-limited per address; docs/API.md §11) ----
+
+  app.post('/connect/claim', { bodyLimit: PAIRING_BODY_LIMIT }, async (req, reply) => {
+    if (!ipLimited(claimLimiter, req, reply, 'connect attempts')) return reply;
+    const parsed = ClaimBody.safeParse(req.body ?? {});
+    if (!parsed.success) return sendProblem(reply, 400, 'invalid', issuesText(parsed.error));
+    const deviceName = parsed.data.deviceName?.trim() || 'CTD Live mobile';
+    const claimed = connectOffersFor(services).claim(parsed.data.code, deviceName);
+    if (!claimed) {
+      return sendProblem(reply, 410, 'expired', 'This QR code was already used or has expired. Show a new one in CTD Relay (Settings → API → Connect a phone).');
+    }
+    services.log.info({ tokenId: claimed.token.id, ip: req.ip }, 'connect: a phone connected with a QR code');
+    return reply.header('cache-control', 'no-store').send({
+      token: claimed.secret,
+      tokenId: claimed.token.id,
+      name: claimed.token.name,
+      scopes: claimed.token.scopes,
+      profileId: claimed.token.profileId ?? null,
+      server: { name: 'CTD Relay', version: services.config.version, apiRevision: API_REVISION },
+    });
   });
 
   // ---- pairing (no token yet: rate-limited per address) ----

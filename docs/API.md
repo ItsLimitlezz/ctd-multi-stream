@@ -811,14 +811,19 @@ the server's time.
 | `obs.feed.state` | `{ source: { name, path?, server? }, state: CONNECTING \| LIVE \| STALLED \| RECONNECTING \| NO_SIGNAL, previous?, gapMs? }` | the source's state |
 | `obs.feed.stats` | `{ source: { name }, fps, width, height, latenessMs, resyncs, reconnects, decoder }` | the source's `stats` (re-emitted at most every 5 s per source) |
 | `obs.output` | `{ output: "main" \| "vertical" \| "record" \| <name>, canvas?, state: starting \| live \| reconnecting \| stopped, error? }` | the output's state |
-| `obs.scene` | `{ canvas: "landscape" \| "vertical", scene }` | the canvas's program scene |
+| `obs.scene` | `{ canvas: "landscape" \| "vertical", scene, sceneUuid?, previous?, atMs? }` — `previous` only on a real change; `atMs` = the OBS host's clock, for ordering | the canvas's program scene |
+| `obs.sync.status` | `{ group, sourceName, state, previous?, lost?, offsetMs?, delayMs? }` | the sync group member's status |
 | `obs.issue.raised` | `{ id: "<rule>\|<subject>", rule, severity: info \| warning \| critical, source, path?, title, cause?, firstSeen }` | an open issue, until cleared |
 | `obs.issue.cleared` | `{ id, rule? }` | removes the open issue |
 
 Issue rules from the plugin so far: `camera-offline`, `upstream-loss`, `upstream-slow`,
 `bitrate-collapsed`, `frequent-snaps`, `av-drift`, `audio-rate`, `audio-missing` — raised after a
-hold time, cleared 10 s after the condition ends (low volume); show `title` to people. (`obs.sync.status`
-will follow; until then it is ignored.) "obs.feed" is a source *inside OBS* (e.g. a remote camera), not CTD's own ingest feeds,
+hold time, cleared 10 s after the condition ends (low volume); show `title` to people.
+
+**Overlays that follow the OBS scene** (CTD Overlay): subscribe to `/events?types=obs.scene`
+(`status:read`). The plugin sends a scene change within ~100 ms (a transition counts from its
+start) and Relay re-emits it at once, per canvas, whenever the scene (name or `sceneUuid`)
+changed — use `previous` / `atMs` to order changes from several OBS machines. "obs.feed" is a source *inside OBS* (e.g. a remote camera), not CTD's own ingest feeds,
 which are `feed.status`.
 
 **On `/events`** (`status:read`): the same types, `src` = `{ connection: <appId>, platform: "obs",
@@ -855,16 +860,57 @@ the frame was taken). `404 feed_offline` while OBS isn't sending that feed; `503
 
 ### Typical set-up: CTD Live mobile
 
-Pair (`kind: "ctd-live-mobile"`, scopes `status:read` + `chat:read`) → `GET /profiles` → per
-profile: `/events?profile=<id>` for `stream.status` (live, total viewers), `destination.down/up`,
-`obs.*` and chat → `GET /profiles/{id}/obs` once on start → poll
-`/profiles/{id}/previews/landscape|vertical` every few seconds while the screen shows them.
+Connect with the QR code (§11) → `GET /profiles` → per profile: `/events?profile=<id>` for
+`stream.status` (live, total viewers), `destination.down/up`, `obs.*` and chat → `GET
+/profiles/{id}/obs` once on start → poll `/profiles/{id}/previews/landscape|vertical` every few
+seconds while the screen shows them.
+
+## 11. Connect a phone with a QR code (v1.5)
+
+So CTD Live mobile connects in one scan — on the same Wi-Fi or on **mobile data** — without typing
+an address or a token. In **Settings → API → Connect a phone** an admin picks the profile (or every
+profile) and gets a QR code holding:
+
+```
+ctdrelay://connect?v=1&api=<public API URL>&lan=<LAN API URL>&fp=<certificate SHA-256>&code=<one-time code>
+```
+
+| Parameter | |
+|---|---|
+| `api` | The public HTTPS address of the API (`https://<public IP or domain>/api/v1`): what a phone on mobile data uses. The router must forward port 443 to CTD Relay. |
+| `lan` | The LAN address (optional): try it first on the same network, it's faster. |
+| `fp` | SHA-256 fingerprint of the certificate (optional). With a self-signed certificate, pin it: accept the server only if its certificate matches. |
+| `code` | One-time secret, valid **5 minutes**, works **once**. |
+
+The app then calls (no token):
+
+#### `POST /api/v1/connect/claim`
+```json
+{ "code": "<code from the QR>", "deviceName": "Juan's iPhone" }
+```
+→ `200 { "token": "ctd_pat_…", "tokenId", "name", "scopes": ["chat:read", "status:read"],
+"profileId": "6f1d…" | null, "server": { "name": "CTD Relay", "version", "apiRevision" } }`.
+Store the token securely (Keychain / Keystore); it never expires until revoked in Settings → API,
+where the phone shows up under its `deviceName`. A used, expired or unknown code is `410 expired`
+(show a new QR code); 10 attempts/minute per address. The token is read-only — status, viewers,
+chat, OBS state, previews — never stream keys or settings.
+
+Use `api` from anywhere; when `lan` answers (same Wi-Fi), prefer it. Both reach the same server,
+so the same token works on both.
 
 ## Changelog
 
 `apiVersion` stays `1`: every change below is additive, so clients written for an earlier v1
 keep working (ignore event types and fields you don't know). `GET /api/v1/openapi.json` reports
 the revision in `info.version`.
+
+### v1.5
+
+- **Connect a phone (§11):** QR code in Settings → API (`ctdrelay://connect?…`) and
+  `POST /connect/claim` → a read-only token for CTD Live mobile, over the LAN or mobile data.
+- `obs.scene` carries `sceneUuid`, `previous` and `atMs` and is re-emitted on a scene (name or uuid)
+  change; new `obs.sync.status`; `GET /profiles/{id}/obs` adds `scenes[].sceneUuid/atMs` and `sync`.
+- `obs.issue.raised` / `obs.issue.cleared` (open issues in `GET /profiles/{id}/obs` → `issues`).
 
 ### v1.4
 

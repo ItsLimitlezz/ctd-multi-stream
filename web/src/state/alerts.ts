@@ -1,4 +1,4 @@
-// Opt-in alerts for server notices (e.g. "Instagram ended the live (copyright)â€¦", "â€¦is live again"):
+// Opt-in alerts for server notices (e.g. "Instagram ended the live (copyright)…", "…is live again"):
 // a sound generated with the Web Audio API (no audio files, nothing external), a browser
 // notification (through the notifications-only service worker web/public/sw.js when it runs,
 // which Android requires) and, optionally, the message read aloud. The preference is per browser
@@ -308,7 +308,7 @@ function showWithConstructor(N: NotificationCtor, title: string, options: Notifi
 export function showAlertNotification(level: NoticeLevel, message: string, env: AlertEnv = browserEnv()): boolean {
   const N = env.Notification;
   if (notificationStatus(env) !== 'granted' || !N) return false;
-  const title = `${noticeTitle(level)} Â· CTD Relay`;
+  const title = `${noticeTitle(level)} · CTD Relay`;
   const options: NotificationOptions = {
     body: message,
     tag: `ctd-${level}-${hashText(message)}`,
@@ -334,7 +334,7 @@ export interface WorkerContainerLike {
 
 /**
  * Register the notifications-only service worker and resolve with its registration once active;
- * null when it can't run here (no support, private mode, a self-signed certificateâ€¦). Never rejects.
+ * null when it can't run here (no support, private mode, a self-signed certificate…). Never rejects.
  */
 export async function startAlertWorker(container: WorkerContainerLike | null | undefined): Promise<AlertWorker | null> {
   if (!container) return null;
@@ -372,7 +372,7 @@ export interface ToneStep {
   /** Seconds. */
   dur: number;
   type: OscillatorType;
-  /** Peak gain (0â€“1). */
+  /** Peak gain (0–1). */
   gain: number;
 }
 
@@ -382,7 +382,7 @@ export function soundForLevel(level: string): AlertSound {
 
 export function alertPattern(sound: AlertSound): ToneStep[] {
   if (sound === 'gentle') {
-    // Two soft rising notes (E5 â†’ B5).
+    // Two soft rising notes (E5 → B5).
     return [
       { freq: 659.25, at: 0, dur: 0.4, type: 'sine', gain: 0.2 },
       { freq: 987.77, at: 0.18, dur: 0.6, type: 'sine', gain: 0.18 },

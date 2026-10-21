@@ -1617,6 +1617,17 @@ img {
   --tone: var(--success);
   --tone-soft: var(--success-soft);
 }
+/* Connect a phone: the QR code stays black on white in dark mode too (cameras need the contrast). */
+.qr-code {
+  display: block;
+  width: 240px;
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  border-radius: 12px;
+  padding: 8px;
+  image-rendering: pixelated;
+}
 .code-input {
   font-family: var(--mono);
   letter-spacing: 0.12em;

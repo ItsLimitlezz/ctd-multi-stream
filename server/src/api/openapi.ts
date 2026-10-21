@@ -7,12 +7,13 @@ import { APP_ID_RE, APP_KIND_RE, CAPABILITY_RE, MAX_CAPABILITIES, MAX_META_BYTES
 import { PROBLEM_CODES, PROBLEM_TYPE } from './http.js';
 import { MAX_PENDING_PAIRINGS, MAX_PENDING_PAIRINGS_INTERNET, MAX_PENDING_PAIRINGS_PER_ADDRESS, PAIRING_CODE_RE, PAIRING_POLL_INTERVAL_SEC, PAIRING_TTL_MS } from './pairing.js';
 import { ALERT_COUNT_UNITS, ALERT_KINDS, API_ROLES, EVENT_TYPES } from './types.js';
-import { MESSAGE_DATA_MAX_BYTES, MESSAGE_TYPE_RE, MESSAGES_PER_MINUTE, PAIRINGS_PER_MINUTE_PER_IP } from './v1-hub.js';
+import { CLAIMS_PER_MINUTE_PER_IP, MESSAGE_DATA_MAX_BYTES, MESSAGE_TYPE_RE, MESSAGES_PER_MINUTE, PAIRINGS_PER_MINUTE_PER_IP } from './v1-hub.js';
 import { OBS_BODY_LIMIT, OBS_DATA_MAX_BYTES, OBS_EVENT_TYPES, OBS_MAX_EVENTS, OBS_POSTS_PER_MINUTE } from './obs.js';
 import { PREVIEW_MAX_AGE_MS } from './previews.js';
+import { CONNECT_OFFER_TTL_MS, DEVICE_NAME_MAX, MOBILE_SCOPES } from './connect.js';
 
 /** Minor revision of the v1 contract (additive changes only; see the changelog in docs/API.md). */
-export const API_REVISION = '1.4';
+export const API_REVISION = '1.5';
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const nullable = (schema: object) => ({ oneOf: [schema, { type: 'null' }] });
@@ -346,6 +347,42 @@ export function openApiDocument(version: string): Record<string, unknown> {
             ...errors,
             '403': problemResponse('Token lacks apps:write (`missing_scope`), or names another profile (`profile_forbidden`)'),
             '404': problemResponse('No app registered as `to` (`not_found`), or no profile with that `profileId` (`unknown_profile`)'),
+          },
+        },
+      },
+      '/connect/claim': {
+        post: {
+          summary: 'Claim a phone token with the one-time code from a QR code (v1.5)',
+          operationId: 'claimConnect',
+          tags: ['pairing'],
+          security: [],
+          description: `No token. The QR code shown in Settings → API → Connect a phone holds \`ctdrelay://connect?v=1&api=<public API URL>&lan=<LAN API URL>&fp=<certificate SHA-256>&code=<one-time code>\`. Claim once within ${CONNECT_OFFER_TTL_MS / 60_000} minutes; the token is read-only (${MOBILE_SCOPES.join(', ')}). ${CLAIMS_PER_MINUTE_PER_IP} attempts/minute per address.`,
+          requestBody: {
+            required: true,
+            content: json({
+              type: 'object',
+              required: ['code'],
+              properties: { code: str, deviceName: { type: 'string', maxLength: DEVICE_NAME_MAX, description: 'Shown in Settings → API, e.g. "Juan\'s iPhone"' } },
+            }),
+          },
+          responses: {
+            '200': {
+              description: 'The token (returned once)',
+              content: json({
+                type: 'object',
+                properties: {
+                  token: { type: 'string', description: 'ctd_pat_… — store it securely' },
+                  tokenId: str,
+                  name: str,
+                  scopes: { type: 'array', items: ref('Scope') },
+                  profileId: nullable(str),
+                  server: { type: 'object', properties: { name: str, version: str, apiRevision: str } },
+                },
+              }),
+            },
+            '400': problemResponse('Bad body (`invalid`)'),
+            '410': problemResponse('Unknown, used or expired code (`expired`): show a new QR code'),
+            '429': errors['429'],
           },
         },
       },

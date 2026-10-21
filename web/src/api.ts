@@ -11,11 +11,14 @@ import type {
   AuditResponse,
   ChangePasswordRequest,
   ConnectCompleteRequest,
+  ConnectOfferResponse,
+  ConnectOfferStatus,
   ConnectPoll,
   ConnectStart,
   CreateAccountRequest,
   CreateApiTokenRequest,
   CreateApiTokenResponse,
+  CreateConnectOfferRequest,
   CreateDestinationRequest,
   CreateProfileRequest,
   CreateUserRequest,
@@ -220,6 +223,9 @@ export const api = {
   createApiToken: (body: CreateApiTokenRequest) => post<CreateApiTokenResponse>('/api/tokens', body),
   /** Also removes the apps that token registered. */
   deleteApiToken: (id: string) => del<object>(`/api/tokens/${encodeURIComponent(id)}`),
+  createConnectOffer: (body: CreateConnectOfferRequest) => post<ConnectOfferResponse>('/api/connect-offers', body),
+  connectOfferStatus: (id: string) => get<ConnectOfferStatus>(`/api/connect-offers/${encodeURIComponent(id)}`),
+  cancelConnectOffer: (id: string) => del<object>(`/api/connect-offers/${encodeURIComponent(id)}`),
 
   // app pairing + connected apps (Settings → API)
   /** Pending "connect this app" requests, newest first. */

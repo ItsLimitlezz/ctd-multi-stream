@@ -138,13 +138,13 @@ describe('browser notifications', () => {
   it('shows a notification with the notice text when allowed', () => {
     const { Ctor, created } = fakeNotification('granted');
     const env: AlertEnv = { isSecureContext: true, Notification: Ctor };
-    expect(showAlertNotification('warn', 'Instagram ended the live (copyright). Starting a new oneâ€¦', env)).toBe(true);
+    expect(showAlertNotification('warn', 'Instagram ended the live (copyright). Starting a new one…', env)).toBe(true);
     expect(created).toHaveLength(1);
     expect(created[0]?.title).toMatch(/^Stream alert/);
-    expect(created[0]?.options?.body).toBe('Instagram ended the live (copyright). Starting a new oneâ€¦');
+    expect(created[0]?.options?.body).toBe('Instagram ended the live (copyright). Starting a new one…');
     expect(created[0]?.options?.icon).toBe('/icon-192.png');
     // Same notice in several tabs -> same tag (one notification).
-    showAlertNotification('warn', 'Instagram ended the live (copyright). Starting a new oneâ€¦', env);
+    showAlertNotification('warn', 'Instagram ended the live (copyright). Starting a new one…', env);
     expect(created[1]?.options?.tag).toBe(created[0]?.options?.tag);
     showAlertNotification('error', 'gave up', env);
     expect(created[2]?.options?.requireInteraction).toBe(true);

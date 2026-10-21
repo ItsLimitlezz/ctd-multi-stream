@@ -382,6 +382,35 @@ export interface CreateApiTokenResponse {
 }
 /** DELETE /api/tokens/:id -> {} */
 
+/**
+ * "Connect a phone" [admin] (docs/API.md §11): a one-time QR code CTD Live mobile scans, over the
+ * LAN or mobile data, to get its own read-only token (status + chat).
+ * POST /api/connect-offers body CreateConnectOfferRequest -> ConnectOfferResponse
+ * GET /api/connect-offers/:id -> ConnectOfferStatus ; DELETE /api/connect-offers/:id -> {}
+ */
+export interface CreateConnectOfferRequest {
+  /** Limit the phone to one profile, or null = every profile. */
+  profileId: string | null;
+}
+export interface ConnectOfferStatus {
+  id: string;
+  state: 'waiting' | 'connected' | 'expired';
+  /** The phone's name once it connected. */
+  deviceName: string | null;
+  expiresAt: string;
+}
+export interface ConnectOfferResponse extends ConnectOfferStatus {
+  /** QR code as an SVG document (show it as an image). */
+  qrSvg: string;
+  /** The text in the QR code (ctdrelay://connect?…), e.g. to copy to a phone. */
+  uri: string;
+  /** The address phones on mobile data will use, and the LAN one (null when unknown). */
+  apiUrl: string;
+  lanApiUrl: string | null;
+  /** True when apiUrl is a private/LAN address: phones on mobile data can't reach it. */
+  apiUrlIsPrivate: boolean;
+}
+
 /** GET /api/pairings [admin] -> PairingRequest[] (pending app connections, newest first) */
 /** POST /api/pairings/:id/approve [admin] -> CreateApiTokenResponse (the app receives the token itself; the secret is not shown) */
 export interface ApprovePairingRequest {

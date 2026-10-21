@@ -140,6 +140,23 @@ describe('POST /apps/{appId}/events', () => {
     expect(types).toEqual(['obs.issue.raised', 'obs.issue.raised', 'obs.issue.cleared']);
   });
 
+  it('scene changes reach /events at once with uuid/previous/atMs; the 60 s resend does not; sync status kept per member', async () => {
+    await register();
+    const start = t.hub.cursor();
+    const post = (events: unknown[]) => call('POST', '/api/v1/apps/ctd-obs-plugin-studio/events', obs, { events });
+    await post([ev('c1', 'obs.scene', { canvas: 'vertical', scene: 'Intro', sceneUuid: 'u-1', atMs: 1 })]);
+    await post([ev('c2', 'obs.scene', { canvas: 'vertical', scene: 'Takeover', sceneUuid: 'u-2', previous: 'Intro', atMs: 2 })]);
+    await post([ev('c3', 'obs.scene', { canvas: 'vertical', scene: 'Takeover', sceneUuid: 'u-2', atMs: 3 })]); // resend
+    await post([ev('y1', 'obs.sync.status', { group: 'cams', sourceName: 'Cam A', state: 'LOCKED', offsetMs: 12 })]);
+    await post([ev('y2', 'obs.sync.status', { group: 'cams', sourceName: 'Cam A', state: 'LOCKED', offsetMs: 12 })]); // same
+    const items = (await call('GET', `/api/v1/events/poll?after=${start}&types=obs.*`, reader)).json().items as Envelope<Body>[];
+    expect(items.map((e) => e.type)).toEqual(['obs.scene', 'obs.scene', 'obs.sync.status']);
+    expect(items[1]!.data).toMatchObject({ canvas: 'vertical', scene: 'Takeover', sceneUuid: 'u-2', previous: 'Intro', atMs: 2 });
+    const state = (await call('GET', `/api/v1/profiles/${DEFAULT_PROFILE_ID}/obs`, reader)).json().apps[0];
+    expect(state.scenes).toEqual([{ canvas: 'vertical', scene: 'Takeover', sceneUuid: 'u-2', atMs: 3, updatedAt: expect.any(Number) }]);
+    expect(state.sync).toEqual([expect.objectContaining({ group: 'cams', sourceName: 'Cam A', state: 'LOCKED' })]);
+  });
+
   it('needs obs:write, a registered app owned by the token, and a valid body', async () => {
     await register();
     const noScope = t.token(['apps:write'], 'old plugin token');

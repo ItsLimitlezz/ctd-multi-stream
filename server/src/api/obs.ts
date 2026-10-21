@@ -6,7 +6,15 @@
 import { z } from 'zod';
 import { jsonBytes } from './json.js';
 
-export const OBS_EVENT_TYPES = ['obs.feed.state', 'obs.feed.stats', 'obs.output', 'obs.scene', 'obs.issue.raised', 'obs.issue.cleared'] as const;
+export const OBS_EVENT_TYPES = [
+  'obs.feed.state',
+  'obs.feed.stats',
+  'obs.output',
+  'obs.scene',
+  'obs.issue.raised',
+  'obs.issue.cleared',
+  'obs.sync.status',
+] as const;
 export type ObsEventType = (typeof OBS_EVENT_TYPES)[number];
 
 export const OBS_MAX_EVENTS = 50;
@@ -79,6 +87,11 @@ function keyOf(type: ObsEventType, data: Record<string, unknown>): string | null
     case 'obs.issue.cleared':
       // "<rule>|<subject>", e.g. "camera-offline|Club cam".
       return str(data.id);
+    case 'obs.sync.status': {
+      const group = str(data.group);
+      const source = str(data.sourceName);
+      return group && source ? `${group}|${source}` : null;
+    }
   }
 }
 
@@ -98,17 +111,29 @@ export interface ObsAppState {
   appId: string;
   feeds: ObsFeedState[];
   outputs: (Record<string, unknown> & { updatedAt: number })[];
-  scenes: { canvas: string; scene: unknown; updatedAt: number }[];
+  scenes: ObsSceneState[];
   /** Issues raised and not cleared yet (obs.issue.raised data, plus updatedAt). */
   issues: (Record<string, unknown> & { updatedAt: number })[];
+  /** Latest obs.sync.status per sync group member. */
+  sync: (Record<string, unknown> & { updatedAt: number })[];
+  updatedAt: number;
+}
+
+export interface ObsSceneState {
+  canvas: string;
+  scene: unknown;
+  sceneUuid: unknown;
+  /** The OBS host's clock at the change (for ordering), when sent. */
+  atMs: unknown;
   updatedAt: number;
 }
 
 interface AppTrack {
   feeds: Map<string, ObsFeedState>;
   outputs: Map<string, Record<string, unknown> & { updatedAt: number }>;
-  scenes: Map<string, { canvas: string; scene: unknown; updatedAt: number }>;
+  scenes: Map<string, ObsSceneState>;
   issues: Map<string, Record<string, unknown> & { updatedAt: number }>;
+  sync: Map<string, Record<string, unknown> & { updatedAt: number }>;
   updatedAt: number;
   seen: Map<string, number>;
   statsEmitted: Map<string, number>;
@@ -206,10 +231,18 @@ export class ObsStateStore {
         return changed;
       }
       case 'obs.scene': {
+        // Overlays switch on this: re-emitted at once when the canvas's scene changes (by name or uuid).
         const prev = track.scenes.get(key);
         const scene = ev.data.scene ?? null;
-        bounded(track.scenes, key, { canvas: key, scene, updatedAt: ev.ts });
-        return !prev || !sameJson(prev.scene, scene);
+        const sceneUuid = ev.data.sceneUuid ?? null;
+        bounded(track.scenes, key, { canvas: key, scene, sceneUuid, atMs: ev.data.atMs ?? null, updatedAt: ev.ts });
+        return !prev || !sameJson([prev.scene, prev.sceneUuid], [scene, sceneUuid]);
+      }
+      case 'obs.sync.status': {
+        const prev = track.sync.get(key);
+        const next = { ...ev.data };
+        bounded(track.sync, key, { ...next, updatedAt: ev.ts });
+        return !prev || !sameJson(withoutUpdatedAt(prev), next);
       }
       case 'obs.issue.raised': {
         const prev = track.issues.get(key);
@@ -235,6 +268,7 @@ export class ObsStateStore {
         outputs: [...t.outputs.values()],
         scenes: [...t.scenes.values()],
         issues: [...t.issues.values()],
+        sync: [...t.sync.values()],
         updatedAt: t.updatedAt,
       }))
       .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -257,7 +291,7 @@ export class ObsStateStore {
     }
     let t = apps.get(appId);
     if (!t) {
-      t = { feeds: new Map(), outputs: new Map(), scenes: new Map(), issues: new Map(), updatedAt: 0, seen: new Map(), statsEmitted: new Map() };
+      t = { feeds: new Map(), outputs: new Map(), scenes: new Map(), issues: new Map(), sync: new Map(), updatedAt: 0, seen: new Map(), statsEmitted: new Map() };
       apps.set(appId, t);
     }
     return t;

@@ -1,12 +1,15 @@
 // External API tokens (Settings → API) [admin]. The API itself lives under /api/v1 (server/src/api).
 // Tokens are shared by every profile but may be limited to one (`profileId`; null = every profile).
+// Also "Connect a phone": the one-time QR code CTD Live mobile scans (the claim is POST /api/v1/connect/claim).
 
 import fs from 'node:fs';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { ApiTokensResponse, CreateApiTokenResponse } from '../../../../shared/api.js';
+import type { ApiTokensResponse, ConnectOfferResponse, ConnectOfferStatus, CreateApiTokenResponse } from '../../../../shared/api.js';
 import { API_SCOPES, type ApiScope } from '../../../../shared/types.js';
 import { LAN_HTTP_HOST_ENV, LAN_HTTP_PORT_ENV, LAN_HTTP_PORT_SETTING, accessInfo, localIPv4Addresses, parsePortOverride } from '../../api/access.js';
+import { connectOffersFor, connectUri, qrSvg } from '../../api/connect.js';
+import { classifyIp } from '../../tls/public-ip.js';
 import type { AppServices } from '../../services.js';
 import { lanClientPolicy } from '../../tls/http-listener.js';
 import { audit, requireAdmin, sendError, type RouteOptions } from '../guards.js';
@@ -33,6 +36,20 @@ const CreateBody = z.strictObject({
   profileId: tokenProfileSchema.optional(),
 });
 const IdParams = z.object({ id: z.string().min(1).max(64) });
+const ConnectOfferBody = z.object({ profileId: tokenProfileSchema });
+
+/** A URL whose host is a private, loopback or link-local address (or a .local / localhost name). */
+export function urlIsPrivate(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    return true;
+  }
+  if (/^localhost$|\.local$|\.lan$|\.home\.arpa$/i.test(host)) return true;
+  // CGNAT (100.64/10) isn't reachable from the internet either (and is what Tailscale uses).
+  return ['private', 'cgnat', 'loopback', 'link-local', 'ula'].includes(classifyIp(host));
+}
 
 // C0/C1 controls and bidi overrides don't belong in a label shown in the UI and the audit log.
 export const CONTROL_RE = /[\u{0}-\u{1F}\u{7F}-\u{9F}\u{202A}-\u{202E}\u{2066}-\u{2069}]/u;
@@ -112,6 +129,50 @@ const tokenRoutes: FastifyPluginAsync<RouteOptions> = async (app, { services }) 
     );
     const body: CreateApiTokenResponse = { token: created.token, secret: created.secret };
     return reply.header('cache-control', 'no-store').send(body);
+  });
+
+  // ---- "Connect a phone": one-time QR code for CTD Live mobile (docs/API.md §11) ----
+
+  const offers = connectOffersFor(services);
+
+  app.post('/api/connect-offers', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = ConnectOfferBody.safeParse(req.body ?? {});
+    if (!parsed.success) return sendError(reply, 400, 'profileId: a profile id or null', 'invalid');
+    const profileId = parsed.data.profileId;
+    if (profileId !== null && !repos.profiles.get(profileId)) return sendError(reply, 404, 'Profile not found', 'unknown_profile');
+    const info = access(services, req);
+    const target = { apiUrl: info.baseUrl, lanApiUrl: info.lanBaseUrl, fingerprint256: info.tlsFingerprint256 };
+    const offer = offers.create({ profileId, createdBy: req.user?.username ?? null });
+    const uri = connectUri(target, offer.code);
+    const body: ConnectOfferResponse = {
+      id: offer.id,
+      state: 'waiting',
+      deviceName: null,
+      expiresAt: offer.expiresAt,
+      qrSvg: await qrSvg(uri),
+      uri,
+      apiUrl: target.apiUrl,
+      lanApiUrl: target.lanApiUrl,
+      apiUrlIsPrivate: urlIsPrivate(target.apiUrl),
+    };
+    // The code is a credential for 5 minutes: never logged or audited.
+    audit(services, req, 'connect_offer.create', `QR code for a phone, ${profileLabel(services, profileId)}`);
+    return reply.header('cache-control', 'no-store').send(body);
+  });
+
+  app.get('/api/connect-offers/:id', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = IdParams.safeParse(req.params);
+    if (!parsed.success) return sendError(reply, 400, 'Invalid offer id', 'invalid');
+    const status = offers.status(parsed.data.id);
+    if (!status) return sendError(reply, 404, 'No such QR code (it may have expired)', 'not_found');
+    const body: ConnectOfferStatus = { id: parsed.data.id, ...status };
+    return reply.header('cache-control', 'no-store').send(body);
+  });
+
+  app.delete('/api/connect-offers/:id', { preHandler: requireAdmin }, async (req) => {
+    const parsed = IdParams.safeParse(req.params);
+    if (parsed.success) offers.cancel(parsed.data.id);
+    return {};
   });
 
   app.delete('/api/tokens/:id', { preHandler: requireAdmin }, async (req, reply) => {
