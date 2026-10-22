@@ -212,6 +212,8 @@ export class DestinationRunner {
   private chatCtl: AbortController | null = null;
   private healthCtl: AbortController | null = null;
   private healthWarning: string | null = null;
+  /** A running push's own warning (e.g. Twitch Dual Format encoding slower than real time). */
+  private pushWarning: string | null = null;
 
   private recovery: Recovery | null = null;
   /** Back-to-back failed recovery attempts; reset whenever a live goes live. */
@@ -537,6 +539,11 @@ export class DestinationRunner {
       case 'running': {
         this.pushStatus = 'running';
         this.lastPushError = null;
+        const pushWarning = cleanText(ev.message ?? '') || null;
+        if (pushWarning !== this.pushWarning) {
+          this.pushWarning = pushWarning;
+          if (this.phase === 'live') this.set({ message: this.liveWarning() });
+        }
         this.clearPushDown();
         // The video reaches the platform: from here confirm's own timeout (or goLive) owns the attempt.
         this.clearAttempt();
@@ -626,6 +633,11 @@ export class DestinationRunner {
     else await this.pause();
   }
 
+  /** The card's message while live: the platform's warning, else the push's. */
+  private liveWarning(): string | null {
+    return this.healthWarning ?? this.pushWarning;
+  }
+
   private goLive(prepared: PreparedLive, stats?: DestinationState['stats']): void {
     const firstTime = !this.wentLive;
     this.wentLive = true;
@@ -634,7 +646,7 @@ export class DestinationRunner {
     this.clearAttempt();
     const patch: StatePatch = {
       phase: 'live',
-      message: this.healthWarning,
+      message: this.liveWarning(),
       watchUrl: prepared.watchUrl ?? null,
       retries: 0,
       ...(stats ? { stats } : {}),
@@ -716,12 +728,12 @@ export class DestinationRunner {
     switch (ev?.type) {
       case 'warning':
         this.healthWarning = cleanText(ev.message) || null;
-        if (this.phase === 'live') this.set({ message: this.healthWarning });
+        if (this.phase === 'live') this.set({ message: this.liveWarning() });
         return;
       case 'ok':
         if (this.healthWarning === null) return;
         this.healthWarning = null;
-        if (this.phase === 'live') this.set({ message: null });
+        if (this.phase === 'live') this.set({ message: this.liveWarning() });
         return;
       case 'ended':
         await this.takedown(cleanText(ev.reason) || 'ended by the platform');
@@ -904,6 +916,7 @@ export class DestinationRunner {
     this.healthCtl?.abort();
     this.healthCtl = null;
     this.healthWarning = null;
+    this.pushWarning = null;
     this.set({ viewers: null }); // nobody watches a live that is gone (no-op when already unknown)
     this.confirmCtl?.abort();
     this.confirmCtl = null;

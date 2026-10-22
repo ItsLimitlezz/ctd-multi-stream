@@ -374,6 +374,32 @@ describe('PushSupervisor', () => {
       }
     });
 
+    it('warns while encoding runs slower than real time, and clears when it keeps up again', async () => {
+      vi.useRealTimers();
+      const { startFakeIngest } = await import('./rtmp-test-server.js');
+      const ingest = await startFakeIngest();
+      try {
+        const { sup, sp, events } = setup();
+        sup.start('d1', ivsPlan(ingest.port));
+        await until(() => sp.calls.length === 1);
+        const fd3 = sp.calls[0]!.child.fd3;
+        let t = 0;
+        const block = (speed: number) => {
+          t += 2_000_000;
+          fd3.write(`out_time_us=${t}\ntotal_size=${t}\nspeed=${speed}x\nprogress=continue\n`);
+        };
+        for (let i = 0; i < 5; i++) block(1); // first 10 s: grace
+        for (let i = 0; i < 4; i++) block(0.8);
+        await until(() => events.some((e) => e.status === 'running' && e.message !== null));
+        expect(events.findLast((e) => e.status === 'running')?.message).toMatch(/can't encode Twitch Dual Format fast enough \(0\.80× real time\)/);
+        for (let i = 0; i < 4; i++) block(1);
+        await until(() => events.findLast((e) => e.status === 'running')?.message === null);
+        await sup.stop('d1');
+      } finally {
+        await ingest.close();
+      }
+    });
+
     it('stops FFmpeg and retries when Twitch refuses the stream, saying why', async () => {
       vi.useRealTimers();
       const { startFakeIngest } = await import('./rtmp-test-server.js');

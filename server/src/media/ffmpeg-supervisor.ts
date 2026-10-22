@@ -109,6 +109,18 @@ export function explainFfmpegError(line: string): string | null {
   return null;
 }
 
+/** 'ivs' encoding below this speed counts as falling behind (live input runs at 1.00× when it keeps up). */
+const SLOW_SPEED = 0.95;
+/** Consecutive progress blocks (~2 s each) before the slow warning is set or cleared. */
+const SLOW_BLOCKS = 4;
+/** Ignore the first seconds: FFmpeg starts with a burst and its speed figure settles after that. */
+const SLOW_GRACE_US = 10_000_000;
+
+/** The card warning while the server can't encode Twitch Dual Format in real time. */
+export function slowEncodeMessage(speed: number): string {
+  return `This server can't encode Twitch Dual Format fast enough (${speed.toFixed(2)}× real time), so viewers will see stutters. Close other heavy apps on the server, or use "OBS sends Dual Format directly".`;
+}
+
 /** A failed Twitch Dual Format connection (RtmpPublisher) in plain words. */
 export function publishErrorMessage(detail: string): string {
   const friendly = explainFfmpegError(detail);
@@ -134,6 +146,10 @@ interface Push {
   /** 'ivs' mode: Relay publishes FFmpeg's output itself (IvsForwarder); why that connection failed. */
   forwarder: IvsForwarder | null;
   forwardMessage: string | null;
+  /** 'ivs': set while encoding runs slower than real time (shown on the card while live). */
+  slowMessage: string | null;
+  slowBlocks: number;
+  goodBlocks: number;
   runningSince: number | null;
   lastStatsAt: number;
   lines: string[];
@@ -209,6 +225,29 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
     }, stallTimeoutMs);
   }
 
+  /**
+   * 'ivs' pushes encode on this server: warn while FFmpeg runs slower than real time (the feed is
+   * live, so speed sits at 1.00× when the CPU keeps up). Set after SLOW_BLOCKS slow progress blocks
+   * in a row, cleared after as many good ones.
+   */
+  function trackSpeed(p: Push, block: ProgressBlock): void {
+    if (p.plan.mode !== 'ivs' || block.speed <= 0 || block.outTimeUs < SLOW_GRACE_US) return;
+    if (block.speed < SLOW_SPEED) {
+      p.goodBlocks = 0;
+      if (++p.slowBlocks >= SLOW_BLOCKS && !p.slowMessage) {
+        p.slowMessage = slowEncodeMessage(block.speed);
+        p.log.warn({ speed: block.speed }, 'twitch dual format: encoding slower than real time');
+      }
+    } else {
+      p.slowBlocks = 0;
+      if (p.slowMessage && ++p.goodBlocks >= SLOW_BLOCKS) {
+        p.slowMessage = null;
+        p.goodBlocks = 0;
+        p.log.info({ speed: block.speed }, 'twitch dual format: encoding keeps up again');
+      }
+    }
+  }
+
   function onProgress(p: Push, block: ProgressBlock, stats: PushStats): void {
     if (p.stopped) return;
     const t = now();
@@ -220,9 +259,11 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
       emit(p, 'running', null, stats);
       return;
     }
-    if (t - p.lastStatsAt >= STATS_INTERVAL_MS - STATS_JITTER_MS) {
+    const wasSlow = p.slowMessage;
+    trackSpeed(p, block);
+    if (t - p.lastStatsAt >= STATS_INTERVAL_MS - STATS_JITTER_MS || p.slowMessage !== wasSlow) {
       p.lastStatsAt = t;
-      emit(p, 'running', null, stats);
+      emit(p, 'running', p.slowMessage, stats);
     }
   }
 
@@ -270,6 +311,9 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
     p.lines = [];
     p.stallMessage = null;
     p.forwardMessage = null;
+    p.slowMessage = null;
+    p.slowBlocks = 0;
+    p.goodBlocks = 0;
     p.runningSince = null;
 
     // 'ivs': stdout carries the FLV stream Relay publishes; progress goes to fd 3.
@@ -382,6 +426,9 @@ export function createPushSupervisor({ config, bus, log, media, repos }: PushSup
         stallMessage: null,
         forwarder: null,
         forwardMessage: null,
+        slowMessage: null,
+        slowBlocks: 0,
+        goodBlocks: 0,
         runningSince: null,
         lastStatsAt: 0,
         lines: [],

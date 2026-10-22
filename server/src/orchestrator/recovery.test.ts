@@ -256,6 +256,24 @@ describe('takedown via the health watcher', () => {
     expect(h.destState('ig')).toMatchObject({ phase: 'live', message: null });
   });
 
+  it('a running push’s own warning shows while live, under a platform warning, and clears', async () => {
+    const a = igLive();
+    const h = igHarness(scripted([a.live]));
+    await liveNow(h);
+    h.pushes.emit('ig', 'running', { message: 'Encoding slower than real time' });
+    await flush();
+    expect(h.destState('ig')).toMatchObject({ phase: 'live', message: 'Encoding slower than real time' });
+    a.health.emit({ type: 'warning', message: 'Viewer count unavailable' });
+    await flush();
+    expect(h.destState('ig').message).toBe('Viewer count unavailable'); // the platform's comes first
+    a.health.emit({ type: 'ok' });
+    await flush();
+    expect(h.destState('ig').message).toBe('Encoding slower than real time');
+    h.pushes.running('ig'); // no message any more
+    await flush();
+    expect(h.destState('ig')).toMatchObject({ phase: 'live', message: null });
+  });
+
   it('restarts a failing health watcher with backoff while live', async () => {
     const a = igLive();
     a.health.throwNext = 3;
