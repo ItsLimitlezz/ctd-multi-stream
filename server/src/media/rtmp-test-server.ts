@@ -14,6 +14,8 @@ export interface ReceivedMessage {
 export interface FakeIngestOptions {
   /** Answer publish with this error status code instead of NetStream.Publish.Start. */
   refusePublish?: string;
+  /** Port to listen on (default: any free one). */
+  port?: number;
 }
 
 export interface FakeIngest {
@@ -139,7 +141,7 @@ export async function startFakeIngest(opts: FakeIngestOptions = {}): Promise<Fak
       }
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => server.listen(opts.port ?? 0, '127.0.0.1', resolve));
   return {
     port: (server.address() as net.AddressInfo).port,
     messages,

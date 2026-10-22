@@ -57,6 +57,17 @@ Useful environment variables while developing (all in [`.env.example`](../.env.e
 
 `npm run dev` doesn't read `.env` files. Set variables in the shell, or run `node --env-file=.env …` yourself.
 
+### Going live locally without OBS or a platform
+
+`npm run dev:sim` (scripts/dev-sim.mts) turns a running dev server into a complete live rig:
+
+- **Fake OBS:** it publishes FFmpeg test patterns to the landscape (1920x1080@60) and vertical (1080x1920@30) feeds, with 2 s keyframes, and restarts them if they stop.
+- **Fake platform:** it starts a fake RTMP platform on `127.0.0.1:19400` and points a Custom RTMP destination, "Local sink (dev-sim)", at it.
+
+Start a session in the web UI (or turn on auto go-live) and Relay goes live end to end: the feed cards, destination cards and stats all move. Press Ctrl+C to stop everything.
+
+It signs in with `SIM_USER` / `SIM_PASS`, else with `data-dev/TEST-CREDENTIALS.txt` (git-ignored). `SIM_BASE` sets the server address (default `http://localhost:8443`), `SIM_SINK_PORT` the fake platform's port, and `SIM_VERTICAL=0` sends landscape only.
+
 ## Tests and checks
 
 ```bash
