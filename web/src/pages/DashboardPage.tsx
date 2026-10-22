@@ -54,6 +54,14 @@ import {
 
 export const TITLE_MAX = 140;
 const FEED_LABEL: Record<Feed, string> = { landscape: 'Landscape', vertical: 'Vertical' };
+
+/** What a destination sends: its feed, or both for Twitch Dual Format. */
+export function feedBadge(dest: Pick<Destination, 'platform' | 'feed' | 'options'>): { text: string; title?: string } {
+  const dual = dest.platform === 'twitch' ? dest.options?.dualFormat : undefined;
+  if (dual === 'relay-multitrack') return { text: 'Dual Format', title: 'Landscape + vertical: Relay encodes both feeds for Twitch' };
+  if (dual === 'obs-direct') return { text: 'Dual Format (OBS)', title: 'OBS sends Dual Format to Twitch itself' };
+  return { text: FEED_LABEL[dest.feed] };
+}
 const BANDWIDTH_TEST_TITLE =
   'This destination has "Bandwidth test" on: Twitch receives the video but nobody sees it and the channel stays offline. Turn it off in Destinations for a real stream.';
 const ACTIVE_PHASES: ReadonlySet<DestinationPhase> = new Set([
@@ -756,7 +764,9 @@ export function DestinationCard({
               Bandwidth test: not public
             </Badge>
           )}
-          <Badge tone="neutral">{FEED_LABEL[dest.feed]}</Badge>
+          <Badge tone="neutral" title={feedBadge(dest).title}>
+            {feedBadge(dest).text}
+          </Badge>
           {viewers !== null && (
             <span className="dest-viewers" title={viewersLabel(viewers)}>
               <EyeIcon width={14} height={14} />
