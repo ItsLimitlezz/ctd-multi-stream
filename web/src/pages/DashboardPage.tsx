@@ -327,7 +327,7 @@ export function StatusCard({ session }: { session: SessionState | null }) {
           </div>
           {session.status === 'offline' ? (
             <Button
-              variant="primary"
+              variant="hot"
               size="lg"
               icon={<BroadcastIcon width={18} height={18} />}
               loading={busy === 'start'}

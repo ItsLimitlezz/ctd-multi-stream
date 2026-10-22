@@ -2,7 +2,8 @@ import type { ButtonHTMLAttributes, ReactNode, Ref } from 'react';
 import { Spinner } from './Spinner';
 import { cx } from './utils';
 
-export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost';
+/** 'hot' = live / on-air actions (Go live): the magenta button. */
+export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost' | 'hot';
 export type ButtonSize = 'sm' | 'md' | 'lg';
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {

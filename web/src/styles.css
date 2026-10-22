@@ -1,84 +1,138 @@
-/* CTD Relay design system. Dark by default, light via prefers-color-scheme.
-   No external fonts or assets (CSP is 'self' only). */
+/* CTD Relay design system, from the CineTech Digital (CTD) brand system: the Night theme by default
+   (near-black stage, cyan + magenta), Paper via prefers-color-scheme: light. Fonts are bundled in
+   /fonts (CSP is 'self' only): Chakra Petch for display, Space Grotesk for headings, Space Mono for
+   everything you read or act on. Corners are square or 4px; depth is hard offsets, not blur. */
+
+@font-face {
+  font-family: 'Chakra Petch';
+  src: url('/fonts/ChakraPetch-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  src: url('/fonts/ChakraPetch-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Mono';
+  src: url('/fonts/SpaceMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Mono';
+  src: url('/fonts/SpaceMono-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
 
 :root {
   color-scheme: dark;
-  --bg: #0d1015;
-  --bg-elev: #151a21;
-  --bg-elev-2: #1b2129;
-  --bg-sunken: #0a0c10;
-  --bg-hover: #222934;
-  --border: #252d38;
-  --border-strong: #36404e;
-  --text: #e7ebf0;
-  --text-muted: #9ba6b4;
-  --text-faint: #6a7585;
-  --accent: #7c6cff;
-  --accent-hover: #9083ff;
-  --accent-fg: #ffffff;
-  --accent-soft: rgb(124 108 255 / 0.16);
-  --success: #34c77b;
-  --success-soft: rgb(52 199 123 / 0.15);
+  /* void / surface / surface-raised */
+  --bg: #04070c;
+  --bg-elev: #08111a;
+  --bg-elev-2: #0b1821;
+  --bg-sunken: #04070c;
+  --bg-hover: #10222c;
+  /* line / line-strong (a step brighter than the brand's 1.4:1 so controls stay visible) */
+  --border: #1a2127;
+  --border-strong: #2a3540;
+  /* ink / ink-muted */
+  --text: #f2fbff;
+  --text-muted: #8ba3af;
+  --text-faint: #6f8794;
+  /* cyan: fills (with on-accent labels), focus, selection; --accent-text for cyan as text */
+  --accent: #39e7ff;
+  --accent-hover: #7aeeff;
+  --accent-fg: #04070c;
+  --accent-soft: #0d2b33;
+  --accent-text: #39e7ff;
+  /* magenta: the on-air colour */
+  --magenta: #ff00b8;
+  --success: #23d161;
+  --success-soft: rgb(35 209 97 / 0.14);
   --warn: #f2aa3c;
-  --warn-soft: rgb(242 170 60 / 0.16);
-  --danger: #f2545e;
-  --danger-hover: #ff6b74;
-  --danger-soft: rgb(242 84 94 / 0.16);
-  --info: #4d9bff;
-  --info-soft: rgb(77 155 255 / 0.15);
-  --live: #ff3045;
-  --live-soft: rgb(255 48 69 / 0.18);
+  --warn-soft: rgb(242 170 60 / 0.14);
+  --danger: #ff5a6e;
+  --danger-hover: #ff7d8d;
+  --danger-fg: #04070c;
+  --danger-soft: rgb(255 90 110 / 0.14);
+  --info: #39e7ff;
+  --info-soft: rgb(57 231 255 / 0.1);
+  --live: #ff00b8;
+  --live-soft: rgb(255 0 184 / 0.14);
   /* Session test mode (orange, distinct from the amber warnings). */
   --test: #ff8a1f;
-  --test-soft: rgb(255 138 31 / 0.15);
-  --neutral: #8b96a5;
-  --neutral-soft: rgb(139 150 165 / 0.15);
-  --focus-ring: 0 0 0 3px rgb(124 108 255 / 0.5);
-  --shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 10px 30px rgb(0 0 0 / 0.3);
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
-  --radius-sm: 6px;
-  --radius: 10px;
-  --radius-lg: 14px;
-  --font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, 'Cascadia Mono', 'Segoe UI Mono', Menlo, Consolas, monospace;
+  --test-fg: #04070c;
+  --test-soft: rgb(255 138 31 / 0.14);
+  --neutral: #8ba3af;
+  --neutral-soft: rgb(139 163 175 / 0.13);
+  /* A solid 2px cyan ring, 2px off the control. */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  --shadow: 0 16px 40px rgb(0 0 0 / 0.55);
+  --shadow-sm: none;
+  --shadow-offset-magenta: 4px 4px 0 0 var(--magenta);
+  --shadow-offset-cyan: 5px 5px 0 0 var(--accent);
+  --radius-sm: 4px;
+  --radius: 4px;
+  --radius-lg: 4px;
+  --font: 'Space Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --mono: 'Space Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-heading: 'Space Grotesk', system-ui, sans-serif;
+  --font-display: 'Chakra Petch', 'Arial Narrow', system-ui, sans-serif;
   --topbar-h: 56px;
   --gutter: 16px;
 }
 
 @media (prefers-color-scheme: light) {
+  /* Paper: cyan and magenta keep their fills; as text they darken (cyan-text, magenta-text). */
   :root {
     color-scheme: light;
-    --bg: #f4f5f7;
+    --bg: #f2fbff;
     --bg-elev: #ffffff;
-    --bg-elev-2: #f7f8fa;
-    --bg-sunken: #eef0f3;
-    --bg-hover: #eceef2;
-    --border: #e1e4e9;
-    --border-strong: #c9ced6;
-    --text: #151a21;
-    --text-muted: #5b6574;
-    --text-faint: #8a93a1;
-    --accent: #5e4ae3;
-    --accent-hover: #4f3bd4;
-    --accent-soft: rgb(94 74 227 / 0.1);
-    --success: #198a51;
-    --success-soft: rgb(25 138 81 / 0.12);
-    --warn: #b56b00;
-    --warn-soft: rgb(214 140 20 / 0.15);
-    --danger: #d4303b;
-    --danger-hover: #b8242e;
-    --danger-soft: rgb(212 48 59 / 0.1);
-    --info: #1f6fd6;
-    --info-soft: rgb(31 111 214 / 0.1);
-    --live: #e0182d;
-    --live-soft: rgb(224 24 45 / 0.12);
-    --test: #c45a00;
+    --bg-elev-2: #e3eef3;
+    --bg-sunken: #ffffff;
+    --bg-hover: #dbe8ee;
+    --border: #cfdbe2;
+    --border-strong: #788a95;
+    --text: #04070c;
+    --text-muted: #4f6470;
+    --text-faint: #5d717c;
+    --accent-hover: #00d3f0;
+    --accent-soft: #d4f8ff;
+    --accent-text: #00708a;
+    --success: #12823e;
+    --success-soft: rgb(18 130 62 / 0.1);
+    --warn: #9a5b00;
+    --warn-soft: rgb(214 140 20 / 0.14);
+    --danger: #c8102e;
+    --danger-hover: #a50d26;
+    --danger-fg: #ffffff;
+    --danger-soft: rgb(200 16 46 / 0.08);
+    --info: #00708a;
+    --info-soft: rgb(0 112 138 / 0.08);
+    --live: #b8007f;
+    --live-soft: rgb(184 0 127 / 0.08);
+    --test: #b35000;
+    --test-fg: #ffffff;
     --test-soft: rgb(235 120 20 / 0.12);
-    --neutral: #6b7584;
-    --neutral-soft: rgb(107 117 132 / 0.12);
-    --focus-ring: 0 0 0 3px rgb(94 74 227 / 0.35);
-    --shadow: 0 1px 2px rgb(16 24 40 / 0.06), 0 8px 24px rgb(16 24 40 / 0.08);
-    --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.06);
+    --neutral: #4f6470;
+    --neutral-soft: rgb(79 100 112 / 0.1);
+    --shadow: 0 12px 32px rgb(4 7 12 / 0.14);
   }
 }
 
@@ -100,34 +154,40 @@ body {
   min-height: 100dvh;
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.5 var(--font);
+  font: 13.5px/1.55 var(--font);
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
 
+/* Headings: Space Grotesk, uppercase; the page title in the chamfered display face. */
 h1,
 h2,
 h3,
 h4 {
   margin: 0;
-  line-height: 1.25;
-  font-weight: 650;
+  line-height: 1.15;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.01em;
 }
 h1 {
-  font-size: 1.5rem;
+  font-family: var(--font-display);
+  font-size: 2rem;
+  line-height: 0.95;
 }
 h2 {
-  font-size: 1.125rem;
+  font-size: 1.1rem;
 }
 h3 {
-  font-size: 1rem;
+  font-size: 0.98rem;
 }
 p {
   margin: 0;
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: none;
 }
 a:hover {
@@ -252,23 +312,28 @@ img {
   justify-content: center;
   gap: 8px;
   min-height: 38px;
-  padding: 0 14px;
+  padding: 0 16px;
   border: 1px solid var(--btn-border);
-  border-radius: var(--radius-sm);
+  border-radius: 0;
   background: var(--btn-bg);
   color: var(--btn-fg);
-  font-weight: 560;
-  font-size: 0.93rem;
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 0.74rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
   text-decoration: none;
   user-select: none;
   transition:
-    background-color 0.12s,
-    border-color 0.12s,
-    color 0.12s,
-    opacity 0.12s;
+    background-color 0.08s,
+    border-color 0.08s,
+    color 0.08s,
+    opacity 0.08s,
+    transform 0.08s linear,
+    box-shadow 0.08s linear;
 }
 .btn:hover:not(:disabled) {
   background: var(--btn-hover);
@@ -282,17 +347,44 @@ img {
   cursor: progress;
   opacity: 0.85;
 }
+/* The main action: cyan fill, dark label, hard magenta offset that snaps on press. */
 .btn-primary {
   --btn-bg: var(--accent);
   --btn-fg: var(--accent-fg);
   --btn-border: var(--accent);
   --btn-hover: var(--accent-hover);
+  box-shadow: var(--shadow-offset-magenta);
+}
+.btn-primary:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+}
+.btn-primary:active:not(:disabled) {
+  transform: translate(3px, 3px);
+  box-shadow: none;
+}
+.btn-primary:disabled {
+  box-shadow: none;
 }
 .btn-danger {
   --btn-bg: var(--danger);
-  --btn-fg: #fff;
+  --btn-fg: var(--danger-fg);
   --btn-border: var(--danger);
   --btn-hover: var(--danger-hover);
+}
+/* Live / on-air actions ("Go live"): magenta fill with the cyan offset. */
+.btn-hot {
+  --btn-bg: var(--magenta);
+  --btn-fg: var(--accent-fg);
+  --btn-border: var(--magenta);
+  --btn-hover: #ff3dca;
+  box-shadow: var(--shadow-offset-cyan);
+}
+.btn-hot:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+}
+.btn-hot:active:not(:disabled) {
+  transform: translate(3px, 3px);
+  box-shadow: none;
 }
 .btn-ghost {
   --btn-bg: transparent;
@@ -305,14 +397,15 @@ img {
 }
 .btn-sm {
   min-height: 30px;
-  padding: 0 10px;
-  font-size: 0.85rem;
+  padding: 0 11px;
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
   gap: 6px;
 }
 .btn-lg {
   min-height: 46px;
-  padding: 0 22px;
-  font-size: 1rem;
+  padding: 0 24px;
+  font-size: 0.8rem;
 }
 .btn-block {
   display: flex;
@@ -376,13 +469,16 @@ img {
   min-width: 0;
 }
 .card-title {
-  font-size: 1rem;
-  font-weight: 650;
+  font-family: var(--font-heading);
+  font-size: 0.98rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 .card-subtitle {
-  margin-top: 2px;
+  margin-top: 4px;
   color: var(--text-muted);
-  font-size: 0.87rem;
+  font-size: 0.82rem;
 }
 .card-actions {
   display: flex;
@@ -406,9 +502,11 @@ img {
   min-width: 0;
 }
 .field-label {
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: var(--text);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
 .field-required {
   color: var(--danger);
@@ -530,7 +628,7 @@ img {
 }
 .toggle[aria-checked='true'] .toggle-thumb {
   transform: translateX(18px);
-  background: #fff;
+  background: var(--accent-fg);
 }
 .toggle:disabled {
   opacity: 0.55;
@@ -678,13 +776,15 @@ img {
   align-items: center;
   gap: 6px;
   height: 24px;
-  padding: 0 9px;
+  padding: 0 10px;
   border-radius: 999px;
   background: var(--tone-soft);
   color: var(--tone);
-  font-size: 0.78rem;
-  font-weight: 650;
-  letter-spacing: 0.01em;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   white-space: nowrap;
   vertical-align: middle;
 }
@@ -716,6 +816,14 @@ img {
 .tone-live {
   --tone: var(--live);
   --tone-soft: var(--live-soft);
+}
+/* Something actually on air: the solid magenta LIVE pill. */
+.badge.tone-live {
+  background: var(--magenta);
+  color: var(--accent-fg);
+}
+.badge.tone-live .dot {
+  background: var(--accent-fg);
 }
 .tone-accent {
   --tone: var(--accent);
@@ -866,14 +974,17 @@ img {
   align-items: center;
   gap: 6px;
   flex: none;
-  padding: 10px 14px;
+  padding: 11px 14px;
   border: 0;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
   background: none;
   color: var(--text-muted);
-  font-weight: 600;
-  font-size: 0.92rem;
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   cursor: pointer;
 }
 .tab:hover {
@@ -917,7 +1028,7 @@ img {
   border-radius: var(--radius-lg);
   background: var(--bg-elev);
   color: var(--text);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-offset-cyan);
   overflow: hidden;
 }
 .modal-sm {
@@ -978,8 +1089,7 @@ img {
   align-items: flex-start;
   gap: 10px;
   padding: 10px 6px 10px 14px;
-  border: 1px solid var(--border);
-  border-left: 4px solid var(--tone);
+  border: 1px solid color-mix(in srgb, var(--tone) 55%, var(--border));
   border-radius: var(--radius);
   background: var(--bg-elev);
   box-shadow: var(--shadow);
@@ -1050,9 +1160,11 @@ img {
   flex: none;
   margin-right: 12px;
   color: var(--text);
+  font-family: var(--font-display);
   font-weight: 700;
-  font-size: 1rem;
-  letter-spacing: -0.01em;
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 .brand:hover {
   text-decoration: none;
@@ -1076,8 +1188,11 @@ img {
   padding: 0 12px;
   border-radius: var(--radius-sm);
   color: var(--text-muted);
-  font-weight: 560;
-  font-size: 0.93rem;
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 .nav-link:hover {
@@ -1086,7 +1201,7 @@ img {
   text-decoration: none;
 }
 .nav-link[aria-current='page'] {
-  color: var(--text);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 .nav-toggle {
@@ -1106,8 +1221,11 @@ img {
   border-radius: 999px;
   background: var(--bg-elev-2);
   color: var(--text-muted);
-  font-size: 0.82rem;
-  font-weight: 650;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   white-space: nowrap;
   flex: none;
 }
@@ -1119,10 +1237,17 @@ img {
   width: 8px;
   height: 8px;
 }
+/* On air: the solid magenta LIVE pill (dark label and dot on magenta). */
 .live-pill.is-live {
-  border-color: color-mix(in srgb, var(--live) 50%, transparent);
-  background: var(--live-soft);
-  color: var(--live);
+  border-color: var(--magenta);
+  background: var(--magenta);
+  color: var(--accent-fg);
+}
+.live-pill.is-live .dot {
+  background: var(--accent-fg);
+}
+.live-pill.is-live .live-elapsed {
+  color: var(--accent-fg);
 }
 .live-pill.is-warn {
   color: var(--warn);
@@ -1170,7 +1295,7 @@ img {
   height: 28px;
   border-radius: 50%;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 700;
   font-size: 0.85rem;
   text-transform: uppercase;
@@ -1443,7 +1568,7 @@ img {
   display: inline-flex;
   flex: none;
   width: 16px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .profile-menu-manage {
   gap: 10px;
@@ -1525,7 +1650,7 @@ img {
 }
 .pairing-banner > svg {
   flex: none;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .pairing-banner-text {
   flex: 1 1 200px;
@@ -1583,8 +1708,11 @@ img {
   height: 40px;
 }
 .auth-brand-name {
+  font-family: var(--font-display);
   font-weight: 700;
-  font-size: 1.1rem;
+  font-size: 1.35rem;
+  text-transform: uppercase;
+  line-height: 1;
 }
 .auth-steps {
   margin: 0;
@@ -1672,11 +1800,15 @@ img {
 .status-card {
   overflow: hidden;
 }
+/* Live: a magenta frame with the hard cyan offset, on the faint monitor grid. Flat, no gradient. */
 .status-card.is-live {
-  border-color: color-mix(in srgb, var(--live) 45%, var(--border));
-  background:
-    linear-gradient(135deg, var(--live-soft), transparent 55%),
-    var(--bg-elev);
+  border-color: var(--magenta);
+  box-shadow: var(--shadow-offset-cyan);
+  background-color: var(--bg-elev);
+  background-image:
+    linear-gradient(var(--bg-elev-2) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bg-elev-2) 1px, transparent 1px);
+  background-size: 32px 32px;
 }
 .status-card.is-starting,
 .status-card.is-stopping {
@@ -1704,10 +1836,11 @@ img {
   align-items: baseline;
   flex-wrap: wrap;
   gap: 4px 12px;
-  font-size: 1.6rem;
-  font-weight: 750;
-  letter-spacing: -0.01em;
-  line-height: 1.15;
+  font-family: var(--font-display);
+  font-size: 2.1rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  line-height: 1;
 }
 .status-card.is-live .status-label {
   color: var(--live);
@@ -1817,10 +1950,11 @@ img {
   padding: 3px 10px;
   border-radius: 999px;
   background: var(--test);
-  color: #fff;
-  font-size: 0.82rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
+  color: var(--test-fg);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 .test-banner-summary {
   flex: 1 1 260px;
